@@ -13,7 +13,6 @@ use crate::thrift::{Protocol, TValue, Value};
 pub const DEFAULT_LIFF_ID: &str = "2006747340-AoraPvdD";
 const SHARE_URL: &str = "https://api.line.me/message/v3/share";
 const CONSENT_API_URL: &str = "https://access.line.me/dialog/api/permissions";
-const AUTH_CONSENT_URL: &str = "https://access.line.me/oauth2/v2.1/authorize/consent";
 const ERROR_NAME: &str = "LiffServiceError";
 
 /// "Sent by" override of a text message.
@@ -97,14 +96,6 @@ pub(crate) fn issue_liff_view_args(liff_id: &str, chat_mid: Option<&str>, lang: 
     )]
 }
 
-/// Extract the CSRF token from the consent page.
-pub(crate) fn find_csrf(html: &str) -> Option<&str> {
-    const MARK: &str = r#"<input type="hidden" name="__csrf" id="__csrf" value=""#;
-    let start = html.find(MARK)? + MARK.len();
-    let len = html[start..].find('"')?;
-    Some(&html[start..start + len])
-}
-
 /// LIFF operations bound to a [`Client`] (see [`Client::liff`]).
 #[derive(Clone, Copy)]
 pub struct Liff<'a> {
@@ -163,13 +154,13 @@ impl Liff<'_> {
                     && let (Some(channel_id), Some(consent_url)) =
                         (consent["channelId"].as_str(), consent["consentUrl"].as_str())
                 {
+                    // The consent page works for every device; the mobile
+                    // permissions API answers 200 without granting permissions
+                    // it does not list (such as `OC`), so it is the fallback.
                     let to_type = opts.chat_mid.as_deref().and_then(crate::base::BaseClient::get_to_type);
-                    let desktop = self.client.base.device.as_str().starts_with("DESKTOP");
-                    let ok = if to_type == Some(4) || desktop {
-                        self.try_consent_authorize(consent_url, channel_id).await?
-                    } else {
-                        self.try_consent_liff(channel_id).await?
-                    };
+                    let mobile = to_type != Some(4) && !self.client.base.device.as_str().starts_with("DESKTOP");
+                    let ok = self.try_consent_authorize(consent_url, channel_id).await?
+                        || (mobile && self.try_consent_liff(channel_id).await?);
                     if ok {
                         try_consent = false;
                         continue;
@@ -226,16 +217,13 @@ impl Liff<'_> {
             .map(|v| v.split(';').next().unwrap_or("").to_string())
             .collect();
         let html = res.text().await?;
-        let Some(csrf) = find_csrf(&html) else { return Ok(false) };
-        let perms = ["P", "CM", "OC"];
-        let all: Vec<String> = perms.iter().map(|p| format!("allPermission={p}")).collect();
-        let approved: Vec<String> = perms.iter().map(|p| format!("approvedPermission={p}")).collect();
-        let body = format!(
-            "{}&{}&__WLS=&channelId={channel_id}&__csrf={csrf}&allow=true",
-            all.join("&"),
-            approved.join("&")
-        );
-        let mut req = base.http.post(AUTH_CONSENT_URL).header("cookie", cookies.join("; ")).header("referer", consent_url);
+        let Some((post_url, body)) = crate::service::liff::consent_form(&html, channel_id) else { return Ok(false) };
+        let mut req = base
+            .http
+            .post(post_url)
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .header("cookie", cookies.join("; "))
+            .header("referer", consent_url);
         for (k, v) in &headers {
             req = req.header(*k, v);
         }
@@ -349,7 +337,5 @@ mod tests {
         let args = issue_liff_view_args("id", None, "ja_JP");
         let TValue::Struct(req) = &args[0].1 else { panic!() };
         assert_eq!(req[1].1, TValue::Struct(vec![(1, TValue::Struct(vec![]))]));
-        assert_eq!(find_csrf(r#"x<input type="hidden" name="__csrf" id="__csrf" value="tok">y"#), Some("tok"));
-        assert_eq!(find_csrf("nothing"), None);
     }
 }

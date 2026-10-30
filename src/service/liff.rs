@@ -59,12 +59,58 @@ pub(crate) fn issue_liff_view_args(liff_id: &str, chat_mid: Option<&str>, lang: 
     )]
 }
 
-/// Extract `__csrf` from the consent page.
-fn find_csrf(html: &str) -> Option<&str> {
+/// The JSON the consent page keeps in its `app-data` attribute: the form's
+/// hidden fields (`slots.serverside_field`), the permissions it asks for
+/// (`props.authz-allow-newly`) and where the form posts (`props.post-url`).
+fn consent_app_data(html: &str) -> Option<serde_json::Value> {
+    const MARK: &str = "app-data=\"";
+    let start = html.find(MARK)? + MARK.len();
+    let len = html[start..].find('"')?;
+    let raw = html[start..start + len]
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&");
+    serde_json::from_str(&raw).ok()
+}
+
+/// What tapping "Allow" on the consent page posts, as `(url, form body)`.
+///
+/// The page is a script app now: its form lives in the `app-data` JSON, and
+/// it posts each hidden field, `allPermission`/`approvedPermission` for every
+/// newly asked permission, and `allow=true`. Older pages had a plain
+/// `__csrf` input; for those the usual `P`, `CM` and `OC` are approved.
+pub(crate) fn consent_form(html: &str, channel_id: &str) -> Option<(String, String)> {
+    let mut form = url::form_urlencoded::Serializer::new(String::new());
+    if let Some(data) = consent_app_data(html) {
+        for field in data["slots"]["serverside_field"].as_array()? {
+            form.append_pair(field["name"].as_str()?, field["value"].as_str().unwrap_or(""));
+        }
+        for permission in data["props"]["authz-allow-newly"].as_array().into_iter().flatten() {
+            if let Some(code) = permission["code"].as_str() {
+                form.append_pair("allPermission", code);
+                form.append_pair("approvedPermission", code);
+            }
+        }
+        form.append_pair("allow", "true");
+        let post = data["props"]["post-url"].as_str().unwrap_or("/oauth2/v2.1/authorize/consent");
+        let url = if post.starts_with("https://") { post.to_string() } else { format!("https://access.line.me{post}") };
+        return Some((url, form.finish()));
+    }
     const PREFIX: &str = r#"<input type="hidden" name="__csrf" id="__csrf" value=""#;
     let start = html.find(PREFIX)? + PREFIX.len();
-    let len = html[start..].find("\">")?;
-    Some(&html[start..start + len])
+    let csrf = &html[start..start + html[start..].find('"')?];
+    let permissions = ["P", "CM", "OC"];
+    for p in permissions {
+        form.append_pair("allPermission", p);
+    }
+    for p in permissions {
+        form.append_pair("approvedPermission", p);
+    }
+    form.append_pair("__WLS", "").append_pair("channelId", channel_id).append_pair("__csrf", csrf);
+    form.append_pair("allow", "true");
+    Some((AUTH_CONSENT_URL.to_string(), form.finish()))
 }
 
 impl LiffService<'_> {
@@ -95,12 +141,14 @@ impl LiffService<'_> {
                     if let (Some(channel_id), Some(consent_url)) =
                         (consent["channelId"].as_str(), consent["consentUrl"].as_str())
                     {
+                        // The consent page works for every device. The mobile
+                        // permissions API answers 200 without granting
+                        // permissions it does not list (such as `OC`), so it
+                        // is only the fallback.
                         let to_type = options.chat_mid.as_deref().and_then(BaseClient::get_to_type);
-                        let granted = if to_type == Some(4) || self.client.device.as_str().starts_with("DESKTOP") {
-                            self.try_consent_authorize(consent_url, channel_id).await?
-                        } else {
-                            self.try_consent_liff(channel_id, None).await?
-                        };
+                        let mobile = to_type != Some(4) && !self.client.device.as_str().starts_with("DESKTOP");
+                        let granted = self.try_consent_authorize(consent_url, channel_id).await?
+                            || (mobile && self.try_consent_liff(channel_id, None).await?);
                         if granted {
                             try_consent = false;
                             continue;
@@ -176,7 +224,6 @@ impl LiffService<'_> {
     }
 
     async fn try_consent_authorize(&self, consent_url: &str, channel_id: &str) -> Result<bool> {
-        let permissions = ["P", "CM", "OC"];
         let token = self.client.require_token()?;
         let user_agent = self.client.device_details.user_agent();
         let application = self.client.device_details.application();
@@ -200,14 +247,12 @@ impl LiffService<'_> {
             .map(|v| v.split(';').next().unwrap_or_default().to_string())
             .collect();
         let html = res.text().await?;
-        let Some(csrf) = find_csrf(&html) else { return Ok(false) };
-        let all = permissions.iter().map(|p| format!("allPermission={p}")).collect::<Vec<_>>().join("&");
-        let approved = permissions.iter().map(|p| format!("approvedPermission={p}")).collect::<Vec<_>>().join("&");
-        let body = format!("{all}&{approved}&__WLS=&channelId={channel_id}&__csrf={csrf}&allow=true");
+        let Some((post_url, body)) = consent_form(&html, channel_id) else { return Ok(false) };
         let res = self
             .client
             .http
-            .post(AUTH_CONSENT_URL)
+            .post(post_url)
+            .header("Content-Type", "application/x-www-form-urlencoded")
             .header("X-Line-Access", &token)
             .header("User-Agent", &user_agent)
             .header("X-Line-Application", &application)
@@ -252,9 +297,25 @@ mod tests {
     }
 
     #[test]
-    fn csrf_extraction() {
+    fn consent_form_from_app_data() {
+        let html = concat!(
+            r#"<div id="app" app-data="{&quot;props&quot;:{&quot;post-url&quot;:&quot;/oauth2/v2.1/authorize/consent&quot;,"#,
+            r#"&quot;authz-allow-newly&quot;:[{&quot;code&quot;:&quot;OC&quot;,&quot;label&quot;:&quot;A &amp; B&quot;}]},"#,
+            r#"&quot;slots&quot;:{&quot;serverside_field&quot;:[{&quot;name&quot;:&quot;channelId&quot;,&quot;value&quot;:&quot;123&quot;},"#,
+            r#"{&quot;name&quot;:&quot;__csrf&quot;,&quot;value&quot;:&quot;tok&quot;}]}}"></div>"#,
+        );
+        let (url, body) = consent_form(html, "123").unwrap();
+        assert_eq!(url, AUTH_CONSENT_URL);
+        assert_eq!(body, "channelId=123&__csrf=tok&allPermission=OC&approvedPermission=OC&allow=true");
+    }
+
+    #[test]
+    fn consent_form_from_csrf_input() {
         let html = r#"<form><input type="hidden" name="__csrf" id="__csrf" value="tok-123"></form>"#;
-        assert_eq!(find_csrf(html), Some("tok-123"));
-        assert_eq!(find_csrf("<form></form>"), None);
+        let (url, body) = consent_form(html, "42").unwrap();
+        assert_eq!(url, AUTH_CONSENT_URL);
+        assert!(body.starts_with("allPermission=P&allPermission=CM&allPermission=OC&approvedPermission=P"));
+        assert!(body.ends_with("&__WLS=&channelId=42&__csrf=tok-123&allow=true"));
+        assert_eq!(consent_form("<form></form>", "42"), None);
     }
 }
