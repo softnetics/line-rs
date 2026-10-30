@@ -1,0 +1,49 @@
+[package]
+name = "line-rs"
+version = "0.1.0"
+edition = "2024"
+description = "Rust port of LINEJS, an unofficial LINE messenger client library"
+license = "MIT"
+repository = "https://github.com/softnetics/line-rs"
+readme = "README.md"
+keywords = ["line", "messenger", "thrift", "bot"]
+
+[dependencies]
+aes = "0.8"
+aes-gcm = "0.10"
+aes-gcm-siv = "0.11"
+async-trait = "0.1.92"
+base64 = "0.23.1"
+bytes = "1.12.1"
+cbc = "0.1"
+cipher = { version = "0.4", features = ["block-padding", "std"] }
+ctr = "0.9"
+ecb = { version = "0.1", features = ["alloc"] }
+futures = "0.3.34"
+hex = "0.4.3"
+hkdf = "0.12"
+hmac = "0.12"
+indexmap = "2.14.2"
+md5 = "0.7"
+num-bigint-dig = "0.8"
+rand = "0.8"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "gzip", "deflate", "http2", "json", "stream", "multipart", "socks"] }
+rsa = "0.9"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha1 = "0.10"
+sha2 = "0.10"
+thiserror = "2.0.21"
+tokio = { version = "1.53.2", features = ["full"] }
+tracing = "0.1.44"
+url = "2.5.8"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+
+[dev-dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+
+[[example]]
+name = "test_ui"
+path = "examples/test_ui/main.rs"
+test = true

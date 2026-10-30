@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>line-rs live tests</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #fff; --fg: #1b1f24; --muted: #5f6b7a; --border: #dde2e8;
+  --accent: #06a14b; --accent-fg: #fff; --danger: #c62828; --warn-bg: #fff4d6; --warn-fg: #6b4a00;
+  --pass: #1e8e3e; --fail: #c62828; --skip: #8a6d00; --run: #1565c0; --queue: #6a5acd; --idle: #8b95a1;
+  --code-bg: #f1f3f5; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111418; --panel: #1a1e24; --fg: #e6e9ed; --muted: #9aa5b1; --border: #2c323a;
+    --accent: #23c16b; --accent-fg: #0b0d10; --danger: #ef5350; --warn-bg: #3a2f10; --warn-fg: #ffd77a;
+    --pass: #4caf50; --fail: #ef5350; --skip: #e0b23c; --run: #64b5f6; --queue: #9f8fff; --idle: #6b7581;
+    --code-bg: #0f1216;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", "Noto Sans Thai", sans-serif; }
+header { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 5; }
+header h1 { font-size: 16px; margin: 0; }
+.spacer { flex: 1; }
+.pill { padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); font-size: 12px; color: var(--muted); }
+.pill b { color: var(--fg); font-family: var(--mono); font-weight: 500; }
+button { font: inherit; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--panel); color: var(--fg); cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--muted); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+button.danger { background: var(--danger); color: #fff; border-color: var(--danger); }
+button.sm { padding: 1px 8px; font-size: 12px; }
+input[type=text], input[type=password], input[type=number], select, textarea { font: inherit; padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); width: 100%; }
+label { color: var(--muted); font-size: 12px; }
+main { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 12px; padding: 12px 16px; }
+@media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+section.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+section.panel h2 { font-size: 14px; margin: 0 0 8px; }
+.risk { display: flex; gap: 10px; align-items: center; padding: 12px; border: 2px solid var(--danger); border-radius: 8px; background: var(--panel); margin: 12px 16px 0; font-size: 15px; font-weight: 600; cursor: pointer; }
+.risk input { width: 24px; height: 24px; accent-color: var(--danger); }
+.warn { background: var(--warn-bg); color: var(--warn-fg); border-radius: 6px; padding: 6px 8px; font-size: 12px; margin: 6px 0; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+@media (max-width: 600px) { .grid2 { grid-template-columns: 1fr; } }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.check { display: flex; gap: 6px; align-items: center; color: var(--fg); font-size: 13px; }
+#qr svg { width: 220px; height: 220px; display: block; background: #fff; padding: 6px; border-radius: 6px; }
+#pin { font: 600 32px var(--mono); letter-spacing: 6px; }
+#prompt { display: none; position: sticky; top: 49px; z-index: 4; margin: 12px 16px 0; padding: 10px 12px; border-radius: 8px; background: var(--warn-bg); color: var(--warn-fg); font-size: 15px; font-weight: 600; align-items: center; gap: 12px; }
+#prompt.on { display: flex; }
+#countdown { font-family: var(--mono); }
+.module { border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px; }
+.module-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.module-head h3 { font-size: 13px; margin: 0; font-family: var(--mono); }
+.test { border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; margin: 6px 0; }
+.test-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.tid { font-family: var(--mono); font-size: 12.5px; }
+.badge { font-size: 11px; font-weight: 600; text-transform: uppercase; padding: 1px 6px; border-radius: 4px; color: #fff; background: var(--idle); min-width: 58px; text-align: center; }
+.badge.pass { background: var(--pass); } .badge.fail { background: var(--fail); } .badge.skipped { background: var(--skip); }
+.badge.running { background: var(--run); } .badge.queued { background: var(--queue); }
+.dur { color: var(--muted); font-size: 12px; font-family: var(--mono); }
+.meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.meta code, .meta b { color: var(--fg); }
+.tag { font-size: 11px; padding: 0 5px; border-radius: 4px; border: 1px solid var(--border); color: var(--muted); }
+.tag.hot { border-color: var(--danger); color: var(--danger); }
+details > summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+pre { background: var(--code-bg); border-radius: 6px; padding: 6px 8px; margin: 4px 0; font: 12px/1.4 var(--mono); white-space: pre-wrap; word-break: break-all; max-height: 320px; overflow: auto; }
+pre.err { color: var(--fail); }
+.verdict { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
+.verdict button.on-ok { background: var(--pass); color: #fff; border-color: var(--pass); }
+.verdict button.on-bad { background: var(--fail); color: #fff; border-color: var(--fail); }
+.verdict input { flex: 1; min-width: 160px; }
+#log-panel { position: sticky; top: 60px; max-height: calc(100vh - 80px); display: flex; flex-direction: column; }
+#log { overflow: auto; flex: 1; min-height: 200px; }
+.ev { border-bottom: 1px solid var(--border); padding: 3px 0; }
+.ev summary { font-family: var(--mono); font-size: 12px; color: var(--fg); }
+.ev .t { color: var(--muted); margin-right: 6px; }
+.muted { color: var(--muted); font-size: 12px; }
+.pick-row { display: flex; gap: 6px; }
+.pick-row input { flex: 1; }
+.picker { border: 1px solid var(--border); border-radius: 6px; padding: 6px; margin-top: 4px; background: var(--bg); }
+.picker .row input { flex: 1; width: auto; }
+.pick-list { max-height: 240px; overflow: auto; margin-top: 4px; }
+.pick-item { display: block; width: 100%; text-align: left; border: 0; border-radius: 4px; padding: 4px 6px; background: transparent; }
+.pick-item:hover, .pick-item:focus-visible { background: var(--panel); outline: 1px solid var(--border); }
+.pick-item.on { background: var(--panel); outline: 1px solid var(--accent); }
+.pick-item .n { font-weight: 600; }
+.pick-item .n.none { color: var(--muted); font-weight: 400; font-style: italic; }
+.pick-item .m { font: 11px var(--mono); color: var(--muted); display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pick-item .d { font-size: 12px; color: var(--muted); margin-left: 6px; }
+#toast { position: fixed; bottom: 16px; right: 16px; background: var(--fg); color: var(--bg); padding: 8px 12px; border-radius: 6px; display: none; max-width: 80vw; }
+</style>
+</head>
+<body>
+<header>
+  <h1>line-rs live tests</h1>
+  <span class="pill">login: <b id="h-status">-</b></span>
+  <span class="pill">mid: <b id="h-mid">-</b></span>
+  <span class="pill">device: <b id="h-device">-</b></span>
+  <span class="pill">running: <b id="h-running">-</b> · queue: <b id="h-queue">0</b></span>
+  <span class="spacer"></span>
+  <button id="export">Export results.md</button>
+  <button id="stop" class="danger" title="ยกเลิกคิว หยุดเทสต์ที่รันอยู่ และทิ้ง client">Stop all</button>
+</header>
+
+<label class="risk"><input type="checkbox" id="risk"> นี่คือบัญชีที่ยอมรับความเสี่ยง (test account / ยอมรับความเสี่ยงโดนแบน)</label>
+
+<div id="prompt"><span>ทำสิ่งนี้บนมือถือ: <span id="prompt-text"></span></span><span class="spacer"></span><span id="countdown"></span><button id="cancel">Cancel test</button></div>
+
+<main>
+<div>
+  <section class="panel" id="login-panel">
+    <h2>Login</h2>
+    <div class="grid2">
+      <div>
+        <label for="device">Device</label>
+        <select id="device"></select>
+        <div class="warn">LINE อนุญาต 1 session ต่อ device type รอง: session แบบ <b>DESKTOPWIN/DESKTOPMAC</b> มักจะทำให้ <b>LINE for Mac/Windows ที่คุณใช้อยู่ถูก log out</b> (และ login กลับที่นั่นจะฆ่า session ทดสอบ) ถ้าใช้ LINE desktop อยู่ ให้เลือก device ที่ไม่ได้ใช้ เช่น IOSIPAD — แต่ชุดที่ยังไม่เคยทดสอบอาจถูกเซิร์ฟเวอร์ปฏิเสธ token ผูกกับ device ที่ออกให้</div>
+      </div>
+      <div>
+        <label>Method</label>
+        <div class="check"><input type="radio" name="method" value="qr" id="m-qr" checked><label for="m-qr" class="check">QR login (สแกนด้วยมือถือ)</label></div>
+        <div class="check"><input type="radio" name="method" value="token" id="m-token"><label for="m-token" class="check">Paste auth token</label></div>
+        <div class="check"><input type="radio" name="method" value="saved" id="m-saved"><label for="m-saved" class="check" id="m-saved-label">Saved token</label></div>
+        <input type="password" id="token" placeholder="auth token (ส่งไปที่ server เท่านั้น ไม่ถูกส่งกลับมา)" autocomplete="off" style="margin-top:4px">
+      </div>
+    </div>
+    <div class="row" style="margin-top:8px"><button id="login" class="primary">Login</button><span id="login-msg" class="muted"></span></div>
+    <div class="row" style="margin-top:8px; gap:16px">
+      <div id="qr"></div>
+      <div id="pin-box" style="display:none"><div class="muted">พิมพ์ PIN นี้บนมือถือ</div><div id="pin"></div></div>
+    </div>
+    <div class="muted">token เก็บใน ./storage.test.json (gitignored) ฝั่ง server เท่านั้น — หน้าเว็บเห็นแค่ mid + device · login 1 ครั้งแล้วใช้ "Saved token" ต่อ อย่า login ซ้ำบ่อย</div>
+  </section>
+
+  <section class="panel">
+    <h2>Settings &amp; optional inputs</h2>
+    <div class="grid2">
+      <div><label for="throttle">Throttle (วินาทีระหว่าง request, ขั้นต่ำ 5)</label><input type="number" id="throttle" min="5" step="1"></div>
+      <div><label for="region">Product region</label><input type="text" id="region" placeholder="TH"></div>
+      <div><label for="group">Group mid (กลุ่มที่คุณอยู่)</label>
+        <div class="pick-row"><input type="text" id="group" placeholder="c..."><button class="sm" type="button" id="groups-btn" aria-expanded="false" aria-controls="groups-picker">เลือก…</button></div>
+        <div class="picker" id="groups-picker" hidden>
+          <div class="row"><input type="text" id="groups-search" placeholder="ค้นหาชื่อหรือ mid" aria-label="ค้นหา"><button class="sm" type="button" id="groups-refresh">รีเฟรช</button></div>
+          <div class="muted" id="groups-status" aria-live="polite"></div>
+          <div class="pick-list" id="groups-list"></div>
+        </div>
+      </div>
+      <div><label for="keep">Keep content id</label>
+        <div class="pick-row"><input type="text" id="keep"><button class="sm" type="button" id="keep-btn" aria-expanded="false" aria-controls="keep-picker">เลือก…</button></div>
+        <div class="picker" id="keep-picker" hidden>
+          <div class="row"><input type="text" id="keep-search" placeholder="ค้นหาข้อความหรือ content id" aria-label="ค้นหา"><button class="sm" type="button" id="keep-refresh">รีเฟรช</button></div>
+          <div class="muted" id="keep-status" aria-live="polite"></div>
+          <div class="pick-list" id="keep-list"></div>
+        </div>
+      </div>
+      <div><label for="peer">Peer mid (เพื่อนที่ยินยอม)</label>
+        <div class="pick-row"><input type="text" id="peer" placeholder="u..."><button class="sm" type="button" id="peers-btn" aria-expanded="false" aria-controls="peers-picker">เลือก…</button></div>
+        <div class="picker" id="peers-picker" hidden>
+          <div class="row"><input type="text" id="peers-search" placeholder="ค้นหาชื่อหรือ mid" aria-label="ค้นหา"><button class="sm" type="button" id="peers-refresh">รีเฟรช</button></div>
+          <div class="muted" id="peers-status" aria-live="polite"></div>
+          <div class="pick-list" id="peers-list"></div>
+          <div class="muted">เลือก peer แล้วยังต้องเปิด "Allow peer tests" เองด้านล่าง</div>
+        </div>
+      </div>
+      <div></div>
+    </div>
+    <div class="check" style="margin-top:6px"><input type="checkbox" id="allow-peer"><label for="allow-peer" class="check">Allow peer tests — ส่งข้อความ/บล็อก/mute เพื่อนคนนั้นจริง (ต้องมี peer mid ด้วย)</label></div>
+    <div class="check"><input type="checkbox" id="allow-kickout"><label for="allow-kickout" class="check">Allow kick-out test</label></div>
+    <div class="warn">kick-out test: ต้อง log out session นี้จากมือถือ token จะใช้ไม่ได้อีก ต้อง QR login ใหม่ (เพิ่ม login event อีกครั้งบนบัญชี) ข้ามได้ถ้าไม่จำเป็น</div>
+    <div class="muted">ไม่มี retry · รันทีละเทสต์ (คิว) · รัน read_only ก่อน วันละ module หยุดที่ fail แรก</div>
+  </section>
+
+  <section class="panel">
+    <h2>Tests</h2>
+    <div id="tests"></div>
+  </section>
+</div>
+
+<div>
+  <section class="panel" id="log-panel">
+    <h2>Live events <span class="muted" id="log-count"></span></h2>
+    <div class="row" style="margin-bottom:6px">
+      <input type="text" id="filter" placeholder="filter (type / JSON text)" style="flex:1">
+      <label class="check"><input type="checkbox" id="pause"> pause</label>
+      <button class="sm" id="clear">clear</button>
+    </div>
+    <div id="log"></div>
+  </section>
+</div>
+</main>
+<div id="toast"></div>
+
+<script>
+"use strict";
+const K = new URLSearchParams(location.search).get("k") || "";
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+let S = null;            // latest state snapshot
+let clockSkew = 0;       // server now - local now
+const rows = {};         // test id -> {elements}
+let inited = false;
+
+function toast(msg) { const t = $("toast"); t.textContent = msg; t.style.display = "block"; clearTimeout(toast.h); toast.h = setTimeout(() => t.style.display = "none", 4000); }
+
+async function api(path, body) {
+  const r = await fetch(path, { method: body === undefined ? "GET" : "POST", headers: { "x-test-ui-key": K, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+  let j = null; try { j = await r.json(); } catch (_) {}
+  if (!r.ok) { toast((j && j.error) || ("HTTP " + r.status)); throw new Error("HTTP " + r.status); }
+  return j;
+}
+
+const focused = (e) => document.activeElement === e;
+function setVal(e, v) { if (!focused(e) && e.value !== v) e.value = v; }
+
+function inputsFromForm() {
+  return { group_mid: $("group").value, peer_mid: $("peer").value, allow_peer: $("allow-peer").checked,
+           allow_kickout: $("allow-kickout").checked, keep_content_id: $("keep").value, product_region: $("region").value };
+}
+let saveT = null;
+function saveSettings() { clearTimeout(saveT); saveT = setTimeout(() => api("/api/settings", { inputs: inputsFromForm() }).catch(() => {}), 300); }
+for (const id of ["group", "peer", "keep", "region"]) $(id).addEventListener("input", saveSettings);
+for (const id of ["allow-peer", "allow-kickout"]) $(id).addEventListener("change", () => {
+  if (id === "allow-kickout" && $(id).checked && !confirm("Kick-out test จะทำให้ token ใช้ไม่ได้ และต้อง QR login ใหม่ ยืนยัน?")) { $(id).checked = false; return; }
+  if (id === "allow-peer" && $(id).checked && !confirm("Peer tests จะส่งข้อความ/บล็อก/mute เพื่อนคนนั้นจริง เขารู้และยินยอมแล้ว?")) { $(id).checked = false; return; }
+  api("/api/settings", { inputs: inputsFromForm() }).catch(() => {});
+});
+$("throttle").addEventListener("change", () => {
+  const v = Math.max(S ? S.min_throttle_secs : 5, parseInt($("throttle").value, 10) || 5);
+  $("throttle").value = v; api("/api/settings", { throttle_secs: v }).catch(() => {});
+});
+$("risk").addEventListener("change", () => api("/api/settings", { risk_accepted: $("risk").checked }).catch(() => {}));
+
+$("login").addEventListener("click", () => {
+  const method = document.querySelector("input[name=method]:checked").value;
+  const body = { device: $("device").value, method, token: method === "token" ? $("token").value : "" };
+  api("/api/login", body).then(() => { $("token").value = ""; }).catch(() => {});
+});
+$("stop").addEventListener("click", () => { if (confirm("Stop all: ยกเลิกคิว หยุดเทสต์ และทิ้ง client?")) api("/api/stop", {}).catch(() => {}); });
+$("cancel").addEventListener("click", () => api("/api/cancel", {}).catch(() => {}));
+$("export").addEventListener("click", async () => {
+  const r = await fetch("/api/export.md", { headers: { "x-test-ui-key": K } });
+  if (!r.ok) return toast("export failed: HTTP " + r.status);
+  const url = URL.createObjectURL(await r.blob());
+  const a = el("a"); a.href = url; a.download = "results.md"; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
+
+// ---- group / peer pickers ----
+const PICKERS = { groups: "group", peers: "peer", keep: "keep" };
+const pickSig = {};
+function pickLoad(kind, refresh) { api("/api/pick/" + kind, { refresh: !!refresh }).catch(() => {}); }
+function pickToggle(kind, open) {
+  const box = $(kind + "-picker");
+  open = open === undefined ? box.hidden : open;
+  box.hidden = !open;
+  $(kind + "-btn").setAttribute("aria-expanded", String(open));
+  if (open) {
+    if (S && S.picks[kind].status === "idle") pickLoad(kind, false);
+    renderPick(kind, true);
+    $(kind + "-search").focus();
+  }
+}
+function renderPick(kind, force) {
+  if (!S) return;
+  const P = S.picks[kind], input = $(PICKERS[kind]), q = $(kind + "-search").value.trim().toLowerCase();
+  const loggedIn = S.login.status === "logged_in";
+  $(kind + "-btn").disabled = !loggedIn;
+  if (!loggedIn && !$(kind + "-picker").hidden) pickToggle(kind, false);
+  $(kind + "-refresh").disabled = !loggedIn || P.status === "loading";
+  const sig = [P.status, P.fetched_ms, P.items.length, P.error, q, input.value].join("|");
+  if (!force && pickSig[kind] === sig) return;
+  pickSig[kind] = sig;
+  const items = P.items.filter((it) => !q || (it.name + " " + it.mid + " " + it.detail).toLowerCase().includes(q));
+  const LIMIT = 200;
+  let status;
+  if (P.status === "idle") status = "ยังไม่โหลด";
+  else if (P.status === "loading") status = "กำลังโหลด… (รอ throttle " + S.throttle_secs + " วิ ต่อ request)";
+  else if (P.status === "error") status = "โหลดไม่สำเร็จ: " + P.error;
+  else status = P.items.length + " รายการ" + (q ? " · ตรง " + items.length : "") +
+    " · โหลดเมื่อ " + new Date(P.fetched_ms).toLocaleTimeString() + (items.length > LIMIT ? " · แสดง " + LIMIT + " แรก พิมพ์ค้นหาเพิ่ม" : "");
+  $(kind + "-status").textContent = status + (P.note ? " · " + P.note : "");
+  const list = $(kind + "-list");
+  list.replaceChildren();
+  for (const it of items.slice(0, LIMIT)) {
+    const b = el("button", "pick-item" + (it.mid === input.value.trim() ? " on" : ""));
+    b.type = "button";
+    const n = el("span", "n" + (it.name ? "" : " none"), it.name || "(ไม่มีชื่อ)");
+    b.append(n);
+    if (it.detail) b.append(el("span", "d", it.detail));
+    b.append(el("span", "m", it.mid));
+    b.addEventListener("click", () => {
+      input.value = it.mid;
+      saveSettings();
+      pickToggle(kind, false);
+      input.focus();
+    });
+    list.append(b);
+  }
+}
+for (const kind of Object.keys(PICKERS)) {
+  $(kind + "-btn").addEventListener("click", () => pickToggle(kind));
+  $(kind + "-refresh").addEventListener("click", () => pickLoad(kind, true));
+  $(kind + "-search").addEventListener("input", () => renderPick(kind));
+  $(kind + "-picker").addEventListener("keydown", (e) => { if (e.key === "Escape") { pickToggle(kind, false); $(kind + "-btn").focus(); } });
+  $(PICKERS[kind]).addEventListener("input", () => renderPick(kind));
+}
+
+const NEED_TAG = { group: ["needs group mid", false], keep_id: ["needs keep id", false], peer: ["peer: ส่งถึงคนอื่น", true], kickout: ["ends session", true] };
+
+function buildTests() {
+  const root = $("tests");
+  for (const mod of S.modules) {
+    const box = el("div", "module");
+    const head = el("div", "module-head");
+    head.append(el("h3", null, mod));
+    const runMod = el("button", "sm", "Run module");
+    runMod.addEventListener("click", () => {
+      const ids = S.cases.filter((c) => c.info.module === mod).map((c) => c.info.id);
+      api("/api/run", { ids }).catch(() => {});
+    });
+    head.append(runMod);
+    box.append(head);
+    for (const c of S.cases.filter((c) => c.info.module === mod)) box.append(buildRow(c.info));
+    root.append(box);
+  }
+}
+
+function buildRow(info) {
+  const r = {};
+  const d = el("div", "test");
+  const head = el("div", "test-head");
+  r.badge = el("span", "badge", "idle");
+  r.run = el("button", "sm", "Run");
+  r.run.addEventListener("click", () => api("/api/run", { ids: [info.id] }).catch(() => {}));
+  r.dur = el("span", "dur");
+  head.append(r.badge, el("span", "tid", info.id), r.dur);
+  if (info.interactive) head.append(el("span", "tag", "interactive"));
+  if (NEED_TAG[info.need]) { const [t, hot] = NEED_TAG[info.need]; head.append(el("span", hot ? "tag hot" : "tag", t)); }
+  head.append(el("span", "spacer"), r.run);
+  d.append(head);
+  d.append(el("div", "meta", info.help));
+  const v = el("div", "meta"); v.append("ตรวจ RE guess: "); v.append(el("b", null, info.validates.replace(/`/g, ""))); d.append(v);
+  if (info.phone) { const p = el("div", "meta"); p.append("บนมือถือ: "); p.append(el("b", null, info.phone.replace(/`/g, ""))); d.append(p); }
+  r.details = el("details"); r.summary = el("summary", null, "result");
+  r.err = el("pre", "err"); r.out = el("pre"); r.log = el("pre");
+  r.details.append(r.summary, r.err, r.out, r.log);
+  r.details.style.display = "none";
+  d.append(r.details);
+  if (info.manual) {
+    const vd = el("div", "verdict");
+    r.ok = el("button", "sm", "ดูบนมือถือแล้ว ถูกต้อง");
+    r.bad = el("button", "sm", "ไม่ถูกต้อง");
+    r.notes = el("input"); r.notes.type = "text"; r.notes.placeholder = "notes (สิ่งที่เห็นบนมือถือ)";
+    const send = (verdict) => api("/api/verdict", { id: info.id, verdict, notes: r.notes.value }).catch(() => {});
+    r.ok.addEventListener("click", () => send(r.verdict === "ok" ? null : "ok"));
+    r.bad.addEventListener("click", () => send(r.verdict === "bad" ? null : "bad"));
+    r.notes.addEventListener("change", () => send(r.verdict || null));
+    vd.append(r.ok, r.bad, r.notes);
+    d.append(vd);
+  }
+  rows[info.id] = r;
+  return d;
+}
+
+function updateRow(c) {
+  const r = rows[c.info.id], st = c.state;
+  r.badge.className = "badge " + st.status; r.badge.textContent = st.status;
+  r.dur.textContent = st.duration_ms != null ? (st.duration_ms / 1000).toFixed(1) + "s" : (st.status === "running" ? "…" : "");
+  const canRun = S.risk_accepted && S.login.status === "logged_in" && st.status !== "queued" && st.status !== "running";
+  r.run.disabled = !canRun;
+  const has = st.error || st.result != null || (st.log && st.log.length);
+  r.details.style.display = has ? "" : "none";
+  r.err.textContent = st.error || ""; r.err.style.display = st.error ? "" : "none";
+  r.out.textContent = st.result != null ? JSON.stringify(st.result, null, 2) : ""; r.out.style.display = st.result != null ? "" : "none";
+  r.log.textContent = st.log && st.log.length ? st.log.join("\n") : ""; r.log.style.display = st.log && st.log.length ? "" : "none";
+  r.summary.textContent = st.error ? (st.status === "skipped" ? "skip reason" : "error / result") : "result JSON";
+  if (r.ok) {
+    r.verdict = st.verdict;
+    r.ok.className = "sm" + (st.verdict === "ok" ? " on-ok" : "");
+    r.bad.className = "sm" + (st.verdict === "bad" ? " on-bad" : "");
+    setVal(r.notes, st.notes || "");
+  }
+}
+
+function render() {
+  if (!inited) {
+    inited = true;
+    for (const d of S.devices) { const o = el("option", null, d); o.value = d; $("device").append(o); }
+    buildTests();
+  }
+  const L = S.login;
+  $("h-status").textContent = L.status; $("h-mid").textContent = L.mid || "-"; $("h-device").textContent = L.device || "-";
+  $("h-running").textContent = S.running || "-"; $("h-queue").textContent = S.queue.length;
+  if (!focused($("risk"))) $("risk").checked = S.risk_accepted;
+  setVal($("throttle"), String(S.throttle_secs));
+  setVal($("group"), S.inputs.group_mid); setVal($("peer"), S.inputs.peer_mid);
+  setVal($("keep"), S.inputs.keep_content_id); setVal($("region"), S.inputs.product_region);
+  $("allow-peer").checked = S.inputs.allow_peer; $("allow-kickout").checked = S.inputs.allow_kickout;
+  $("m-saved").disabled = !S.has_saved_token;
+  $("m-saved-label").textContent = S.has_saved_token ? "Saved token (device " + S.saved_device + " — ใช้ device ที่บันทึกไว้)" : "Saved token (ยังไม่มี)";
+  const busy = L.status === "logging_in" || L.status === "logged_in";
+  $("login").disabled = busy || !S.risk_accepted;
+  $("device").disabled = busy;
+  $("login-msg").textContent = L.message || (S.risk_accepted ? "" : "ติ๊กช่องยอมรับความเสี่ยงก่อน");
+  $("qr").innerHTML = L.qr_svg || "";   // server-generated SVG
+  $("pin-box").style.display = L.pin ? "" : "none"; $("pin").textContent = L.pin || "";
+  for (const c of S.cases) updateRow(c);
+  for (const kind of Object.keys(PICKERS)) renderPick(kind);
+  tick();
+}
+
+function tick() {
+  const p = S && S.prompt;
+  $("prompt").classList.toggle("on", !!p);
+  if (!p) return;
+  $("prompt-text").textContent = p.text + "  [" + p.test + "]";
+  const left = Math.max(0, Math.round((p.deadline_ms - (Date.now() + clockSkew)) / 1000));
+  $("countdown").textContent = Math.floor(left / 60) + ":" + String(left % 60).padStart(2, "0");
+}
+setInterval(tick, 1000);
+
+// ---- event log ----
+const MAX_EV = 500;
+let evCount = 0, held = [];
+function matches(node, q) { return !q || node.dataset.search.includes(q); }
+function addEvent(ev) {
+  const d = el("details", "ev");
+  const s = el("summary");
+  s.append(el("span", "t", new Date(ev.time_ms).toLocaleTimeString()), ev.type);
+  const pre = el("pre", null, typeof ev.data === "string" ? ev.data : JSON.stringify(ev.data, null, 2));
+  d.append(s, pre);
+  d.dataset.search = (ev.type + " " + pre.textContent).toLowerCase();
+  d.style.display = matches(d, $("filter").value.toLowerCase()) ? "" : "none";
+  const log = $("log"); log.prepend(d);
+  while (log.children.length > MAX_EV) log.lastChild.remove();
+  evCount++;
+}
+function updCount() { $("log-count").textContent = evCount + " events" + (held.length ? " · " + held.length + " held (paused)" : ""); }
+$("filter").addEventListener("input", () => {
+  const q = $("filter").value.toLowerCase();
+  for (const n of $("log").children) n.style.display = matches(n, q) ? "" : "none";
+});
+$("pause").addEventListener("change", () => { if (!$("pause").checked) { held.forEach(addEvent); held = []; updCount(); } });
+$("clear").addEventListener("click", () => { $("log").innerHTML = ""; evCount = 0; held = []; updCount(); });
+
+// ---- SSE ----
+function connect() {
+  const es = new EventSource("/api/events?k=" + encodeURIComponent(K));
+  es.addEventListener("state", (e) => { S = JSON.parse(e.data); clockSkew = S.now_ms - Date.now(); render(); });
+  es.addEventListener("line", (e) => {
+    const ev = JSON.parse(e.data);
+    if ($("pause").checked) { held.push(ev); if (held.length > MAX_EV) held.shift(); } else addEvent(ev);
+    updCount();
+  });
+  es.onerror = () => { $("h-status").textContent = "disconnected"; };
+}
+if (!K) document.body.textContent = "missing ?k= secret — use the URL printed in the terminal";
+else connect();
+</script>
+</body>
+</html>
