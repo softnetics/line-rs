@@ -6,14 +6,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use futures::future::BoxFuture;
 use futures::StreamExt;
+use futures::future::BoxFuture;
 use serde_json::json;
 use tokio::task::JoinSet;
 
 use super::conn::{ByteStream, Conn, ConnWriter, FrameDecoder, Packet};
-use super::frame::{services_mask, sign_on_request_packet, status_packet, AckType, PushFrame};
-use super::{tmc, Hub, Kind};
+use super::frame::{AckType, PushFrame, services_mask, sign_on_request_packet, status_packet};
+use super::{Hub, Kind, tmc};
 use crate::error::{Error, Result};
 use crate::polling::SyncData;
 use crate::thrift::{self, Protocol, Schema, TValue, Value};
@@ -60,12 +60,19 @@ where
     H: Clone,
 {
     fn clone(&self) -> Self {
-        Self { host: self.host.clone(), hub: self.hub.clone(), state: self.state.clone() }
+        Self {
+            host: self.host.clone(),
+            hub: self.hub.clone(),
+            state: self.state.clone(),
+        }
     }
 }
 
 fn now_secs() -> f64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or_default()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or_default()
 }
 
 pub(crate) fn talk_sync_args(sync: &SyncData) -> Value {
@@ -83,7 +90,11 @@ fn error_json(e: &Error) -> serde_json::Value {
 
 impl<H: PushHost> ConnManager<H> {
     pub fn new(host: H, hub: Arc<Hub>) -> Self {
-        Self { host, hub, state: Arc::default() }
+        Self {
+            host,
+            hub,
+            state: Arc::default(),
+        }
     }
 
     fn log(&self, text: &str, data: serde_json::Value) {
@@ -108,14 +119,23 @@ impl<H: PushHost> ConnManager<H> {
     }
 
     /// Encode and queue a sign-on request; returns its request id.
-    pub fn build_and_send_sign_on_request(&self, w: &ConnWriter, service: u8, args: &Value) -> Result<u16> {
+    pub fn build_and_send_sign_on_request(
+        &self,
+        w: &ConnWriter,
+        service: u8,
+        args: &Value,
+    ) -> Result<u16> {
         let (method, args_struct) = match service {
             3 => ("fetchMyEvents", Some("SquareService_fetchMyEvents_args")),
             5 | 8 => ("sync", Some("sync_args")),
             _ => ("", None),
         };
         let req = match args_struct {
-            Some(name) => thrift::write_message(method, &thrift::encode_struct(Schema::line(), name, args)?, Protocol::Compact)?,
+            Some(name) => thrift::write_message(
+                method,
+                &thrift::encode_struct(Schema::line(), name, args)?,
+                Protocol::Compact,
+            )?,
             None => Vec::new(),
         };
         let id = {
@@ -124,7 +144,10 @@ impl<H: PushHost> ConnManager<H> {
             st.sign_on_requests.insert(id, (service, method));
             id
         };
-        self.log(&format!("[H2][PUSH] send sign-on-request. requestId:{id}, service:{service}"), json!(""));
+        self.log(
+            &format!("[H2][PUSH] send sign-on-request. requestId:{id}, service:{service}"),
+            json!(""),
+        );
         w.write(sign_on_request_packet(id, service, &req))?;
         Ok(id)
     }
@@ -132,9 +155,18 @@ impl<H: PushHost> ConnManager<H> {
     /// Handle a complete sign-on response. Failures are logged; like linejs
     /// they end that service's request chain on this connection.
     pub async fn on_sign_on_response(&self, w: &ConnWriter, req_id: u16, data: &[u8]) {
-        let entry = self.state.lock().unwrap().sign_on_requests.get(&req_id).copied();
+        let entry = self
+            .state
+            .lock()
+            .unwrap()
+            .sign_on_requests
+            .get(&req_id)
+            .copied();
         let Some((service, _method)) = entry else {
-            self.log(&format!("[PUSH] unknown sign-on-response requestId:{req_id}"), json!(""));
+            self.log(
+                &format!("[PUSH] unknown sign-on-response requestId:{req_id}"),
+                json!(""),
+            );
             return;
         };
         self.log(
@@ -149,7 +181,9 @@ impl<H: PushHost> ConnManager<H> {
             5 | 8 => self.on_talk_sign_on(w, service, data).await,
             _ => Err(Error::internal(
                 "LegyPusherError",
-                format!("[PUSH] receives invalid sign-on-response frame. requestId:{req_id}, service:{service}"),
+                format!(
+                    "[PUSH] receives invalid sign-on-response frame. requestId:{req_id}, service:{service}"
+                ),
             )),
         };
         if let Err(e) = res {
@@ -159,22 +193,42 @@ impl<H: PushHost> ConnManager<H> {
 
     async fn on_square_sign_on(&self, data: &[u8]) -> Result<()> {
         let msg = thrift::read_message(data, Protocol::Compact)?;
-        let res = thrift::decode_struct(Schema::line(), Some("SquareService_fetchMyEvents_result"), &msg.body);
+        let res = thrift::decode_struct(
+            Schema::line(),
+            Some("SquareService_fetchMyEvents_result"),
+            &msg.body,
+        );
         if !res["e"].is_null() {
-            self.log(&format!("can't use PUSH for OpenChat:{}", res["e"]["errorCode"]), res["e"].to_json());
+            self.log(
+                &format!("can't use PUSH for OpenChat:{}", res["e"]["errorCode"]),
+                res["e"].to_json(),
+            );
             return Ok(());
         }
         let success = &res["success"];
         let bad = |what: &str| Error::internal("LegyPusherError", format!("{what}: {}", success));
-        let events = success["events"].as_list().ok_or_else(|| bad("events should be list"))?;
-        let sync_token = success["syncToken"].as_str().ok_or_else(|| bad("syncToken should be str"))?.to_string();
-        let subscription_id =
-            success["subscription"]["subscriptionId"].as_i64().ok_or_else(|| bad("subscriptionId should be int"))?;
+        let events = success["events"]
+            .as_list()
+            .ok_or_else(|| bad("events should be list"))?;
+        let sync_token = success["syncToken"]
+            .as_str()
+            .ok_or_else(|| bad("syncToken should be str"))?
+            .to_string();
+        let subscription_id = success["subscription"]["subscriptionId"]
+            .as_i64()
+            .ok_or_else(|| bad("subscriptionId should be int"))?;
         self.log(
-            &format!("response fetchMyEvent({subscription_id}) events:{}, syncToken:{sync_token}", events.len()),
+            &format!(
+                "response fetchMyEvent({subscription_id}) events:{}, syncToken:{sync_token}",
+                events.len()
+            ),
             json!(""),
         );
-        self.state.lock().unwrap().subscription_ids.insert(subscription_id, now_secs());
+        self.state
+            .lock()
+            .unwrap()
+            .subscription_ids
+            .insert(subscription_id, now_secs());
         for ev in events {
             self.hub.deliver(Kind::Square, ev.clone());
         }
@@ -190,7 +244,10 @@ impl<H: PushHost> ConnManager<H> {
             !std::mem::replace(&mut st.event_synced, true)
         };
         if first {
-            self.log(&format!("myEvents start({subscription_id}) : syncToken:{sync_token}"), json!(""));
+            self.log(
+                &format!("myEvents start({subscription_id}) : syncToken:{sync_token}"),
+                json!(""),
+            );
         }
         Ok(())
     }
@@ -229,7 +286,10 @@ impl<H: PushHost> ConnManager<H> {
 
     /// Handle a push frame (service 3 = new square events: fetch them).
     pub async fn on_push_response(&self, frame: PushFrame) {
-        self.log("_OnPushResponse", json!({"serviceType": frame.service_type, "pushId": frame.push_id}));
+        self.log(
+            "_OnPushResponse",
+            json!({"serviceType": frame.service_type, "pushId": frame.push_id}),
+        );
         if frame.service_type != 3 {
             return;
         }
@@ -240,7 +300,10 @@ impl<H: PushHost> ConnManager<H> {
 
     async fn fetch_square_after_push(&self, frame: &PushFrame) -> Result<()> {
         let payload = thrift::read_struct(&frame.payload, Protocol::Compact)?;
-        let pushed_id = payload.field(1).and_then(TValue::as_i64).unwrap_or_default();
+        let pushed_id = payload
+            .field(1)
+            .and_then(TValue::as_i64)
+            .unwrap_or_default();
         self.state.lock().unwrap().subscription_id = pushed_id;
         let sync_token = self.host.sync_state().lock().await.square.clone();
         let res = self
@@ -258,9 +321,14 @@ impl<H: PushHost> ConnManager<H> {
             sync.clone()
         };
         self.host.emit_sync(snapshot);
-        let sub_id = res["subscription"]["subscriptionId"].as_i64().unwrap_or_default();
+        let sub_id = res["subscription"]["subscriptionId"]
+            .as_i64()
+            .unwrap_or_default();
         self.state.lock().unwrap().subscription_id = sub_id;
-        self.log("SQ_fetchMyEvents", json!({"syncToken": res["syncToken"].to_json(), "subscriptionId": sub_id}));
+        self.log(
+            "SQ_fetchMyEvents",
+            json!({"syncToken": res["syncToken"].to_json(), "subscriptionId": sub_id}),
+        );
         Ok(())
     }
 
@@ -281,7 +349,10 @@ impl<H: PushHost> ConnManager<H> {
             ids
         };
         if !refresh.is_empty() {
-            self.log(&format!("?refresh square subscriptionId: {refresh:?}"), json!(""));
+            self.log(
+                &format!("?refresh square subscriptionId: {refresh:?}"),
+                json!(""),
+            );
         }
         if self.hub.is_idle() {
             self.log("no listeners left, closing push conn", json!(""));
@@ -315,19 +386,29 @@ impl<H: PushHost> ConnManager<H> {
     /// Send the status frame and initial sign-on requests, then read the
     /// connection until it ends (`InitAndRead`).
     pub async fn init_and_read(&self, conn: Conn, services: &[u8]) -> Result<()> {
-        let Conn { writer: w, response } = conn;
+        let Conn {
+            writer: w,
+            response,
+        } = conn;
         w.write(status_packet(0, PING_INTERVAL))?;
-        self.log(&format!("send status frame. flag:0, pi:{PING_INTERVAL}"), json!(""));
+        self.log(
+            &format!("send status frame. flag:0, pi:{PING_INTERVAL}"),
+            json!(""),
+        );
 
         for &service in services {
             self.log(&format!("Init service: {service}"), json!(""));
             match service {
                 3 => {
-                    let subscription_id =
-                        SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or_default();
+                    let subscription_id = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or_default();
                     let sync_token = self.host.sync_state().lock().await.square.clone();
                     self.log(
-                        &format!("request fetchMyEvent({subscription_id}), syncToken:{sync_token:?}"),
+                        &format!(
+                            "request fetchMyEvent({subscription_id}), syncToken:{sync_token:?}"
+                        ),
                         json!(""),
                     );
                     self.state.lock().unwrap().subscription_ids.clear();
@@ -336,7 +417,10 @@ impl<H: PushHost> ConnManager<H> {
                 }
                 5 | 8 => {
                     let args = talk_sync_args(&*self.host.sync_state().lock().await);
-                    self.log(&format!("request talk fetcher: {}", args.to_json()), json!(""));
+                    self.log(
+                        &format!("request talk fetcher: {}", args.to_json()),
+                        json!(""),
+                    );
                     self.build_and_send_sign_on_request(&w, service, &args)?;
                 }
                 _ => {}
@@ -350,7 +434,11 @@ impl<H: PushHost> ConnManager<H> {
         res
     }
 
-    async fn read(&self, w: &ConnWriter, response: BoxFuture<'static, Result<ByteStream>>) -> Result<()> {
+    async fn read(
+        &self,
+        w: &ConnWriter,
+        response: BoxFuture<'static, Result<ByteStream>>,
+    ) -> Result<()> {
         let mut body = tokio::select! {
             _ = w.closed() => return Ok(()),
             r = response => r?,
@@ -369,11 +457,16 @@ impl<H: PushHost> ConnManager<H> {
                 match packet {
                     Packet::Ping(f) => {
                         w.write(f.ack_packet())?;
-                        self.log(&format!("[PUSH] send ping ack. pingId:{}", f.ping_id), json!(""));
+                        self.log(
+                            &format!("[PUSH] send ping ack. pingId:{}", f.ping_id),
+                            json!(""),
+                        );
                         let (m, w) = (self.clone(), w.clone());
                         tasks.spawn(async move { m.on_ping(&w, f.ping_id).await });
                     }
-                    Packet::SignOnResponse(f) => self.on_sign_on_response(w, f.request_id, &f.payload).await,
+                    Packet::SignOnResponse(f) => {
+                        self.on_sign_on_response(w, f.request_id, &f.payload).await
+                    }
                     Packet::Push(f) => {
                         if f.push_type == AckType::AckRequired as u8 {
                             w.write(f.ack_packet())?;
@@ -402,7 +495,10 @@ pub(crate) fn apply_sync_response(sync: &mut SyncData, response: &Value) -> Vec<
     if let Some(r) = nonzero(&ops_res["individualEvents"]["lastRevision"]) {
         sync.talk.individual_rev = r;
     }
-    let ops = ops_res["operations"].as_list().map(<[Value]>::to_vec).unwrap_or_default();
+    let ops = ops_res["operations"]
+        .as_list()
+        .map(<[Value]>::to_vec)
+        .unwrap_or_default();
     for op in &ops {
         if let Some(r) = op["revision"].as_i64() {
             sync.talk.revision = r;
@@ -421,7 +517,7 @@ pub(crate) mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::push::frame::{request_packet, FRAME_PING, FRAME_PUSH, FRAME_SIGN_ON_RESPONSE};
+    use crate::push::frame::{FRAME_PING, FRAME_PUSH, FRAME_SIGN_ON_RESPONSE, request_packet};
 
     type Responder = Arc<dyn Fn() -> Result<Value> + Send + Sync>;
 
@@ -452,7 +548,12 @@ pub(crate) mod tests {
             }
         }
         pub fn log_kinds(&self) -> Vec<String> {
-            self.logs.lock().unwrap().iter().map(|(k, _)| k.clone()).collect()
+            self.logs
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(k, _)| k.clone())
+                .collect()
         }
     }
 
@@ -471,7 +572,11 @@ pub(crate) mod tests {
         }
         fn open_conn(&self, _path: &str) -> Result<Conn> {
             self.opens.fetch_add(1, Ordering::SeqCst);
-            self.conns.lock().unwrap().pop().ok_or_else(|| Error::internal("TestError", "connection failed"))
+            self.conns
+                .lock()
+                .unwrap()
+                .pop()
+                .ok_or_else(|| Error::internal("TestError", "connection failed"))
         }
         fn fetch_my_events(&self, _args: Value) -> BoxFuture<'static, Result<Value>> {
             let r = (self.fetch)();
@@ -479,21 +584,43 @@ pub(crate) mod tests {
         }
         fn noop(&self) -> BoxFuture<'static, Result<()>> {
             let ok = self.noop_ok;
-            async move { if ok { Ok(()) } else { Err(Error::internal("TimeoutError", "noop timed out")) } }.boxed()
+            async move {
+                if ok {
+                    Ok(())
+                } else {
+                    Err(Error::internal("TimeoutError", "noop timed out"))
+                }
+            }
+            .boxed()
         }
     }
 
     /// A connection whose response body is fed from the returned sender.
-    pub(crate) fn fake_conn() -> (Conn, mpsc::UnboundedReceiver<Bytes>, mpsc::UnboundedSender<Result<Bytes>>) {
+    pub(crate) fn fake_conn() -> (
+        Conn,
+        mpsc::UnboundedReceiver<Bytes>,
+        mpsc::UnboundedSender<Result<Bytes>>,
+    ) {
         let (w, written) = ConnWriter::channel();
         let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes>>();
-        let body = futures::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|c| (c, rx)) }).boxed();
-        (Conn::from_parts(w, async move { Ok(body) }.boxed()), written, tx)
+        let body =
+            futures::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|c| (c, rx)) })
+                .boxed();
+        (
+            Conn::from_parts(w, async move { Ok(body) }.boxed()),
+            written,
+            tx,
+        )
     }
 
     fn square_push(sub_id: i64) -> PushFrame {
         let payload = thrift::write_struct(&[(1, TValue::I64(sub_id))], Protocol::Compact).unwrap();
-        PushFrame { push_type: 0, service_type: 3, push_id: 1, payload }
+        PushFrame {
+            push_type: 0,
+            service_type: 3,
+            push_id: 1,
+            payload,
+        }
     }
 
     fn manager(host: &FakeHost) -> (ConnManager<FakeHost>, Arc<Hub>) {
@@ -510,7 +637,12 @@ pub(crate) mod tests {
         let (w, _written) = ConnWriter::channel();
         m.on_ping(&w, 3).await;
         assert_eq!(host.log_kinds(), vec!["[LEGY/PUSH] noop failed"]);
-        assert!(host.logs.lock().unwrap()[0].1["error"].as_str().unwrap().contains("TimeoutError"));
+        assert!(
+            host.logs.lock().unwrap()[0].1["error"]
+                .as_str()
+                .unwrap()
+                .contains("TimeoutError")
+        );
     }
 
     #[tokio::test]
@@ -523,8 +655,13 @@ pub(crate) mod tests {
         m.on_ping(&w, 1).await;
         assert!(host.log_kinds().is_empty());
         m.on_ping(&w, 3).await;
-        assert_eq!(host.log_kinds(), vec!["[LEGY/PUSH] renew push conn for new authToken..."]);
-        tokio::time::timeout(Duration::from_millis(100), w.closed()).await.unwrap();
+        assert_eq!(
+            host.log_kinds(),
+            vec!["[LEGY/PUSH] renew push conn for new authToken..."]
+        );
+        tokio::time::timeout(Duration::from_millis(100), w.closed())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -533,7 +670,9 @@ pub(crate) mod tests {
         let (m, _hub) = manager(&host);
         let (w, _written) = ConnWriter::channel();
         m.on_ping(&w, 1).await;
-        tokio::time::timeout(Duration::from_millis(100), w.closed()).await.unwrap();
+        tokio::time::timeout(Duration::from_millis(100), w.closed())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -542,7 +681,13 @@ pub(crate) mod tests {
         host.sync.lock().await.square = Some("before".into());
         let (m, _hub) = manager(&host);
         m.on_push_response(square_push(1)).await;
-        assert_eq!(host.log_kinds(), vec!["[LEGY/PUSH] _OnPushResponse", "[LEGY/PUSH] fetchMyEvents failed"]);
+        assert_eq!(
+            host.log_kinds(),
+            vec![
+                "[LEGY/PUSH] _OnPushResponse",
+                "[LEGY/PUSH] fetchMyEvents failed"
+            ]
+        );
         // The sync state is left as it was, so the next push retries from there.
         assert_eq!(host.sync.lock().await.square.as_deref(), Some("before"));
         assert_eq!(m.subscription_id(), 1);
@@ -553,7 +698,9 @@ pub(crate) mod tests {
     async fn push_delivers_events_when_fetch_succeeds() {
         let mut host = FakeHost::new();
         host.fetch = Arc::new(|| {
-            Ok(tv!({"events": [{"type": "NOTIFICATION_MESSAGE"}], "syncToken": "after", "subscription": {"subscriptionId": 42}}))
+            Ok(
+                tv!({"events": [{"type": "NOTIFICATION_MESSAGE"}], "syncToken": "after", "subscription": {"subscriptionId": 42}}),
+            )
         });
         let (m, hub) = manager(&host);
         let mut rx = hub.subscribe_raw(Kind::Square);
@@ -563,7 +710,13 @@ pub(crate) mod tests {
         assert_eq!(host.sync.lock().await.square.as_deref(), Some("after"));
         assert_eq!(m.subscription_id(), 42);
         assert_eq!(host.emitted.lock().unwrap().len(), 1);
-        assert_eq!(host.log_kinds(), vec!["[LEGY/PUSH] _OnPushResponse", "[LEGY/PUSH] SQ_fetchMyEvents"]);
+        assert_eq!(
+            host.log_kinds(),
+            vec![
+                "[LEGY/PUSH] _OnPushResponse",
+                "[LEGY/PUSH] SQ_fetchMyEvents"
+            ]
+        );
     }
 
     #[test]
@@ -625,13 +778,21 @@ pub(crate) mod tests {
                 0,
                 TValue::Struct(vec![
                     (1, TValue::Struct(vec![(1, TValue::I64(77))])),
-                    (2, TValue::List(crate::thrift::TType::Struct, vec![TValue::Struct(vec![(2, TValue::I64(5))])])),
+                    (
+                        2,
+                        TValue::List(
+                            crate::thrift::TType::Struct,
+                            vec![TValue::Struct(vec![(2, TValue::I64(5))])],
+                        ),
+                    ),
                     (3, TValue::string("tok1")),
                 ]),
             )],
         );
         // Talk sign-on response (request 2), TMoreCompact: fullSyncResponse.nextRevision = 5.
-        let talk_tmc = [0x82, 0x21, 0x01, 0x02, 0xdd, 0x00, 0x00, 0x01, 0x04, 0x04, 0x0a];
+        let talk_tmc = [
+            0x82, 0x21, 0x01, 0x02, 0xdd, 0x00, 0x00, 0x01, 0x04, 0x04, 0x0a,
+        ];
         let mut chunk = request_packet(FRAME_PING, &[2, 0, 1]);
         chunk.extend(sign_on_response(1, &sq));
         chunk.extend(sign_on_response(2, &talk_tmc));
@@ -668,7 +829,11 @@ pub(crate) mod tests {
 
         drop(body);
         task.await.unwrap().unwrap();
-        assert!(host.log_kinds().iter().any(|k| k.starts_with("[LEGY/PUSH] CONN died")));
+        assert!(
+            host.log_kinds()
+                .iter()
+                .any(|k| k.starts_with("[LEGY/PUSH] CONN died"))
+        );
     }
 
     #[tokio::test]
@@ -676,7 +841,10 @@ pub(crate) mod tests {
         let host = FakeHost::new();
         let (m, _) = manager(&host);
         let (w, _written) = ConnWriter::channel();
-        let conn = Conn::from_parts(w, async { Err(Error::internal("LegyPusherError", "fetch failed")) }.boxed());
+        let conn = Conn::from_parts(
+            w,
+            async { Err(Error::internal("LegyPusherError", "fetch failed")) }.boxed(),
+        );
         assert!(m.init_and_read(conn, &[3, 8]).await.is_err());
     }
 

@@ -67,10 +67,19 @@ pub const MIME_TYPES: &[(&str, &str)] = &[
     ("application/vnd.oasis.opendocument.presentation", "odp"),
     ("application/vnd.oasis.opendocument.spreadsheet", "ods"),
     ("application/vnd.oasis.opendocument.text", "odt"),
-    ("application/vnd.oasis.opendocument.graphics-template", "otg"),
+    (
+        "application/vnd.oasis.opendocument.graphics-template",
+        "otg",
+    ),
     ("application/vnd.oasis.opendocument.text-web", "oth"),
-    ("application/vnd.oasis.opendocument.presentation-template", "otp"),
-    ("application/vnd.oasis.opendocument.spreadsheet-template", "ots"),
+    (
+        "application/vnd.oasis.opendocument.presentation-template",
+        "otp",
+    ),
+    (
+        "application/vnd.oasis.opendocument.spreadsheet-template",
+        "ots",
+    ),
     ("application/vnd.oasis.opendocument.text-template", "ott"),
     ("application/ogg", "ogx"),
     ("video/ogg", "ogv"),
@@ -142,7 +151,10 @@ pub const MIME_TYPES: &[(&str, &str)] = &[
 /// File extension LINE expects for `mime` (parameters such as `; charset=` are ignored).
 pub fn extension(mime: &str) -> Option<&'static str> {
     let mime = mime.split(';').next().unwrap_or_default().trim();
-    MIME_TYPES.iter().find(|(m, _)| m.eq_ignore_ascii_case(mime)).map(|(_, e)| *e)
+    MIME_TYPES
+        .iter()
+        .find(|(m, _)| m.eq_ignore_ascii_case(mime))
+        .map(|(_, e)| *e)
 }
 
 #[cfg(test)]

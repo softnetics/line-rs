@@ -61,7 +61,11 @@ impl KeepCreate {
         put(&mut m, "source", self.source.clone());
         put(&mut m, "tags", self.tags.clone());
         put(&mut m, "pinInfo", self.pin_info.clone());
-        put(&mut m, "serviceType", self.service_type.clone().map(Json::from));
+        put(
+            &mut m,
+            "serviceType",
+            self.service_type.clone().map(Json::from),
+        );
         Json::Object(m)
     }
 }
@@ -124,7 +128,9 @@ impl Keep<'_> {
 
     /// `GET keep/get.json?contentId=`.
     pub async fn get_content(&self, content_id: &str) -> Result<Json> {
-        self.rest.send(Self::get(GET).query("contentId", content_id)).await
+        self.rest
+            .send(Self::get(GET).query("contentId", content_id))
+            .await
     }
 
     /// `GET keep/size.json` (storage usage).
@@ -133,8 +139,15 @@ impl Keep<'_> {
     }
 
     /// `GET keep/sync.json?revision=&limit=`. `source` is sent as `x-source`.
-    pub async fn sync(&self, revision: i64, limit: Option<i32>, source: Option<&str>) -> Result<Json> {
-        let mut req = Self::get(SYNC).query("revision", revision).query_opt("limit", limit);
+    pub async fn sync(
+        &self,
+        revision: i64,
+        limit: Option<i32>,
+        source: Option<&str>,
+    ) -> Result<Json> {
+        let mut req = Self::get(SYNC)
+            .query("revision", revision)
+            .query_opt("limit", limit);
         if let Some(s) = source {
             req = req.header("x-source", s);
         }
@@ -173,26 +186,39 @@ impl Keep<'_> {
 
     /// `POST keep/delete.json` `{contentIds}`.
     pub async fn delete(&self, content_ids: &[&str]) -> Result<Json> {
-        self.rest.send(Self::post(DELETE, json!({"contentIds": content_ids}))).await
+        self.rest
+            .send(Self::post(DELETE, json!({"contentIds": content_ids})))
+            .await
     }
 
     /// `POST keep/message/delete.json` `{messageIds}`.
     pub async fn delete_messages(&self, message_ids: &[&str]) -> Result<Json> {
-        self.rest.send(Self::post(MESSAGE_DELETE, json!({"messageIds": message_ids}))).await
+        self.rest
+            .send(Self::post(
+                MESSAGE_DELETE,
+                json!({"messageIds": message_ids}),
+            ))
+            .await
     }
 
     /// `POST keep/obs/delete.json` `{contentData}`.
     pub async fn delete_obs(&self, content_data: Json) -> Result<Json> {
-        self.rest.send(Self::post(OBS_DELETE, json!({"contentData": content_data}))).await
+        self.rest
+            .send(Self::post(OBS_DELETE, json!({"contentData": content_data})))
+            .await
     }
 
     /// `POST keep/contents/pin.json` `{contentIds}`.
     pub async fn pin(&self, content_ids: &[&str]) -> Result<Json> {
-        self.rest.send(Self::post(PIN, json!({"contentIds": content_ids}))).await
+        self.rest
+            .send(Self::post(PIN, json!({"contentIds": content_ids})))
+            .await
     }
 
     /// `POST keep/contents/unpin.json` `{contentIds}`.
     pub async fn unpin(&self, content_ids: &[&str]) -> Result<Json> {
-        self.rest.send(Self::post(UNPIN, json!({"contentIds": content_ids}))).await
+        self.rest
+            .send(Self::post(UNPIN, json!({"contentIds": content_ids})))
+            .await
     }
 }

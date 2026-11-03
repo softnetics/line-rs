@@ -84,7 +84,11 @@ impl RestPrefix {
     /// Note prefix for a home id: `/sn` for squares (`s...`), else `/ext/note/nt`
     /// (the selector at `0x1026b9d70`).
     pub fn note_for(home_id: &str) -> Self {
-        if home_id.starts_with('s') { RestPrefix::SquareNote } else { RestPrefix::Note }
+        if home_id.starts_with('s') {
+            RestPrefix::SquareNote
+        } else {
+            RestPrefix::Note
+        }
     }
 }
 
@@ -126,8 +130,21 @@ pub struct RestRequest {
 }
 
 impl RestRequest {
-    pub fn new(method: Method, prefix: RestPrefix, path: impl Into<String>, auth: RestAuth) -> Self {
-        Self { method, prefix, path: path.into(), query: Vec::new(), body: None, headers: Vec::new(), auth }
+    pub fn new(
+        method: Method,
+        prefix: RestPrefix,
+        path: impl Into<String>,
+        auth: RestAuth,
+    ) -> Self {
+        Self {
+            method,
+            prefix,
+            path: path.into(),
+            query: Vec::new(),
+            body: None,
+            headers: Vec::new(),
+            auth,
+        }
     }
 
     pub fn get(prefix: RestPrefix, path: impl Into<String>, auth: RestAuth) -> Self {
@@ -162,10 +179,17 @@ impl RestRequest {
 
     /// Full URL under `base` (`https://host` without a trailing slash).
     pub fn url(&self, base: &str) -> Result<url::Url> {
-        let raw = format!("{}{}{}", base.trim_end_matches('/'), self.prefix.as_str(), self.path);
-        let mut url = url::Url::parse(&raw).map_err(|e| Error::internal(ERROR_KIND, format!("invalid url: {e}")))?;
+        let raw = format!(
+            "{}{}{}",
+            base.trim_end_matches('/'),
+            self.prefix.as_str(),
+            self.path
+        );
+        let mut url = url::Url::parse(&raw)
+            .map_err(|e| Error::internal(ERROR_KIND, format!("invalid url: {e}")))?;
         if !self.query.is_empty() {
-            url.query_pairs_mut().extend_pairs(self.query.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+            url.query_pairs_mut()
+                .extend_pairs(self.query.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         }
         Ok(url)
     }
@@ -187,7 +211,11 @@ impl BaseClient {
 
 impl RestClient {
     pub fn new(client: BaseClient) -> Self {
-        Self { client, base_url: None, tokens: Mutex::new(HashMap::new()) }
+        Self {
+            client,
+            base_url: None,
+            tokens: Mutex::new(HashMap::new()),
+        }
     }
 
     pub fn client(&self) -> &BaseClient {
@@ -202,12 +230,17 @@ impl RestClient {
     }
 
     fn base(&self) -> String {
-        self.base_url.clone().unwrap_or_else(|| format!("https://{}", self.client.endpoint))
+        self.base_url
+            .clone()
+            .unwrap_or_else(|| format!("https://{}", self.client.endpoint))
     }
 
     /// Seed the token cache (e.g. with a token issued elsewhere).
     pub fn set_channel_token(&self, channel_id: &str, token: impl Into<String>) {
-        self.tokens.lock().unwrap().insert(channel_id.to_string(), token.into());
+        self.tokens
+            .lock()
+            .unwrap()
+            .insert(channel_id.to_string(), token.into());
     }
 
     /// Forget a cached token (after expiry).
@@ -227,7 +260,12 @@ impl RestClient {
             .await?;
         let token = match res["channelAccessToken"].as_str() {
             Some(t) if !t.is_empty() => t.to_string(),
-            _ => return Err(Error::internal(ERROR_KIND, "channelAccessToken missing from channel response")),
+            _ => {
+                return Err(Error::internal(
+                    ERROR_KIND,
+                    "channelAccessToken missing from channel response",
+                ));
+            }
         };
         self.set_channel_token(channel_id, token.clone());
         Ok(token)
@@ -236,7 +274,10 @@ impl RestClient {
     /// Send a request and return the JSON body (`Null` when empty). Non-2xx
     /// statuses are errors.
     pub async fn send(&self, req: RestRequest) -> Result<Json> {
-        let mid = self.client.mid().ok_or_else(|| Error::internal(ERROR_KIND, "login must complete first"))?;
+        let mid = self
+            .client
+            .mid()
+            .ok_or_else(|| Error::internal(ERROR_KIND, "login must complete first"))?;
         let mut headers = self.client.line_headers(req.method.as_str());
         let mut set = |k: &str, v: String| {
             headers.retain(|(hk, _)| !hk.eq_ignore_ascii_case(k));
@@ -261,8 +302,16 @@ impl RestClient {
         // LEGY routes REST calls on `x-lhm` (already set to `req.method`): a
         // wire GET answers 404, so GETs go out as POST with `x-lhm: GET`, as
         // CHRLINE and linejs (Moa) send them.
-        let wire = if req.method == Method::GET { Method::POST } else { req.method.clone() };
-        let mut builder = self.client.http.request(wire, url).timeout(self.client.config.timeout);
+        let wire = if req.method == Method::GET {
+            Method::POST
+        } else {
+            req.method.clone()
+        };
+        let mut builder = self
+            .client
+            .http
+            .request(wire, url)
+            .timeout(self.client.config.timeout);
         for (k, v) in headers {
             builder = builder.header(k, v);
         }
@@ -286,7 +335,11 @@ impl RestClient {
         if !status.is_success() {
             let snippet: String = String::from_utf8_lossy(&bytes).chars().take(200).collect();
             let snippet = snippet.split_whitespace().collect::<Vec<_>>().join(" ");
-            let tail = if snippet.is_empty() { String::new() } else { format!(": {snippet}") };
+            let tail = if snippet.is_empty() {
+                String::new()
+            } else {
+                format!(": {snippet}")
+            };
             return Err(Error::internal(
                 ERROR_KIND,
                 format!(

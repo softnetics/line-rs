@@ -5,8 +5,8 @@ mod events;
 mod session;
 
 pub use events::ClientEvent;
-pub use session::{LEGY_BACKUP_HOST, LEGY_HOST, LogoutReason, ProxyConfig};
 pub(crate) use session::now_epoch_sec as session_now;
+pub use session::{LEGY_BACKUP_HOST, LEGY_HOST, LogoutReason, ProxyConfig};
 
 use std::collections::HashMap;
 use std::ops::Deref;
@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{Mutex, broadcast};
 
 use crate::device::{Device, DeviceDetails};
 use crate::e2ee::E2eeState;
@@ -104,7 +104,10 @@ impl ClientBuilder {
     /// Hosts to fail over to when the API host cannot be reached. Default:
     /// `legy-backup.line-apps.com` with the default endpoint, none with a
     /// custom one. Pass an empty list to disable failover.
-    pub fn backup_endpoints<I: IntoIterator<Item = S>, S: Into<String>>(mut self, hosts: I) -> Self {
+    pub fn backup_endpoints<I: IntoIterator<Item = S>, S: Into<String>>(
+        mut self,
+        hosts: I,
+    ) -> Self {
         self.backup_endpoints = Some(hosts.into_iter().map(Into::into).collect());
         self
     }
@@ -147,7 +150,10 @@ impl ClientBuilder {
         // `/kp`) differently over h2. A custom client is used for both.
         let (http, push_http) = match (self.http, &self.proxy) {
             (Some(_), Some(_)) => {
-                return Err(Error::internal("ConfigError", "proxy cannot be combined with a custom http client"));
+                return Err(Error::internal(
+                    "ConfigError",
+                    "proxy cannot be combined with a custom http client",
+                ));
             }
             (Some(h), None) => (h.clone(), h),
             (None, proxy) => {
@@ -174,7 +180,9 @@ impl ClientBuilder {
             backup_endpoints,
             active_endpoint: AtomicUsize::new(0),
             proxy: self.proxy,
-            storage: self.storage.unwrap_or_else(|| Arc::new(MemoryStorage::new())),
+            storage: self
+                .storage
+                .unwrap_or_else(|| Arc::new(MemoryStorage::new())),
             http,
             push_http,
             legy_mode: self.legy_mode,
@@ -279,12 +287,18 @@ impl BaseClient {
 
     /// The logged-in user's mid.
     pub fn mid(&self) -> Option<String> {
-        self.profile().and_then(|p| p["mid"].as_str().map(str::to_string))
+        self.profile()
+            .and_then(|p| p["mid"].as_str().map(str::to_string))
     }
 
     /// The account's service region (`Profile.regionCode`, e.g. `TH`).
     pub fn region_code(&self) -> Option<String> {
-        self.profile().and_then(|p| p["regionCode"].as_str().filter(|s| !s.is_empty()).map(str::to_string))
+        self.profile().and_then(|p| {
+            p["regionCode"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
     }
 
     /// Subscribe to client events. Subscribe before calling login to see
@@ -299,7 +313,10 @@ impl BaseClient {
 
     pub(crate) fn log(&self, kind: &str, data: serde_json::Value) {
         tracing::debug!(kind, %data);
-        self.emit(ClientEvent::Log { kind: kind.to_string(), data });
+        self.emit(ClientEvent::Log {
+            kind: kind.to_string(),
+            data,
+        });
     }
 
     pub fn is_disabled(&self) -> bool {
@@ -336,7 +353,13 @@ impl BaseClient {
     /// Host requests currently go to (primary or a backup after failover).
     pub fn current_endpoint(&self) -> &str {
         let i = self.active_endpoint.load(Ordering::Relaxed);
-        if i == 0 { &self.endpoint } else { self.backup_endpoints.get(i - 1).map_or(&self.endpoint, String::as_str) }
+        if i == 0 {
+            &self.endpoint
+        } else {
+            self.backup_endpoints
+                .get(i - 1)
+                .map_or(&self.endpoint, String::as_str)
+        }
     }
 
     /// Number of hosts (primary + backups).
@@ -348,10 +371,23 @@ impl BaseClient {
     /// already did. Returns the index now active.
     pub(crate) fn fail_over_from(&self, failed: usize) -> usize {
         let next = (failed + 1) % self.endpoint_count();
-        match self.active_endpoint.compare_exchange(failed, next, Ordering::Relaxed, Ordering::Relaxed) {
+        match self.active_endpoint.compare_exchange(
+            failed,
+            next,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
             Ok(_) => {
-                tracing::warn!(from = failed, to = next, host = self.current_endpoint(), "LEGY host failover");
-                self.log("Failover", serde_json::json!({"host": self.current_endpoint()}));
+                tracing::warn!(
+                    from = failed,
+                    to = next,
+                    host = self.current_endpoint(),
+                    "LEGY host failover"
+                );
+                self.log(
+                    "Failover",
+                    serde_json::json!({"host": self.current_endpoint()}),
+                );
                 next
             }
             Err(now) => now,
@@ -384,7 +420,8 @@ impl BaseClient {
     }
 
     pub(crate) fn legy_transport(&self) -> &LegyEncryptedTransport {
-        self.legy_transport.get_or_init(|| LegyEncryptedTransport::new(self.legy_endpoint.as_deref()))
+        self.legy_transport
+            .get_or_init(|| LegyEncryptedTransport::new(self.legy_endpoint.as_deref()))
     }
 
     /// `toType` for a mid (`u` user, `r` room, `c` chat, `s` square, ...).
@@ -409,7 +446,9 @@ impl BaseClient {
             let stored = self.storage.get("reqseq").await?;
             let map = match stored {
                 Some(serde_json::Value::String(s)) => serde_json::from_str(&s).unwrap_or_default(),
-                Some(v @ serde_json::Value::Object(_)) => serde_json::from_value(v).unwrap_or_default(),
+                Some(v @ serde_json::Value::Object(_)) => {
+                    serde_json::from_value(v).unwrap_or_default()
+                }
                 _ => HashMap::new(),
             };
             *guard = Some(map);
@@ -424,6 +463,7 @@ impl BaseClient {
     }
 
     pub(crate) fn require_token(&self) -> Result<String> {
-        self.auth_token().ok_or_else(|| Error::internal("NotAuthorized", "try login first"))
+        self.auth_token()
+            .ok_or_else(|| Error::internal("NotAuthorized", "try login first"))
     }
 }

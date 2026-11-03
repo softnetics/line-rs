@@ -13,20 +13,29 @@ impl ChannelService<'_> {
     /// Recovered by static RE of LINE macOS 26.5.0; unverified against a live
     /// server.
     pub async fn revoke_channel(&self, channel_id: &str) -> Result<Value> {
-        self.request("revokeChannel", vec![(1, TValue::string(channel_id))], Parse::Result).await
+        self.request(
+            "revokeChannel",
+            vec![(1, TValue::string(channel_id))],
+            Parse::Result,
+        )
+        .await
     }
 
     /// The caller's channel settings (`ChannelSettings`). Recovered by static
     /// RE of LINE macOS 26.5.0; unverified against a live server.
     pub async fn get_channel_settings(&self) -> Result<Value> {
-        self.request("getChannelSettings", Vec::new(), Parse::Result).await
+        self.request("getChannelSettings", Vec::new(), Parse::Result)
+            .await
     }
 }
 
 // <generated pass-through>
 impl ChannelService<'_> {
     /// `approveChannelAndIssueChannelToken(channelId: string)`.
-    pub async fn approve_channel_and_issue_channel_token(&self, args: impl Into<Value>) -> Result<Value> {
+    pub async fn approve_channel_and_issue_channel_token(
+        &self,
+        args: impl Into<Value>,
+    ) -> Result<Value> {
         self.call("approveChannelAndIssueChannelToken", args).await
     }
 
@@ -51,8 +60,12 @@ impl ChannelService<'_> {
     }
 
     /// `getReturnUrlWithRequestTokenForAutoLogin(webLoginRequest: WebLoginRequest)`.
-    pub async fn get_return_url_with_request_token_for_auto_login(&self, args: impl Into<Value>) -> Result<Value> {
-        self.call("getReturnUrlWithRequestTokenForAutoLogin", args).await
+    pub async fn get_return_url_with_request_token_for_auto_login(
+        &self,
+        args: impl Into<Value>,
+    ) -> Result<Value> {
+        self.call("getReturnUrlWithRequestTokenForAutoLogin", args)
+            .await
     }
 
     /// `getUpdatedChannelIds(channelIds: list<ChannelIdWithLastUpdated>)`.
@@ -71,12 +84,18 @@ impl ChannelService<'_> {
     }
 
     /// `issueRequestTokenWithAuthScheme` (args struct `issueRequestTokenWithAuthScheme_args`).
-    pub async fn issue_request_token_with_auth_scheme(&self, args: impl Into<Value>) -> Result<Value> {
+    pub async fn issue_request_token_with_auth_scheme(
+        &self,
+        args: impl Into<Value>,
+    ) -> Result<Value> {
         self.call("issueRequestTokenWithAuthScheme", args).await
     }
 
     /// `updateChannelNotificationSetting(setting: list<ChannelNotificationSetting>)`.
-    pub async fn update_channel_notification_setting(&self, args: impl Into<Value>) -> Result<Value> {
+    pub async fn update_channel_notification_setting(
+        &self,
+        args: impl Into<Value>,
+    ) -> Result<Value> {
         self.call("updateChannelNotificationSetting", args).await
     }
 

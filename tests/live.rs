@@ -8,8 +8,14 @@ use line_rs::{BaseClient, Device};
 async fn rsa_key_info() {
     let base = BaseClient::new(Device::DesktopWin).unwrap();
     let key = base.get_rsa_key_info(0).await.unwrap();
-    assert!(key["keynm"].as_str().is_some_and(|s| !s.is_empty()), "{key}");
-    assert!(key["nvalue"].as_str().is_some_and(|s| s.len() >= 256), "{key}");
+    assert!(
+        key["keynm"].as_str().is_some_and(|s| !s.is_empty()),
+        "{key}"
+    );
+    assert!(
+        key["nvalue"].as_str().is_some_and(|s| s.len() >= 256),
+        "{key}"
+    );
 }
 
 #[tokio::test]
@@ -19,5 +25,8 @@ async fn sqr_create_session() {
     let sqr = base.create_session().await.unwrap();
     assert!(!sqr.is_empty());
     let qr = base.create_qr_code_for_secure(&sqr).await.unwrap();
-    assert!(qr["1"].as_str().is_some_and(|u| u.starts_with("https://")), "{qr}");
+    assert!(
+        qr["1"].as_str().is_some_and(|u| u.starts_with("https://")),
+        "{qr}"
+    );
 }

@@ -20,8 +20,8 @@
 //! ```
 
 mod chat;
-mod listen;
 pub mod liff;
+mod listen;
 mod login;
 pub mod message;
 mod profile;
@@ -38,10 +38,13 @@ use tokio::sync::broadcast;
 
 pub use chat::{Chat, MessageFetcher, SentMedia};
 pub use listen::{ListenHandle, ListenOptions, ReactionEvent, TalkEvent};
-pub use login::{create_base_client, login_with_auth_token, login_with_password, login_with_qr, InitOptions};
+pub use login::{
+    InitOptions, create_base_client, login_with_auth_token, login_with_password, login_with_qr,
+};
 pub use message::{
-    build_text_decorations, AppLinkInfo, CallInfo, ChatEventInfo, Decoration, Emoji, GiftInfo, MentionTarget,
-    MessageInput, Mid, PostNotificationInfo, ReactionType, SquareMessage, SquareThreadMessage, TalkMessage,
+    AppLinkInfo, CallInfo, ChatEventInfo, Decoration, Emoji, GiftInfo, MentionTarget, MessageInput,
+    Mid, PostNotificationInfo, ReactionType, SquareMessage, SquareThreadMessage, TalkMessage,
+    build_text_decorations,
 };
 pub use profile::{MyProfileUpdate, ProfileAttribute};
 pub use square::{Square, SquareChat, SquareChatEvent};
@@ -49,11 +52,11 @@ pub use user::User;
 pub use voom::{Voom, VoomChannel, VoomRestOptions, VoomRestResponse, VoomRouting};
 
 use crate::base::BaseClient;
-use crate::service::talk::compact::CompactMessageResponse;
-use crate::service::talk::SendCompactMessageOptions;
 use crate::e2ee::E2eeContent;
 use crate::error::{Error, Result};
 use crate::request::{Parse, RequestOptions};
+use crate::service::talk::SendCompactMessageOptions;
+use crate::service::talk::compact::CompactMessageResponse;
 use crate::thrift::{Protocol, TType, TValue, Value};
 use crate::tv;
 use message::types::enum_value;
@@ -138,13 +141,20 @@ impl Client {
     /// Send a talk message to `to` (user, group or room); port of linejs
     /// `talk.sendMessage`. With `e2ee: Some(true)` text/location is encrypted;
     /// with `None` a server E2EE demand triggers one encrypted retry.
-    pub async fn send_message(&self, to: &str, input: impl Into<MessageInput>) -> Result<TalkMessage> {
+    pub async fn send_message(
+        &self,
+        to: &str,
+        input: impl Into<MessageInput>,
+    ) -> Result<TalkMessage> {
         let mut sent = self.send_message_raw(to, input.into()).await?;
         sent.insert("to", to);
         match TalkMessage::from_raw(self.clone(), sent.clone()).await {
             Ok(m) => Ok(m),
             Err(e) => {
-                self.base.log("decryptE2EEMessageError", serde_json::json!({"error": e.to_string()}));
+                self.base.log(
+                    "decryptE2EEMessageError",
+                    serde_json::json!({"error": e.to_string()}),
+                );
                 Ok(TalkMessage::new(self.clone(), sent))
             }
         }
@@ -155,21 +165,34 @@ impl Client {
         loop {
             let original = input.clone();
             let mut input_now = input.clone();
-            let content_type = input_now.content_type.clone().unwrap_or_else(|| "NONE".into());
+            let content_type = input_now
+                .content_type
+                .clone()
+                .unwrap_or_else(|| "NONE".into());
             if input_now.e2ee == Some(true)
                 && input_now.chunks.is_none()
                 && (input_now.text.is_some() || input_now.location.is_some())
             {
-                let ct = enum_value(&Value::String(content_type.clone()), "ContentType").unwrap_or(0);
-                let payload = match (input_now.text.take().filter(|t| !t.is_empty()), input_now.location.take()) {
+                let ct =
+                    enum_value(&Value::String(content_type.clone()), "ContentType").unwrap_or(0);
+                let payload = match (
+                    input_now.text.take().filter(|t| !t.is_empty()),
+                    input_now.location.take(),
+                ) {
                     (Some(t), _) => E2eeContent::Text(t),
                     (None, Some(loc)) => E2eeContent::Location(loc),
                     (None, None) => E2eeContent::Text("invalid".into()),
                 };
                 let chunks = self.base.encrypt_e2ee_message(to, payload, ct, 2).await?;
-                input_now.content_metadata.insert("e2eeVersion".into(), "2".into());
-                input_now.content_metadata.insert("contentType".into(), ct.to_string());
-                input_now.content_metadata.insert("e2eeMark".into(), "2".into());
+                input_now
+                    .content_metadata
+                    .insert("e2eeVersion".into(), "2".into());
+                input_now
+                    .content_metadata
+                    .insert("contentType".into(), ct.to_string());
+                input_now
+                    .content_metadata
+                    .insert("e2eeMark".into(), "2".into());
                 input_now.chunks = Some(chunks);
             }
             let mut message = tv!({
@@ -182,12 +205,18 @@ impl Client {
                 "text": input_now.text,
                 "relatedMessageId": input_now.related_message_id,
             });
-            message.insert("contentMetadata", metadata_value(&input_now.content_metadata));
+            message.insert(
+                "contentMetadata",
+                metadata_value(&input_now.content_metadata),
+            );
             if let Some(loc) = input_now.location {
                 message.insert("location", loc);
             }
             if let Some(chunks) = input_now.chunks {
-                message.insert("chunks", Value::List(chunks.into_iter().map(Value::Binary).collect()));
+                message.insert(
+                    "chunks",
+                    Value::List(chunks.into_iter().map(Value::Binary).collect()),
+                );
             }
             if input_now.related_message_id.is_some() {
                 message.insert("messageRelationType", "REPLY");
@@ -207,9 +236,16 @@ impl Client {
 
     /// Send a message to a square chat (`SquareService.sendMessage`).
     /// Returns the `SendMessageResponse`.
-    pub async fn send_square_message(&self, square_chat_mid: &str, input: impl Into<MessageInput>) -> Result<Value> {
+    pub async fn send_square_message(
+        &self,
+        square_chat_mid: &str,
+        input: impl Into<MessageInput>,
+    ) -> Result<Value> {
         let input = input.into();
-        let content_type: Value = input.content_type.map(Value::String).unwrap_or(Value::Int(0));
+        let content_type: Value = input
+            .content_type
+            .map(Value::String)
+            .unwrap_or(Value::Int(0));
         let mut message = tv!({"to": square_chat_mid, "text": input.text});
         message.insert("contentType", content_type);
         message.insert("contentMetadata", metadata_value(&input.content_metadata));
@@ -223,7 +259,8 @@ impl Client {
         }
         let mut square_message = tv!({"squareMessageRevision": 4});
         square_message.insert("message", message);
-        let mut request = tv!({"reqSeq": self.base.get_reqseq("sq").await?, "squareChatMid": square_chat_mid});
+        let mut request =
+            tv!({"reqSeq": self.base.get_reqseq("sq").await?, "squareChatMid": square_chat_mid});
         request.insert("squareMessage", square_message);
         let mut args = Value::object();
         args.insert("request", request);
@@ -232,8 +269,16 @@ impl Client {
 
     /// Send a compact talk message through `/CA5` or `/ECA5` (falls back to
     /// E2EE when the server requires it).
-    pub async fn send_compact_message(&self, to: &str, text: &str) -> Result<CompactMessageResponse> {
-        let options = SendCompactMessageOptions { to: to.to_string(), text: Some(text.to_string()), ..Default::default() };
+    pub async fn send_compact_message(
+        &self,
+        to: &str,
+        text: &str,
+    ) -> Result<CompactMessageResponse> {
+        let options = SendCompactMessageOptions {
+            to: to.to_string(),
+            text: Some(text.to_string()),
+            ..Default::default()
+        };
         self.base.talk().send_compact_message(options).await
     }
 
@@ -246,14 +291,23 @@ impl Client {
         let joined = self
             .base
             .talk()
-            .call("getAllChatMids", tv!({"request": {"withMemberChats": true}, "syncReason": "INTERNAL"}))
+            .call(
+                "getAllChatMids",
+                tv!({"request": {"withMemberChats": true}, "syncReason": "INTERNAL"}),
+            )
             .await?;
-        let mids: Vec<Value> = joined["memberChatMids"].as_list().unwrap_or_default().to_vec();
+        let mids: Vec<Value> = joined["memberChatMids"]
+            .as_list()
+            .unwrap_or_default()
+            .to_vec();
         if mids.is_empty() {
             return Ok(Vec::new());
         }
         let res = self.get_chats(Value::List(mids)).await?;
-        Ok(list(&res["chats"]).into_iter().map(|raw| Chat::new(self.clone(), raw)).collect())
+        Ok(list(&res["chats"])
+            .into_iter()
+            .map(|raw| Chat::new(self.clone(), raw))
+            .collect())
     }
 
     async fn get_chats(&self, mids: Value) -> Result<Value> {
@@ -268,8 +322,15 @@ impl Client {
     /// `getContactsV3` per mid (skipping failures) when the server answers
     /// "API method not capable".
     pub async fn fetch_users(&self) -> Result<Vec<User>> {
-        let ids = self.base.relation().call("getUserFriendIds", tv!({"request": {"blockStatus": "ALL"}})).await?;
-        let mids: Vec<String> = list(&ids["userFriendMids"]).iter().filter_map(|v| v.as_str().map(str::to_string)).collect();
+        let ids = self
+            .base
+            .relation()
+            .call("getUserFriendIds", tv!({"request": {"blockStatus": "ALL"}}))
+            .await?;
+        let mids: Vec<String> = list(&ids["userFriendMids"])
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
         let raws = fetch_users_with(
             mids,
             |mids| Box::pin(self.get_contacts_v3(mids)),
@@ -277,23 +338,36 @@ impl Client {
             |mid| Box::pin(async move { Ok(self.get_user(&mid).await?.raw) }),
         )
         .await?;
-        Ok(raws.into_iter().map(|raw| User::new(self.clone(), raw)).collect())
+        Ok(raws
+            .into_iter()
+            .map(|raw| User::new(self.clone(), raw))
+            .collect())
     }
 
     async fn get_contacts_v3(&self, mids: Vec<String>) -> Result<Value> {
-        let targets: Vec<serde_json::Value> = mids.iter().map(|m| serde_json::json!({"targetUserMid": m})).collect();
+        let targets: Vec<serde_json::Value> = mids
+            .iter()
+            .map(|m| serde_json::json!({"targetUserMid": m}))
+            .collect();
         self.base
             .relation()
-            .call("getContactsV3", tv!({"request": {"targetUsers": targets, "syncReason": "AUTO_REPAIR"}}))
+            .call(
+                "getContactsV3",
+                tv!({"request": {"targetUsers": targets, "syncReason": "AUTO_REPAIR"}}),
+            )
             .await
     }
 
     /// `getContactsV2` has no `_args` struct in the IDL; encode by hand like
     /// linejs (`[[12, 1, [[15, 1, [11, mids]]]]]`).
     async fn get_contacts_v2(&self, mids: Vec<String>) -> Result<Value> {
-        let list = TValue::List(TType::String, mids.into_iter().map(TValue::string).collect());
+        let list = TValue::List(
+            TType::String,
+            mids.into_iter().map(TValue::string).collect(),
+        );
         let args = vec![(1, TValue::Struct(vec![(1, list)]))];
-        let opts = RequestOptions::new("/S4", Protocol::Compact).parse(Parse::Struct("GetContactsV2Response"));
+        let opts = RequestOptions::new("/S4", Protocol::Compact)
+            .parse(Parse::Struct("GetContactsV2Response"));
         self.base.request(args, "getContactsV2", opts).await
     }
 
@@ -302,20 +376,34 @@ impl Client {
         let res = continue_request(|token| async move {
             self.base
                 .square()
-                .call("getJoinedSquares", tv!({"request": {"limit": 100, "continuationToken": token}}))
+                .call(
+                    "getJoinedSquares",
+                    tv!({"request": {"limit": 100, "continuationToken": token}}),
+                )
                 .await
         })
         .await?;
-        Ok(list(&res["squares"]).into_iter().map(|raw| Square::new(self.clone(), raw)).collect())
+        Ok(list(&res["squares"])
+            .into_iter()
+            .map(|raw| Square::new(self.clone(), raw))
+            .collect())
     }
 
     /// Square chats found in the latest `fetchMyEvents` page
     /// (`notifiedCreateSquareChatMember` events).
     pub async fn fetch_joined_square_chats(&self) -> Result<Vec<SquareChat>> {
-        let res = self.base.square().call("fetchMyEvents", tv!({"request": {"limit": 200}})).await?;
+        let res = self
+            .base
+            .square()
+            .call("fetchMyEvents", tv!({"request": {"limit": 200}}))
+            .await?;
         Ok(list(&res["events"])
             .into_iter()
-            .filter_map(|e| e["payload"].get("notifiedCreateSquareChatMember").map(|n| n["chat"].clone()))
+            .filter_map(|e| {
+                e["payload"]
+                    .get("notifiedCreateSquareChatMember")
+                    .map(|n| n["chat"].clone())
+            })
             .map(|raw| SquareChat::new(self.clone(), raw))
             .collect())
     }
@@ -331,18 +419,32 @@ impl Client {
         let res = self.get_chats(tv!([chat_mid])).await?;
         let raw = res["chats"][0].clone();
         if raw.is_null() {
-            return Err(Error::internal("NotFound", format!("chat {chat_mid} not found")));
+            return Err(Error::internal(
+                "NotFound",
+                format!("chat {chat_mid} not found"),
+            ));
         }
         Ok(Chat::new(self.clone(), raw))
     }
 
     pub async fn get_square(&self, square_mid: &str) -> Result<Square> {
-        let res = self.base.square().call("getSquare", tv!({"request": {"mid": square_mid}})).await?;
+        let res = self
+            .base
+            .square()
+            .call("getSquare", tv!({"request": {"mid": square_mid}}))
+            .await?;
         Ok(Square::new(self.clone(), res["square"].clone()))
     }
 
     pub async fn get_square_chat(&self, square_chat_mid: &str) -> Result<SquareChat> {
-        let res = self.base.square().call("getSquareChat", tv!({"request": {"squareChatMid": square_chat_mid}})).await?;
+        let res = self
+            .base
+            .square()
+            .call(
+                "getSquareChat",
+                tv!({"request": {"squareChatMid": square_chat_mid}}),
+            )
+            .await?;
         Ok(SquareChat::new(self.clone(), res["squareChat"].clone()))
     }
 }
@@ -365,7 +467,9 @@ pub(crate) fn error_code(e: &Error) -> String {
 }
 
 fn is_api_not_capable(e: &Error) -> bool {
-    e.to_string().to_ascii_lowercase().contains("api method not capable")
+    e.to_string()
+        .to_ascii_lowercase()
+        .contains("api method not capable")
 }
 
 type FetchFn<'a, A> = Box<dyn FnMut(A) -> BoxFuture<'a, Result<Value>> + Send + 'a>;
@@ -378,8 +482,11 @@ pub(crate) async fn fetch_users_with<'a>(
     v2: impl FnMut(Vec<String>) -> BoxFuture<'a, Result<Value>> + Send + 'a,
     one: impl FnMut(String) -> BoxFuture<'a, Result<Value>> + Send + 'a,
 ) -> Result<Vec<Value>> {
-    let (mut v3, mut v2, mut one): (FetchFn<'a, Vec<String>>, FetchFn<'a, Vec<String>>, FetchFn<'a, String>) =
-        (Box::new(v3), Box::new(v2), Box::new(one));
+    let (mut v3, mut v2, mut one): (
+        FetchFn<'a, Vec<String>>,
+        FetchFn<'a, Vec<String>>,
+        FetchFn<'a, String>,
+    ) = (Box::new(v3), Box::new(v2), Box::new(one));
     if mids.is_empty() {
         return Ok(Vec::new());
     }
@@ -394,7 +501,11 @@ pub(crate) async fn fetch_users_with<'a>(
                 .entries()
                 .into_iter()
                 .map(|(mid, entry)| {
-                    let mut raw = if entry.as_struct().is_some() { entry.clone() } else { Value::object() };
+                    let mut raw = if entry.as_struct().is_some() {
+                        entry.clone()
+                    } else {
+                        Value::object()
+                    };
                     raw.insert("targetUserMid", mid);
                     raw
                 })
@@ -427,7 +538,10 @@ where
     let mut token: Option<String> = None;
     loop {
         let res = handler(token.take()).await?;
-        let next = res["continuationToken"].as_str().filter(|t| !t.is_empty()).map(str::to_string);
+        let next = res["continuationToken"]
+            .as_str()
+            .filter(|t| !t.is_empty())
+            .map(str::to_string);
         match &mut sum {
             None => sum = Some(res),
             Some(s) => object_sum(s, res),
@@ -452,7 +566,10 @@ fn object_sum(base: &mut Value, add: Value) {
         }
         let existing = match base {
             Value::Struct(m) => m.get_mut(&key),
-            Value::Map(m) => m.iter_mut().find(|(ek, _)| ek.key_string().as_deref() == Some(&key)).map(|(_, v)| v),
+            Value::Map(m) => m
+                .iter_mut()
+                .find(|(ek, _)| ek.key_string().as_deref() == Some(&key))
+                .map(|(_, v)| v),
             _ => return,
         };
         match (existing, v) {
@@ -460,9 +577,10 @@ fn object_sum(base: &mut Value, add: Value) {
                 new.append(old);
                 *old = new;
             }
-            (Some(old @ (Value::Struct(_) | Value::Map(_))), new @ (Value::Struct(_) | Value::Map(_))) => {
-                object_sum(old, new)
-            }
+            (
+                Some(old @ (Value::Struct(_) | Value::Map(_))),
+                new @ (Value::Struct(_) | Value::Map(_)),
+            ) => object_sum(old, new),
             (Some(old), new) if !old.is_null() => *old = new,
             (_, new) => match base {
                 Value::Struct(m) => {
@@ -497,14 +615,24 @@ mod tests {
             mids,
             move |_| Box::pin(async move { v3() }),
             move |_| Box::pin(async move { v2() }),
-            |mid| Box::pin(async move { if mid == "u-bad" { Err(not_capable()) } else { Ok(tv!({"targetUserMid": mid})) } }),
+            |mid| {
+                Box::pin(async move {
+                    if mid == "u-bad" {
+                        Err(not_capable())
+                    } else {
+                        Ok(tv!({"targetUserMid": mid}))
+                    }
+                })
+            },
         )
         .await
     }
 
     #[tokio::test]
     async fn fetch_users_empty_friend_list() {
-        let users = run(&[], || panic!("no call"), || panic!("no call")).await.unwrap();
+        let users = run(&[], || panic!("no call"), || panic!("no call"))
+            .await
+            .unwrap();
         assert!(users.is_empty());
     }
 
@@ -517,7 +645,10 @@ mod tests {
         )
         .await
         .unwrap();
-        let mids: Vec<_> = users.iter().map(|u| u["targetUserMid"].as_str().unwrap()).collect();
+        let mids: Vec<_> = users
+            .iter()
+            .map(|u| u["targetUserMid"].as_str().unwrap())
+            .collect();
         assert_eq!(mids, ["u-a", "u-b"]);
     }
 
@@ -537,16 +668,26 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_users_per_mid_fallback_skips_failures() {
-        let users = run(&["u-a", "u-bad"], || Err(not_capable()), || Err(not_capable())).await.unwrap();
+        let users = run(
+            &["u-a", "u-bad"],
+            || Err(not_capable()),
+            || Err(not_capable()),
+        )
+        .await
+        .unwrap();
         assert_eq!(users.len(), 1);
         assert_eq!(users[0]["targetUserMid"].as_str(), Some("u-a"));
     }
 
     #[tokio::test]
     async fn fetch_users_rethrows_other_errors() {
-        let err = run(&["u-z"], || Err(Error::internal("X", "AUTHENTICATION_FAILED")), || panic!("no v2"))
-            .await
-            .unwrap_err();
+        let err = run(
+            &["u-z"],
+            || Err(Error::internal("X", "AUTHENTICATION_FAILED")),
+            || panic!("no v2"),
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("AUTHENTICATION_FAILED"));
     }
 
@@ -557,9 +698,13 @@ mod tests {
         use crate::thrift::{Schema, TypeRef};
         match (ty, v) {
             (TypeRef::Named(name), Value::Struct(m)) => {
-                let Some(Named::Struct(def)) = Schema::line().resolve(name) else { return };
+                let Some(Named::Struct(def)) = Schema::line().resolve(name) else {
+                    return;
+                };
                 for (k, fv) in m {
-                    let f = def.field_by_name(k).unwrap_or_else(|| panic!("{path}: {name} has no field `{k}`"));
+                    let f = def
+                        .field_by_name(k)
+                        .unwrap_or_else(|| panic!("{path}: {name} has no field `{k}`"));
                     check_fields(&format!("{path}.{k}"), &f.ty, fv);
                 }
             }
@@ -573,7 +718,11 @@ mod tests {
     }
 
     fn check(method: &str, square: bool, args: Value) {
-        let name = if square { format!("SquareService_{method}_args") } else { format!("{method}_args") };
+        let name = if square {
+            format!("SquareService_{method}_args")
+        } else {
+            format!("{method}_args")
+        };
         let ty = crate::thrift::TypeRef::Named(name.clone());
         check_fields(&name, &ty, &args);
         crate::thrift::encode_struct(crate::thrift::Schema::line(), &name, &args).unwrap();
@@ -587,75 +736,235 @@ mod tests {
         let mut send = tv!({"seq": 1});
         send.insert("message", message);
         check("sendMessage", false, send);
-        check("react", false, tv!({"reactRequest": {"reqSeq": 1, "messageId": "1",
-            "reactionType": {"predefinedReactionType": "NICE"}}}));
-        check("sendChatChecked", false, tv!({"chatMid": "c", "lastMessageId": "1", "seq": 1}));
-        check("createChatRoomAnnouncement", false, tv!({"chatRoomMid": "c", "type": "MESSAGE",
-            "contents": {"text": "t", "link": "l"}}));
+        check(
+            "react",
+            false,
+            tv!({"reactRequest": {"reqSeq": 1, "messageId": "1",
+            "reactionType": {"predefinedReactionType": "NICE"}}}),
+        );
+        check(
+            "sendChatChecked",
+            false,
+            tv!({"chatMid": "c", "lastMessageId": "1", "seq": 1}),
+        );
+        check(
+            "createChatRoomAnnouncement",
+            false,
+            tv!({"chatRoomMid": "c", "type": "MESSAGE",
+            "contents": {"text": "t", "link": "l"}}),
+        );
         check("unsendMessage", false, tv!({"messageId": "1"}));
-        check("getAllChatMids", false, tv!({"request": {"withMemberChats": true}, "syncReason": "INTERNAL"}));
-        check("getChats", false, tv!({"request": {"withInvitees": true, "withMembers": true, "chatMids": ["c"]},
-            "syncReason": "INTERNAL"}));
+        check(
+            "getAllChatMids",
+            false,
+            tv!({"request": {"withMemberChats": true}, "syncReason": "INTERNAL"}),
+        );
+        check(
+            "getChats",
+            false,
+            tv!({"request": {"withInvitees": true, "withMembers": true, "chatMids": ["c"]},
+            "syncReason": "INTERNAL"}),
+        );
         check("getMessageBoxes", false, tv!({"messageBoxListRequest": {}}));
-        check("getPreviousMessagesV2WithRequest", false, tv!({"request": {"messageBoxId": "c", "messagesCount": 1,
-            "endMessageId": {"deliveredTime": 1, "messageId": 2}}}));
-        check("updateChat", false, tv!({"request": {"updatedAttribute": "NAME", "reqSeq": 1,
-            "chat": {"chatMid": "c", "chatName": "n"}}}));
-        check("inviteIntoChat", false, tv!({"request": {"targetUserMids": ["u"], "chatMid": "c"}}));
-        check("deleteOtherFromChat", false, tv!({"request": {"targetUserMids": ["u"], "chatMid": "c"}}));
-        check("deleteSelfFromChat", false, tv!({"request": {"chatMid": "c"}}));
+        check(
+            "getPreviousMessagesV2WithRequest",
+            false,
+            tv!({"request": {"messageBoxId": "c", "messagesCount": 1,
+            "endMessageId": {"deliveredTime": 1, "messageId": 2}}}),
+        );
+        check(
+            "updateChat",
+            false,
+            tv!({"request": {"updatedAttribute": "NAME", "reqSeq": 1,
+            "chat": {"chatMid": "c", "chatName": "n"}}}),
+        );
+        check(
+            "inviteIntoChat",
+            false,
+            tv!({"request": {"targetUserMids": ["u"], "chatMid": "c"}}),
+        );
+        check(
+            "deleteOtherFromChat",
+            false,
+            tv!({"request": {"targetUserMids": ["u"], "chatMid": "c"}}),
+        );
+        check(
+            "deleteSelfFromChat",
+            false,
+            tv!({"request": {"chatMid": "c"}}),
+        );
         check("getChatRoomBGMs", false, tv!({"chatRoomMids": ["c"]}));
-        check("updateChatRoomBGM", false, tv!({"reqSeq": 1, "chatRoomMid": "c", "chatRoomBGMInfo": ""}));
-        check("updateContactSetting", false, tv!({"reqSeq": 1, "mid": "u", "flag": "CONTACT_SETTING_FAVORITE",
-            "value": "true"}));
-        check("updateChat", false, tv!({"request": {"updatedAttribute": "NOTIFICATION_SETTING", "reqSeq": 1,
-            "chat": {"chatMid": "c", "notificationDisabled": true}}}));
-        check("updateChat", false, tv!({"request": {"updatedAttribute": "FAVORITE_TIMESTAMP", "reqSeq": 1,
-            "chat": {"chatMid": "c", "favoriteTimestamp": 1}}}));
-        check("setChatHiddenStatus", false, chat::hidden_status_args(1, "c", 9_007_199_254_740_993, true));
-        check("sendChatChecked", false, chat::chat_marker_args(1, "c", "1"));
-        check("sendChatRemoved", false, chat::chat_marker_args(1, "c", "1"));
+        check(
+            "updateChatRoomBGM",
+            false,
+            tv!({"reqSeq": 1, "chatRoomMid": "c", "chatRoomBGMInfo": ""}),
+        );
+        check(
+            "updateContactSetting",
+            false,
+            tv!({"reqSeq": 1, "mid": "u", "flag": "CONTACT_SETTING_FAVORITE",
+            "value": "true"}),
+        );
+        check(
+            "updateChat",
+            false,
+            tv!({"request": {"updatedAttribute": "NOTIFICATION_SETTING", "reqSeq": 1,
+            "chat": {"chatMid": "c", "notificationDisabled": true}}}),
+        );
+        check(
+            "updateChat",
+            false,
+            tv!({"request": {"updatedAttribute": "FAVORITE_TIMESTAMP", "reqSeq": 1,
+            "chat": {"chatMid": "c", "favoriteTimestamp": 1}}}),
+        );
+        check(
+            "setChatHiddenStatus",
+            false,
+            chat::hidden_status_args(1, "c", 9_007_199_254_740_993, true),
+        );
+        check(
+            "sendChatChecked",
+            false,
+            chat::chat_marker_args(1, "c", "1"),
+        );
+        check(
+            "sendChatRemoved",
+            false,
+            chat::chat_marker_args(1, "c", "1"),
+        );
         check("getChatRoomAnnouncements", false, tv!({"chatRoomMid": "c"}));
-        check("removeChatRoomAnnouncement", false, tv!({"reqSeq": 1, "chatRoomMid": "c", "announcementSeq": 2}));
-        check("getMessageReadRange", false, tv!({"chatIds": ["c"], "syncReason": "INTERNAL"}));
-        check("getChatEffectMetaList", false, tv!({"categories": ["BACKGROUND", "KEYWORD"]}));
-        check("cancelReaction", false, tv!({"cancelReactionRequest": {"reqSeq": 1, "messageId": 2}}));
-        check("sendPostback", false, crate::service::talk::postback_args("1", "u", "c", "o"));
+        check(
+            "removeChatRoomAnnouncement",
+            false,
+            tv!({"reqSeq": 1, "chatRoomMid": "c", "announcementSeq": 2}),
+        );
+        check(
+            "getMessageReadRange",
+            false,
+            tv!({"chatIds": ["c"], "syncReason": "INTERNAL"}),
+        );
+        check(
+            "getChatEffectMetaList",
+            false,
+            tv!({"categories": ["BACKGROUND", "KEYWORD"]}),
+        );
+        check(
+            "cancelReaction",
+            false,
+            tv!({"cancelReactionRequest": {"reqSeq": 1, "messageId": 2}}),
+        );
+        check(
+            "sendPostback",
+            false,
+            crate::service::talk::postback_args("1", "u", "c", "o"),
+        );
         check("getProfile", false, tv!({"syncReason": "INTERNAL"}));
-        check("getUserFriendIds", false, tv!({"request": {"blockStatus": "ALL"}}));
-        check("getContactsV3", false, tv!({"request": {"targetUsers": [{"targetUserMid": "u"}],
-            "syncReason": "AUTO_REPAIR"}}));
-        check("getContactCalendarEvents", false, tv!({"request": {"targetUsers": [{"targetUserMid": "u"}]}}));
+        check(
+            "getUserFriendIds",
+            false,
+            tv!({"request": {"blockStatus": "ALL"}}),
+        );
+        check(
+            "getContactsV3",
+            false,
+            tv!({"request": {"targetUsers": [{"targetUserMid": "u"}],
+            "syncReason": "AUTO_REPAIR"}}),
+        );
+        check(
+            "getContactCalendarEvents",
+            false,
+            tv!({"request": {"targetUsers": [{"targetUserMid": "u"}]}}),
+        );
         check("issueChannelToken", false, tv!({"channelId": "1"}));
-        check("sync", false, tv!({"request": {"lastRevision": 1, "lastGlobalRevision": 1,
-            "lastIndividualRevision": 1, "count": 100}}));
+        check(
+            "sync",
+            false,
+            tv!({"request": {"lastRevision": 1, "lastGlobalRevision": 1,
+            "lastIndividualRevision": 1, "count": 100}}),
+        );
 
-        check("sendMessage", true, tv!({"request": {"reqSeq": 1, "squareChatMid": "s", "squareMessage": {
+        check(
+            "sendMessage",
+            true,
+            tv!({"request": {"reqSeq": 1, "squareChatMid": "s", "squareMessage": {
             "squareMessageRevision": 4, "message": {"to": "s", "text": "t", "contentType": 0,
-            "relatedMessageId": "1", "relatedMessageServiceCode": "SQUARE", "messageRelationType": "REPLY"}}}}));
-        check("reactToMessage", true, tv!({"request": {"reqSeq": 0, "reactionType": 2, "messageId": "1",
-            "squareChatMid": "s", "threadMid": "t"}}));
-        check("markAsRead", true, tv!({"request": {"messageId": "1", "squareChatMid": "s", "threadMid": "t"}}));
-        check("createSquareChatAnnouncement", true, tv!({"createSquareChatAnnouncementRequest": {
+            "relatedMessageId": "1", "relatedMessageServiceCode": "SQUARE", "messageRelationType": "REPLY"}}}}),
+        );
+        check(
+            "reactToMessage",
+            true,
+            tv!({"request": {"reqSeq": 0, "reactionType": 2, "messageId": "1",
+            "squareChatMid": "s", "threadMid": "t"}}),
+        );
+        check(
+            "markAsRead",
+            true,
+            tv!({"request": {"messageId": "1", "squareChatMid": "s", "threadMid": "t"}}),
+        );
+        check(
+            "createSquareChatAnnouncement",
+            true,
+            tv!({"createSquareChatAnnouncementRequest": {
             "reqSeq": 0, "squareChatMid": "s", "squareChatAnnouncement": {"announcementSeq": 0,
             "contents": {"textMessageAnnouncementContents": {"senderSquareMemberMid": "m", "messageId": "1",
-            "text": "t"}}, "createdAt": 0, "type": 0}}}));
-        check("unsendMessage", true, tv!({"request": {"messageId": "1", "squareChatMid": "s", "threadMid": "t"}}));
-        check("destroyMessage", true, tv!({"request": {"messageId": "1", "squareChatMid": "s", "threadMid": "t"}}));
-        check("getSquareChat", true, tv!({"request": {"squareChatMid": "s"}}));
+            "text": "t"}}, "createdAt": 0, "type": 0}}}),
+        );
+        check(
+            "unsendMessage",
+            true,
+            tv!({"request": {"messageId": "1", "squareChatMid": "s", "threadMid": "t"}}),
+        );
+        check(
+            "destroyMessage",
+            true,
+            tv!({"request": {"messageId": "1", "squareChatMid": "s", "threadMid": "t"}}),
+        );
+        check(
+            "getSquareChat",
+            true,
+            tv!({"request": {"squareChatMid": "s"}}),
+        );
         check("getSquare", true, tv!({"request": {"mid": "s"}}));
-        check("getJoinedSquares", true, tv!({"request": {"limit": 100, "continuationToken": "t"}}));
-        check("fetchMyEvents", true, tv!({"request": {"limit": 100, "syncToken": "t", "continuationToken": "c"}}));
-        check("updateSquare", true, tv!({"request": {"updatedAttrs": ["NAME"], "square": {"mid": "s", "name": "n"}}}));
-        check("updateSquareChat", true, tv!({"request": {"updatedAttrs": ["NAME"],
-            "squareChat": {"squareChatMid": "s", "name": "n"}}}));
-        check("getSquareChatMembers", true, tv!({"request": {"continuationToken": "t", "squareChatMid": "s",
-            "limit": 100}}));
-        check("fetchSquareChatEvents", true, tv!({"request": {"limit": 100, "squareChatMid": "s", "syncToken": "t"}}));
-        check("sendSquareThreadMessage", true, tv!({"request": {"reqSeq": 1, "chatMid": "s", "threadMid": "t",
+        check(
+            "getJoinedSquares",
+            true,
+            tv!({"request": {"limit": 100, "continuationToken": "t"}}),
+        );
+        check(
+            "fetchMyEvents",
+            true,
+            tv!({"request": {"limit": 100, "syncToken": "t", "continuationToken": "c"}}),
+        );
+        check(
+            "updateSquare",
+            true,
+            tv!({"request": {"updatedAttrs": ["NAME"], "square": {"mid": "s", "name": "n"}}}),
+        );
+        check(
+            "updateSquareChat",
+            true,
+            tv!({"request": {"updatedAttrs": ["NAME"],
+            "squareChat": {"squareChatMid": "s", "name": "n"}}}),
+        );
+        check(
+            "getSquareChatMembers",
+            true,
+            tv!({"request": {"continuationToken": "t", "squareChatMid": "s",
+            "limit": 100}}),
+        );
+        check(
+            "fetchSquareChatEvents",
+            true,
+            tv!({"request": {"limit": 100, "squareChatMid": "s", "syncToken": "t"}}),
+        );
+        check(
+            "sendSquareThreadMessage",
+            true,
+            tv!({"request": {"reqSeq": 1, "chatMid": "s", "threadMid": "t",
             "threadMessage": {"message": {"to": "s", "text": "t", "contentType": "NONE", "toType": "SQUARE_THREAD",
             "contentMetadata": {}, "relatedMessageId": "1", "relatedMessageServiceCode": "SQUARE",
-            "messageRelationType": "REPLY"}}}}));
+            "messageRelationType": "REPLY"}}}}),
+        );
     }
 
     #[tokio::test]
@@ -673,7 +982,10 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(seen, [None, Some("t1".to_string())]);
-        let mids: Vec<_> = list(&res["squares"]).iter().map(|s| s["mid"].as_str().unwrap().to_string()).collect();
+        let mids: Vec<_> = list(&res["squares"])
+            .iter()
+            .map(|s| s["mid"].as_str().unwrap().to_string())
+            .collect();
         assert_eq!(mids, ["s2", "s1"]);
         assert_eq!(res["members"]["s2"].as_str(), Some("m2"));
         assert_eq!(res["members"]["s1"].as_str(), Some("m1"));

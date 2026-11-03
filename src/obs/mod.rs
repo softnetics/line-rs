@@ -67,7 +67,11 @@ pub struct ObsFile {
 
 impl ObsFile {
     pub fn new(data: impl Into<Bytes>) -> Self {
-        Self { data: data.into(), name: None, mime: None }
+        Self {
+            data: data.into(),
+            name: None,
+            mime: None,
+        }
     }
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
@@ -90,7 +94,12 @@ impl ObsFile {
             .and_then(|n| n.rsplit('.').next())
             .filter(|e| !e.is_empty())
             .map(str::to_string)
-            .or_else(|| self.mime.as_deref().and_then(mime::extension).map(str::to_string))
+            .or_else(|| {
+                self.mime
+                    .as_deref()
+                    .and_then(mime::extension)
+                    .map(str::to_string)
+            })
     }
 }
 
@@ -225,7 +234,10 @@ pub struct Obs<'a> {
 impl BaseClient {
     /// LINE Object Storage.
     pub fn obs(&self) -> Obs<'_> {
-        Obs { client: self, prefix: OBS_PREFIX.to_string() }
+        Obs {
+            client: self,
+            prefix: OBS_PREFIX.to_string(),
+        }
     }
 }
 
@@ -234,7 +246,10 @@ fn ensure_ok(status: reqwest::StatusCode, what: &str) -> Result<()> {
     if status.is_success() {
         Ok(())
     } else {
-        Err(Error::internal("ObsError", format!("{what}: HTTP {}", status.as_u16())))
+        Err(Error::internal(
+            "ObsError",
+            format!("{what}: HTTP {}", status.as_u16()),
+        ))
     }
 }
 
@@ -243,8 +258,8 @@ fn to_header_map(headers: impl IntoIterator<Item = (String, String)>) -> Result<
     for (k, v) in headers {
         let name = HeaderName::from_bytes(k.as_bytes())
             .map_err(|e| Error::internal("ObsError", format!("invalid header name `{k}`: {e}")))?;
-        let value =
-            HeaderValue::from_str(&v).map_err(|e| Error::internal("ObsError", format!("invalid header `{k}`: {e}")))?;
+        let value = HeaderValue::from_str(&v)
+            .map_err(|e| Error::internal("ObsError", format!("invalid header `{k}`: {e}")))?;
         map.insert(name, value);
     }
     Ok(map)
@@ -252,7 +267,10 @@ fn to_header_map(headers: impl IntoIterator<Item = (String, String)>) -> Result<
 
 /// Merge `overrides` into `base`, keeping the original position of keys
 /// that already exist (object-spread semantics).
-fn merge_params(base: &mut Vec<(String, String)>, overrides: impl IntoIterator<Item = (String, String)>) {
+fn merge_params(
+    base: &mut Vec<(String, String)>,
+    overrides: impl IntoIterator<Item = (String, String)>,
+) {
     for (k, v) in overrides {
         match base.iter_mut().find(|(bk, _)| *bk == k) {
             Some(slot) => slot.1 = v,
@@ -266,13 +284,23 @@ pub fn obs_params_header(params: &[(String, String)]) -> String {
     use base64::Engine;
     let body: Vec<String> = params
         .iter()
-        .map(|(k, v)| format!("{}:{}", serde_json::Value::from(k.as_str()), serde_json::Value::from(v.as_str())))
+        .map(|(k, v)| {
+            format!(
+                "{}:{}",
+                serde_json::Value::from(k.as_str()),
+                serde_json::Value::from(v.as_str())
+            )
+        })
         .collect();
     base64::engine::general_purpose::STANDARD.encode(format!("{{{}}}", body.join(",")))
 }
 
 fn header_str(headers: &HeaderMap, name: &str) -> String {
-    headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or_default().to_string()
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string()
 }
 
 impl<'a> Obs<'a> {
@@ -298,7 +326,11 @@ impl<'a> Obs<'a> {
 
     /// URL of a message's `object_info.obs`.
     pub fn message_metadata_url(&self, message_id: &str, square: bool) -> String {
-        format!("{}r/{}/m/{message_id}/object_info.obs", self.prefix, if square { "g2" } else { "talk" })
+        format!(
+            "{}r/{}/m/{message_id}/object_info.obs",
+            self.prefix,
+            if square { "g2" } else { "talk" }
+        )
     }
 
     fn read_headers(&self) -> Result<HeaderMap> {
@@ -307,14 +339,25 @@ impl<'a> Obs<'a> {
             .auth_token()
             .ok_or_else(|| Error::internal("Not setup yet", "Please call 'login()' first"))?;
         to_header_map([
-            ("accept".to_string(), "application/json, text/plain, */*".to_string()),
-            ("x-line-application".to_string(), self.client.device_details.application()),
+            (
+                "accept".to_string(),
+                "application/json, text/plain, */*".to_string(),
+            ),
+            (
+                "x-line-application".to_string(),
+                self.client.device_details.application(),
+            ),
             ("x-line-access".to_string(), token),
         ])
     }
 
     /// Download a (non-E2EE) message's media; the name comes from its metadata.
-    pub async fn download_message_data(&self, message_id: &str, preview: bool, square: bool) -> Result<ObsFile> {
+    pub async fn download_message_data(
+        &self,
+        message_id: &str,
+        preview: bool,
+        square: bool,
+    ) -> Result<ObsFile> {
         let headers = self.read_headers()?;
         let res = self
             .client
@@ -325,14 +368,26 @@ impl<'a> Obs<'a> {
             .send()
             .await?;
         ensure_ok(res.status(), "Message data download failed")?;
-        let mime = res.headers().get("content-type").and_then(|v| v.to_str().ok()).map(str::to_string);
+        let mime = res
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
         let data = res.bytes().await?;
         let info = self.message_obs_metadata(message_id, square).await?;
-        Ok(ObsFile { data, name: Some(info.name), mime })
+        Ok(ObsFile {
+            data,
+            name: Some(info.name),
+            mime,
+        })
     }
 
     /// `object_info.obs` of a message's media.
-    pub async fn message_obs_metadata(&self, message_id: &str, square: bool) -> Result<ObsMetadata> {
+    pub async fn message_obs_metadata(
+        &self,
+        message_id: &str,
+        square: bool,
+    ) -> Result<ObsMetadata> {
         let headers = self.read_headers()?;
         let res = self
             .client
@@ -359,7 +414,11 @@ impl<'a> Obs<'a> {
         duration_ms: Option<u64>,
     ) -> Result<ObsUpload> {
         self.client.require_token()?;
-        let ext = file.mime.as_deref().and_then(mime::extension).unwrap_or("undefined");
+        let ext = file
+            .mime
+            .as_deref()
+            .and_then(mime::extension)
+            .unwrap_or("undefined");
         let reqseq = self.client.get_reqseq("talk").await?;
         let name = file.name.clone().unwrap_or_else(|| format!("linejs.{ext}"));
         let mut params: Vec<(String, String)> = vec![
@@ -386,7 +445,11 @@ impl<'a> Obs<'a> {
             }
             ObjType::File => {}
         }
-        let to_type = if to.starts_with('m') || to.starts_with('t') { "g2" } else { "talk" };
+        let to_type = if to.starts_with('m') || to.starts_with('t') {
+            "g2"
+        } else {
+            "talk"
+        };
         self.upload_object_for_service(ObjectUpload {
             data: file.data,
             o_type,
@@ -409,15 +472,24 @@ impl<'a> Obs<'a> {
             return Err(Error::internal("ObsError", "No data to send."));
         }
         let filename = opts.filename.clone().unwrap_or_else(uuid_v4);
-        let mut params =
-            vec![("type".to_string(), opts.o_type.as_str().to_string()), ("ver".into(), "2.0".into()), ("name".into(), filename)];
+        let mut params = vec![
+            ("type".to_string(), opts.o_type.as_str().to_string()),
+            ("ver".into(), "2.0".into()),
+            ("name".into(), filename),
+        ];
         merge_params(&mut params, opts.params);
 
         let mut headers = self.client.line_headers("POST");
-        merge_params(&mut headers, [
-            ("content-type".to_string(), "application/octet-stream".to_string()),
-            ("x-obs-params".to_string(), obs_params_header(&params)),
-        ]);
+        merge_params(
+            &mut headers,
+            [
+                (
+                    "content-type".to_string(),
+                    "application/octet-stream".to_string(),
+                ),
+                ("x-obs-params".to_string(), obs_params_header(&params)),
+            ],
+        );
         let headers = to_header_map(headers.into_iter().chain(opts.add_headers))?;
 
         let res = self
@@ -436,7 +508,11 @@ impl<'a> Obs<'a> {
             "Obs.uploadObjectForServiceResponse",
             serde_json::json!({"objId": obj_id, "objHash": obj_hash, "status": res.status().as_u16()}),
         );
-        Ok(ObsUpload { obj_id, obj_hash, headers })
+        Ok(ObsUpload {
+            obj_id,
+            obj_hash,
+            headers,
+        })
     }
 
     /// Raw download from `/r/{obs_path}/{oid}` (or `{oid}` substituted in
@@ -447,8 +523,17 @@ impl<'a> Obs<'a> {
         oid: &str,
         add_headers: Vec<(String, String)>,
     ) -> Result<Bytes> {
-        let path = if obs_path.contains("{oid}") { obs_path.replacen("{oid}", oid, 1) } else { format!("{obs_path}/{oid}") };
-        let headers = to_header_map(self.client.line_headers("GET").into_iter().chain(add_headers))?;
+        let path = if obs_path.contains("{oid}") {
+            obs_path.replacen("{oid}", oid, 1)
+        } else {
+            format!("{obs_path}/{oid}")
+        };
+        let headers = to_header_map(
+            self.client
+                .line_headers("GET")
+                .into_iter()
+                .chain(add_headers),
+        )?;
         let res = self
             .client
             .http
@@ -470,7 +555,14 @@ pub(crate) fn uuid_v4() -> String {
     b[6] = (b[6] & 0x0f) | 0x40;
     b[8] = (b[8] & 0x3f) | 0x80;
     let h = hex::encode(b);
-    format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
+    format!(
+        "{}-{}-{}-{}-{}",
+        &h[..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..]
+    )
 }
 
 #[cfg(test)]

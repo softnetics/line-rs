@@ -8,7 +8,7 @@ use std::time::Duration;
 use futures::Stream;
 
 use super::message::{MessageInput, SquareMessage};
-use super::{continue_request, list, Client};
+use super::{Client, continue_request, list};
 use crate::error::Result;
 use crate::thrift::Value;
 use crate::tv;
@@ -28,7 +28,11 @@ impl std::fmt::Debug for Square {
 
 /// Shallow `{...base, ...patch}`.
 fn merged(base: &Value, patch: Value) -> Value {
-    let mut out = if base.as_struct().is_some() { base.clone() } else { Value::object() };
+    let mut out = if base.as_struct().is_some() {
+        base.clone()
+    } else {
+        Value::object()
+    };
     for (k, v) in patch.entries() {
         out.insert(k, v.clone());
     }
@@ -50,7 +54,12 @@ impl Square {
 
     /// Re-fetch `raw`.
     pub async fn update(&mut self) -> Result<()> {
-        let res = self.client.base.square().call("getSquare", tv!({"request": {"mid": self.mid()}})).await?;
+        let res = self
+            .client
+            .base
+            .square()
+            .call("getSquare", tv!({"request": {"mid": self.mid()}}))
+            .await?;
         self.raw = res["square"].clone();
         Ok(())
     }
@@ -95,7 +104,9 @@ pub struct SquareChat {
 
 impl std::fmt::Debug for SquareChat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SquareChat").field("raw", &self.raw).finish()
+        f.debug_struct("SquareChat")
+            .field("raw", &self.raw)
+            .finish()
     }
 }
 
@@ -114,8 +125,15 @@ impl SquareChat {
 
     /// Re-fetch `raw`.
     pub async fn update(&mut self) -> Result<()> {
-        let res =
-            self.client.base.square().call("getSquareChat", tv!({"request": {"squareChatMid": self.mid()}})).await?;
+        let res = self
+            .client
+            .base
+            .square()
+            .call(
+                "getSquareChat",
+                tv!({"request": {"squareChatMid": self.mid()}}),
+            )
+            .await?;
         self.raw = res["squareChat"].clone();
         Ok(())
     }
@@ -127,49 +145,93 @@ impl SquareChat {
 
     /// Send an image (OBS upload in "reqseq" mode, so the server creates the
     /// message; it cannot be a reply). Returns `(obj_id, obj_hash)`.
-    pub async fn send_image(&self, data: Vec<u8>, filename: Option<&str>) -> Result<(String, String)> {
-        self.send_media("image", data, filename.unwrap_or("image"), None).await
+    pub async fn send_image(
+        &self,
+        data: Vec<u8>,
+        filename: Option<&str>,
+    ) -> Result<(String, String)> {
+        self.send_media("image", data, filename.unwrap_or("image"), None)
+            .await
     }
 
-    pub async fn send_video(&self, data: Vec<u8>, filename: Option<&str>, duration_ms: Option<u64>) -> Result<(String, String)> {
-        self.send_media("video", data, filename.unwrap_or("video"), duration_ms).await
+    pub async fn send_video(
+        &self,
+        data: Vec<u8>,
+        filename: Option<&str>,
+        duration_ms: Option<u64>,
+    ) -> Result<(String, String)> {
+        self.send_media("video", data, filename.unwrap_or("video"), duration_ms)
+            .await
     }
 
-    pub async fn send_audio(&self, data: Vec<u8>, filename: Option<&str>, duration_ms: Option<u64>) -> Result<(String, String)> {
-        self.send_media("audio", data, filename.unwrap_or("voice.m4a"), duration_ms).await
+    pub async fn send_audio(
+        &self,
+        data: Vec<u8>,
+        filename: Option<&str>,
+        duration_ms: Option<u64>,
+    ) -> Result<(String, String)> {
+        self.send_media("audio", data, filename.unwrap_or("voice.m4a"), duration_ms)
+            .await
     }
 
-    async fn send_media(&self, kind: &str, data: Vec<u8>, filename: &str, duration_ms: Option<u64>) -> Result<(String, String)> {
+    async fn send_media(
+        &self,
+        kind: &str,
+        data: Vec<u8>,
+        filename: &str,
+        duration_ms: Option<u64>,
+    ) -> Result<(String, String)> {
         let o_type = match kind {
             "video" => ObjType::Video,
             "audio" => ObjType::Audio,
             _ => ObjType::Image,
         };
         let file = ObsFile::new(data).name(filename);
-        let up = self.client.base.obs().upload_obj_talk(self.mid(), o_type, file, None, duration_ms).await?;
+        let up = self
+            .client
+            .base
+            .obs()
+            .upload_obj_talk(self.mid(), o_type, file, None, duration_ms)
+            .await?;
         Ok((up.obj_id, up.obj_hash))
     }
 
     /// `updateSquareChat` with `SquareChatAttribute` names and a partial
     /// `SquareChat` merged over `raw`.
-    pub async fn update_square_chat(&self, updated_attrs: &[&str], square_chat: Value) -> Result<Value> {
+    pub async fn update_square_chat(
+        &self,
+        updated_attrs: &[&str],
+        square_chat: Value,
+    ) -> Result<Value> {
         let mut request = tv!({"updatedAttrs": updated_attrs});
         request.insert("squareChat", merged(&self.raw, square_chat));
         let mut args = Value::object();
         args.insert("request", request);
-        self.client.base.square().call("updateSquareChat", args).await
+        self.client
+            .base
+            .square()
+            .call("updateSquareChat", args)
+            .await
     }
 
     pub async fn update_name(&self, name: &str) -> Result<Value> {
-        self.update_square_chat(&["NAME"], tv!({"name": name})).await
+        self.update_square_chat(&["NAME"], tv!({"name": name}))
+            .await
     }
 
     /// All members (paginated `getSquareChatMembers`).
     pub async fn members(&self) -> Result<Vec<Value>> {
         let mid = self.mid().to_string();
         let res = continue_request(|token| {
-            let args = tv!({"request": {"continuationToken": token, "squareChatMid": mid, "limit": 100}});
-            async move { self.client.base.square().call("getSquareChatMembers", args).await }
+            let args =
+                tv!({"request": {"continuationToken": token, "squareChatMid": mid, "limit": 100}});
+            async move {
+                self.client
+                    .base
+                    .square()
+                    .call("getSquareChatMembers", args)
+                    .await
+            }
         })
         .await?;
         Ok(list(&res["squareChatMembers"]))
@@ -189,7 +251,10 @@ impl SquareChat {
     /// Poll `fetchSquareChatEvents` (every second; 2s after an error). Without
     /// `sync_token` the backlog is skipped first. Request errors are yielded
     /// and polling continues; drop the stream to stop.
-    pub fn listen(&self, sync_token: Option<String>) -> impl Stream<Item = Result<SquareChatEvent>> + Send + 'static {
+    pub fn listen(
+        &self,
+        sync_token: Option<String>,
+    ) -> impl Stream<Item = Result<SquareChatEvent>> + Send + 'static {
         struct State {
             chat: SquareChat,
             token: Option<String>,
@@ -197,7 +262,13 @@ impl SquareChat {
             queue: VecDeque<Result<SquareChatEvent>>,
             delay: Option<Duration>,
         }
-        let state = State { chat: self.clone(), token: sync_token, started: false, queue: VecDeque::new(), delay: None };
+        let state = State {
+            chat: self.clone(),
+            token: sync_token,
+            started: false,
+            queue: VecDeque::new(),
+            delay: None,
+        };
         futures::stream::unfold(state, |mut st| async move {
             loop {
                 if let Some(item) = st.queue.pop_front() {
@@ -228,7 +299,8 @@ impl SquareChat {
                     }
                     st.started = true;
                     if let Some(t) = &st.token {
-                        st.queue.push_back(Ok(SquareChatEvent::SyncToken(t.clone())));
+                        st.queue
+                            .push_back(Ok(SquareChatEvent::SyncToken(t.clone())));
                     }
                     continue;
                 }
@@ -237,11 +309,17 @@ impl SquareChat {
                         let next = res["syncToken"].as_str().map(str::to_string);
                         if next.is_some() && next != st.token {
                             st.token = next.clone();
-                            st.queue.push_back(Ok(SquareChatEvent::SyncToken(next.unwrap_or_default())));
+                            st.queue.push_back(Ok(SquareChatEvent::SyncToken(
+                                next.unwrap_or_default(),
+                            )));
                         }
                         let me = st.chat.client.base.mid();
                         for event in list(&res["events"]) {
-                            st.queue.extend(classify_event(&st.chat.client, event, me.as_deref()).into_iter().map(Ok));
+                            st.queue.extend(
+                                classify_event(&st.chat.client, event, me.as_deref())
+                                    .into_iter()
+                                    .map(Ok),
+                            );
                         }
                         st.delay = Some(Duration::from_secs(1));
                     }
@@ -256,15 +334,23 @@ impl SquareChat {
 }
 
 /// Map one `SquareEvent` to the events [`SquareChat::listen`] yields.
-pub(crate) fn classify_event(client: &Client, event: Value, my_mid: Option<&str>) -> Vec<SquareChatEvent> {
-    let kind = super::message::types::enum_name(&event["type"], "SquareEventType").unwrap_or_default();
+pub(crate) fn classify_event(
+    client: &Client,
+    event: Value,
+    my_mid: Option<&str>,
+) -> Vec<SquareChatEvent> {
+    let kind =
+        super::message::types::enum_name(&event["type"], "SquareEventType").unwrap_or_default();
     let payload = event["payload"].clone();
     let mut out = vec![SquareChatEvent::Event(event)];
     let field = |name: &str| payload.get(name).cloned();
     match kind.as_str() {
         "SEND_MESSAGE" => {
             if let Some(p) = field("sendMessage") {
-                out.push(SquareChatEvent::Message(SquareMessage::new(client.clone(), p["squareMessage"].clone())));
+                out.push(SquareChatEvent::Message(SquareMessage::new(
+                    client.clone(),
+                    p["squareMessage"].clone(),
+                )));
             }
         }
         "RECEIVE_MESSAGE" => {
@@ -277,10 +363,18 @@ pub(crate) fn classify_event(client: &Client, event: Value, my_mid: Option<&str>
                 }
             }
         }
-        "NOTIFIED_KICKOUT_FROM_SQUARE" => out.extend(field("notifiedKickoutFromSquare").map(SquareChatEvent::Kick)),
-        "NOTIFIED_LEAVE_SQUARE_CHAT" => out.extend(field("notifiedLeaveSquareChat").map(SquareChatEvent::Leave)),
-        "NOTIFIED_JOIN_SQUARE_CHAT" => out.extend(field("notifiedJoinSquareChat").map(SquareChatEvent::Join)),
-        "NOTIFIED_DESTROY_MESSAGE" => out.extend(field("notifiedDestroyMessage").map(SquareChatEvent::Destroy)),
+        "NOTIFIED_KICKOUT_FROM_SQUARE" => {
+            out.extend(field("notifiedKickoutFromSquare").map(SquareChatEvent::Kick))
+        }
+        "NOTIFIED_LEAVE_SQUARE_CHAT" => {
+            out.extend(field("notifiedLeaveSquareChat").map(SquareChatEvent::Leave))
+        }
+        "NOTIFIED_JOIN_SQUARE_CHAT" => {
+            out.extend(field("notifiedJoinSquareChat").map(SquareChatEvent::Join))
+        }
+        "NOTIFIED_DESTROY_MESSAGE" => {
+            out.extend(field("notifiedDestroyMessage").map(SquareChatEvent::Destroy))
+        }
         _ => {}
     }
     out
@@ -290,14 +384,17 @@ pub(crate) fn classify_event(client: &Client, event: Value, my_mid: Option<&str>
 mod tests {
     use super::*;
     use crate::base::BaseClient;
-    use crate::client::message::{build_text_decorations, Decoration};
     use crate::client::message::utils::metadata_value;
+    use crate::client::message::{Decoration, build_text_decorations};
     use crate::device::Device;
 
     #[test]
     fn classifies_receive_message_with_mention() {
         let client = Client::new(BaseClient::new(Device::Android).unwrap());
-        let (text, meta) = build_text_decorations(&[Decoration::mention("u-self", "@me"), Decoration::text(" hi")]);
+        let (text, meta) = build_text_decorations(&[
+            Decoration::mention("u-self", "@me"),
+            Decoration::text(" hi"),
+        ]);
         let mut message = tv!({"to": "sc", "from": "m1", "contentType": "NONE", "text": text});
         message.insert("contentMetadata", metadata_value(&meta));
         let mut sq = Value::object();
@@ -316,7 +413,10 @@ mod tests {
         assert_eq!(classify_event(&client, event, Some("u-other")).len(), 2);
 
         let kick = tv!({"type": "NOTIFIED_KICKOUT_FROM_SQUARE", "payload": {"notifiedKickoutFromSquare": {"x": 1}}});
-        assert!(matches!(classify_event(&client, kick, None)[1], SquareChatEvent::Kick(_)));
+        assert!(matches!(
+            classify_event(&client, kick, None)[1],
+            SquareChatEvent::Kick(_)
+        ));
     }
 
     #[test]

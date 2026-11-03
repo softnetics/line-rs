@@ -28,8 +28,8 @@ pub mod timeline;
 pub use base::{BaseClient, ClientEvent, LegyMode};
 pub use client::Client;
 pub use device::Device;
-pub use link::LineLink;
 pub use error::{Error, Result};
+pub use link::LineLink;
 pub use thrift::Value;
 
 // Lets `tv!` work in crates that do not depend on serde_json themselves.

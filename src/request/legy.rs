@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
 use base64::Engine;
 use rand::RngCore;
 use rsa::pkcs8::DecodePublicKey;
@@ -19,7 +19,9 @@ pub const LEGY_ENDPOINT: &str = "https://gf.line.naver.jp/enc";
 const LEGY_LE: u8 = 7;
 const LEGY_LAP: &str = "5";
 const LEGY_LCS_PREFIX: &str = "0008";
-const LEGY_IV: [u8; 16] = [78, 9, 72, 62, 56, 245, 255, 114, 128, 18, 123, 158, 251, 92, 45, 51];
+const LEGY_IV: [u8; 16] = [
+    78, 9, 72, 62, 56, 245, 255, 114, 128, 18, 123, 158, 251, 92, 45, 51,
+];
 const LINE_PUBLIC_KEY: &str = "-----BEGIN PUBLIC KEY-----
 MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsMC6HAYeMq4R59e2yRw6
 W1OWT2t9aepiAp4fbSCXzRj7A29BOAFAvKlzAub4oxN13Nt8dbcB+ICAufyDnN5N
@@ -61,14 +63,21 @@ impl LegyEncryptedTransport {
     pub fn new(endpoint: Option<&str>) -> Self {
         let mut aes_key = [0u8; 16];
         rand::thread_rng().fill_bytes(&mut aes_key);
-        Self { endpoint: endpoint.unwrap_or(LEGY_ENDPOINT).to_string(), aes_key, x_lcs: OnceLock::new() }
+        Self {
+            endpoint: endpoint.unwrap_or(LEGY_ENDPOINT).to_string(),
+            aes_key,
+            x_lcs: OnceLock::new(),
+        }
     }
 
     /// Encrypt the inner request into the outer body.
     pub fn encrypt_request(&self, req: &LegyRequest<'_>) -> Vec<u8> {
         let mut inner = vec![("x-lpqs".to_string(), req.path.to_string())];
         if let Some(access) = req.access_token {
-            inner.push(("x-lt".to_string(), super::auth_token::resolve_line_access_token(access)));
+            inner.push((
+                "x-lt".to_string(),
+                super::auth_token::resolve_line_access_token(access),
+            ));
         }
         let mut plaintext = encode_legy_headers(&inner);
         plaintext.extend_from_slice(req.body);
@@ -91,7 +100,11 @@ impl LegyEncryptedTransport {
     /// Decrypt an outer response body.
     pub fn decrypt_response(&self, outer_status: u16, body: &[u8]) -> Result<LegyResponse> {
         if body.is_empty() {
-            return Ok(LegyResponse { status: outer_status, headers: HashMap::new(), body: Vec::new() });
+            return Ok(LegyResponse {
+                status: outer_status,
+                headers: HashMap::new(),
+                body: Vec::new(),
+            });
         }
         let mut decrypted = self.decrypt(body)?;
         if LEGY_LE & 4 == 4 && !decrypted.is_empty() {
@@ -102,11 +115,20 @@ impl LegyEncryptedTransport {
             Some(lc) if lc != "200" => lc.parse().unwrap_or(outer_status),
             _ => outer_status,
         };
-        Ok(LegyResponse { status, headers, body: data })
+        Ok(LegyResponse {
+            status,
+            headers,
+            body: data,
+        })
     }
 
     /// Outer request headers.
-    pub fn outer_headers(&self, application: &str, user_agent: &str, method: &str) -> Vec<(&'static str, String)> {
+    pub fn outer_headers(
+        &self,
+        application: &str,
+        user_agent: &str,
+        method: &str,
+    ) -> Vec<(&'static str, String)> {
         vec![
             ("x-line-application", application.to_string()),
             ("x-le", LEGY_LE.to_string()),
@@ -125,16 +147,25 @@ impl LegyEncryptedTransport {
 
     fn x_lcs(&self) -> &str {
         self.x_lcs.get_or_init(|| {
-            let key = rsa::RsaPublicKey::from_public_key_pem(LINE_PUBLIC_KEY).expect("embedded LINE key is valid");
+            let key = rsa::RsaPublicKey::from_public_key_pem(LINE_PUBLIC_KEY)
+                .expect("embedded LINE key is valid");
             let enc = key
-                .encrypt(&mut rand::thread_rng(), rsa::Oaep::new::<sha1::Sha1>(), &self.aes_key)
+                .encrypt(
+                    &mut rand::thread_rng(),
+                    rsa::Oaep::new::<sha1::Sha1>(),
+                    &self.aes_key,
+                )
                 .expect("RSA-OAEP of 16 bytes cannot fail");
-            format!("{LEGY_LCS_PREFIX}{}", base64::engine::general_purpose::STANDARD.encode(enc))
+            format!(
+                "{LEGY_LCS_PREFIX}{}",
+                base64::engine::general_purpose::STANDARD.encode(enc)
+            )
         })
     }
 
     fn encrypt(&self, plaintext: &[u8]) -> Vec<u8> {
-        Aes128CbcEnc::new(&self.aes_key.into(), &LEGY_IV.into()).encrypt_padded_vec_mut::<Pkcs7>(plaintext)
+        Aes128CbcEnc::new(&self.aes_key.into(), &LEGY_IV.into())
+            .encrypt_padded_vec_mut::<Pkcs7>(plaintext)
     }
 
     /// Mirrors linejs: responses are not block aligned (a trailer such as the
@@ -155,9 +186,12 @@ impl LegyEncryptedTransport {
 
 fn pkcs7_unpad_lenient(mut buf: Vec<u8>) -> Vec<u8> {
     if let Some(&size) = buf.last()
-        && size > 0 && size <= 16 && (size as usize) <= buf.len() {
-            buf.truncate(buf.len() - size as usize);
-        }
+        && size > 0
+        && size <= 16
+        && (size as usize) <= buf.len()
+    {
+        buf.truncate(buf.len() - size as usize);
+    }
     buf
 }
 
@@ -194,7 +228,10 @@ pub fn decode_legy_headers(data: &[u8]) -> Result<(HashMap<String, String>, Vec<
         let vl = u16_at(&mut off)?;
         let v = data.get(off..off + vl).ok_or_else(err)?;
         off += vl;
-        headers.insert(String::from_utf8_lossy(k).into_owned(), String::from_utf8_lossy(v).into_owned());
+        headers.insert(
+            String::from_utf8_lossy(k).into_owned(),
+            String::from_utf8_lossy(v).into_owned(),
+        );
     }
     Ok((headers, data.get(data_len..).unwrap_or_default().to_vec()))
 }
@@ -206,13 +243,21 @@ pub fn xxhash32(data: &[u8], seed: u32) -> u32 {
     const P3: u32 = 0xc2b2ae3d;
     const P4: u32 = 0x27d4eb2f;
     const P5: u32 = 0x165667b1;
-    let round = |acc: u32, input: u32| acc.wrapping_add(input.wrapping_mul(P2)).rotate_left(13).wrapping_mul(P1);
+    let round = |acc: u32, input: u32| {
+        acc.wrapping_add(input.wrapping_mul(P2))
+            .rotate_left(13)
+            .wrapping_mul(P1)
+    };
     let rd = |i: usize| u32::from_le_bytes(data[i..i + 4].try_into().unwrap());
     let len = data.len();
     let mut off = 0;
     let mut h = if len >= 16 {
-        let (mut v1, mut v2, mut v3, mut v4) =
-            (seed.wrapping_add(P1).wrapping_add(P2), seed.wrapping_add(P2), seed, seed.wrapping_sub(P1));
+        let (mut v1, mut v2, mut v3, mut v4) = (
+            seed.wrapping_add(P1).wrapping_add(P2),
+            seed.wrapping_add(P2),
+            seed,
+            seed.wrapping_sub(P1),
+        );
         while off + 16 <= len {
             v1 = round(v1, rd(off));
             v2 = round(v2, rd(off + 4));
@@ -220,17 +265,26 @@ pub fn xxhash32(data: &[u8], seed: u32) -> u32 {
             v4 = round(v4, rd(off + 12));
             off += 16;
         }
-        v1.rotate_left(1).wrapping_add(v2.rotate_left(7)).wrapping_add(v3.rotate_left(12)).wrapping_add(v4.rotate_left(18))
+        v1.rotate_left(1)
+            .wrapping_add(v2.rotate_left(7))
+            .wrapping_add(v3.rotate_left(12))
+            .wrapping_add(v4.rotate_left(18))
     } else {
         seed.wrapping_add(P5)
     };
     h = h.wrapping_add(len as u32);
     while off + 4 <= len {
-        h = h.wrapping_add(rd(off).wrapping_mul(P3)).rotate_left(17).wrapping_mul(P4);
+        h = h
+            .wrapping_add(rd(off).wrapping_mul(P3))
+            .rotate_left(17)
+            .wrapping_mul(P4);
         off += 4;
     }
     while off < len {
-        h = h.wrapping_add((data[off] as u32).wrapping_mul(P5)).rotate_left(11).wrapping_mul(P1);
+        h = h
+            .wrapping_add((data[off] as u32).wrapping_mul(P5))
+            .rotate_left(11)
+            .wrapping_mul(P1);
         off += 1;
     }
     h ^= h >> 15;
@@ -262,12 +316,18 @@ mod tests {
     fn xxhash_vectors() {
         assert_eq!(xxhash32(b"", 0), 0x02cc5d05);
         assert_eq!(xxhash32(b"a", 0), 0x550d7456);
-        assert_eq!(xxhash32(b"Nobody inspects the spammish repetition", 0), 0xe2293b2f);
+        assert_eq!(
+            xxhash32(b"Nobody inspects the spammish repetition", 0),
+            0xe2293b2f
+        );
     }
 
     #[test]
     fn header_block_roundtrip() {
-        let h = vec![("x-lpqs".to_string(), "/S4".to_string()), ("x-lt".to_string(), "tok".to_string())];
+        let h = vec![
+            ("x-lpqs".to_string(), "/S4".to_string()),
+            ("x-lt".to_string(), "tok".to_string()),
+        ];
         let mut enc = encode_legy_headers(&h);
         enc.extend_from_slice(b"BODY");
         let (dec, body) = decode_legy_headers(&enc).unwrap();
@@ -278,7 +338,11 @@ mod tests {
     #[test]
     fn encrypt_decrypt_roundtrip() {
         let t = LegyEncryptedTransport::new(None);
-        let req = LegyRequest { path: "/S4", access_token: None, body: b"thrift" };
+        let req = LegyRequest {
+            path: "/S4",
+            access_token: None,
+            body: b"thrift",
+        };
         let enc = t.encrypt_request(&req);
         // Server reply shape: [le byte] + header block + body, encrypted, no MAC.
         let mut inner = vec![LEGY_LE];

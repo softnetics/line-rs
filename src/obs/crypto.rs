@@ -4,7 +4,9 @@
 //! primitives live in [`crate::e2ee::crypto`]; this module keeps the
 //! OBS-facing [`EncryptedFile`] shape.
 
-pub use crate::e2ee::crypto::{decrypt_by_key_material, decrypt_by_key_material_b64, derive_key_material};
+pub use crate::e2ee::crypto::{
+    decrypt_by_key_material, decrypt_by_key_material_b64, derive_key_material,
+};
 
 /// Ciphertext together with the (base64) key material that opens it.
 #[derive(Debug, Clone)]
@@ -16,8 +18,12 @@ pub struct EncryptedFile {
 /// Encrypt `raw` (random 32-byte key material unless given); the output is
 /// `ciphertext ‖ HMAC-SHA256`.
 pub fn encrypt_by_key_material(raw: &[u8], key_material: Option<&[u8]>) -> EncryptedFile {
-    let (key_material, encrypted_data) = crate::e2ee::crypto::encrypt_by_key_material(raw, key_material);
-    EncryptedFile { key_material, encrypted_data }
+    let (key_material, encrypted_data) =
+        crate::e2ee::crypto::encrypt_by_key_material(raw, key_material);
+    EncryptedFile {
+        key_material,
+        encrypted_data,
+    }
 }
 
 #[cfg(test)]
@@ -29,7 +35,10 @@ mod tests {
         let raw: Vec<u8> = (0..1000u32).map(|i| i as u8).collect();
         let enc = encrypt_by_key_material(&raw, None);
         assert_eq!(enc.encrypted_data.len(), raw.len() + 32);
-        assert_eq!(decrypt_by_key_material_b64(&enc.encrypted_data, &enc.key_material).unwrap(), raw);
+        assert_eq!(
+            decrypt_by_key_material_b64(&enc.encrypted_data, &enc.key_material).unwrap(),
+            raw
+        );
 
         let mut tampered = enc.encrypted_data.clone();
         tampered[0] ^= 1;
@@ -43,10 +52,13 @@ mod tests {
 
     #[test]
     fn downloads_accept_chunked_hmac_v2() {
-        use crate::e2ee::media::{encrypt_media, MediaHmacVersion, MEDIA_CHUNK_SIZE};
+        use crate::e2ee::media::{MEDIA_CHUNK_SIZE, MediaHmacVersion, encrypt_media};
         let raw: Vec<u8> = (0..MEDIA_CHUNK_SIZE + 9).map(|i| i as u8).collect();
         let enc = encrypt_media(&raw, None, MediaHmacVersion::V2);
-        assert_eq!(decrypt_by_key_material_b64(&enc.data, &enc.key_material).unwrap(), raw);
+        assert_eq!(
+            decrypt_by_key_material_b64(&enc.data, &enc.key_material).unwrap(),
+            raw
+        );
     }
 
     #[test]
@@ -55,7 +67,10 @@ mod tests {
         let a = encrypt_by_key_material(b"hello", Some(&key));
         let b = encrypt_by_key_material(b"hello", Some(&key));
         assert_eq!(a.encrypted_data, b.encrypted_data);
-        assert_eq!(a.key_material, "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=");
+        assert_eq!(
+            a.key_material,
+            "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+        );
     }
 
     #[test]

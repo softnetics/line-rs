@@ -4,9 +4,11 @@
 //! LINE_AUTH_TOKEN=... cargo run --example square_ping
 //! ```
 
-use line_rs::client::{login_with_auth_token, ClientEvent, InitOptions, ListenOptions, ReactionType};
-use line_rs::storage::FileStorage;
 use line_rs::Device;
+use line_rs::client::{
+    ClientEvent, InitOptions, ListenOptions, ReactionType, login_with_auth_token,
+};
+use line_rs::storage::FileStorage;
 
 #[tokio::main]
 async fn main() -> line_rs::Result<()> {
@@ -15,7 +17,11 @@ async fn main() -> line_rs::Result<()> {
     let client = login_with_auth_token(&token, init).await?;
 
     let mut events = client.subscribe();
-    let _listen = client.listen(ListenOptions { talk: false, square: true, ..Default::default() });
+    let _listen = client.listen(ListenOptions {
+        talk: false,
+        square: true,
+        ..Default::default()
+    });
     while let Ok(event) = events.recv().await {
         if let ClientEvent::SquareMessage(message) = event {
             println!("{}", message.text());

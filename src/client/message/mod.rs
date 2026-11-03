@@ -8,7 +8,7 @@ pub mod utils;
 pub use square::{SquareMessage, SquareThreadMessage};
 pub use talk::TalkMessage;
 pub use types::{
-    AppLinkInfo, CallInfo, ChatEventInfo, ContactMeta, Decoration, Emoji, FileInfo, FlexMeta, GiftInfo, MentionTarget, Mid,
-    PostNotificationInfo, ReactionType,
+    AppLinkInfo, CallInfo, ChatEventInfo, ContactMeta, Decoration, Emoji, FileInfo, FlexMeta,
+    GiftInfo, MentionTarget, Mid, PostNotificationInfo, ReactionType,
 };
-pub use utils::{build_text_decorations, sticker_metadata, MessageInput};
+pub use utils::{MessageInput, build_text_decorations, sticker_metadata};

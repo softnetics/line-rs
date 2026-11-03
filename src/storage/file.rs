@@ -20,7 +20,10 @@ impl FileStorage {
         if !path.exists() {
             std::fs::write(&path, "{}")?;
         }
-        Ok(Self { path, lock: Mutex::new(()) })
+        Ok(Self {
+            path,
+            lock: Mutex::new(()),
+        })
     }
 
     async fn read(&self) -> Result<serde_json::Map<String, StorageValue>> {

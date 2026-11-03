@@ -44,7 +44,10 @@ impl SquareLiveTalkService<'_> {
     }
 
     /// `findLiveTalkByInvitationTicket(request: FindLiveTalkByInvitationTicketRequest)`.
-    pub async fn find_live_talk_by_invitation_ticket(&self, args: impl Into<Value>) -> Result<Value> {
+    pub async fn find_live_talk_by_invitation_ticket(
+        &self,
+        args: impl Into<Value>,
+    ) -> Result<Value> {
         self.call("findLiveTalkByInvitationTicket", args).await
     }
 
@@ -64,7 +67,10 @@ impl SquareLiveTalkService<'_> {
     }
 
     /// `getLiveTalkSpeakersForNonMember(request: GetLiveTalkSpeakersForNonMemberRequest)`.
-    pub async fn get_live_talk_speakers_for_non_member(&self, args: impl Into<Value>) -> Result<Value> {
+    pub async fn get_live_talk_speakers_for_non_member(
+        &self,
+        args: impl Into<Value>,
+    ) -> Result<Value> {
         self.call("getLiveTalkSpeakersForNonMember", args).await
     }
 

@@ -57,12 +57,17 @@ impl E2eeOperation {
     pub fn from_op(op: &Value) -> Option<Self> {
         let name = match &op["type"] {
             Value::String(s) => s.clone(),
-            Value::Int(i) => Schema::line().get_enum("OpType")?.name_of(*i as i32)?.to_string(),
+            Value::Int(i) => Schema::line()
+                .get_enum("OpType")?
+                .name_of(*i as i32)?
+                .to_string(),
             _ => return None,
         };
         let kind = match name.as_str() {
             "REGISTER_E2EE_PUBLICKEY" => E2eeOpKind::RegisterPublicKey,
-            "UPDATE_PUBLICKEYCHAIN" | "NOTIFIED_UPDATE_PUBLICKEYCHAIN" => E2eeOpKind::UpdatePublicKeyChain,
+            "UPDATE_PUBLICKEYCHAIN" | "NOTIFIED_UPDATE_PUBLICKEYCHAIN" => {
+                E2eeOpKind::UpdatePublicKeyChain
+            }
             "NOTIFIED_E2EE_KEY_EXCHANGE_REQ" => E2eeOpKind::KeyExchangeRequest,
             "NOTIFIED_E2EE_KEY_EXCHANGE_RESP" => E2eeOpKind::KeyExchangeResponse,
             "NOTIFIED_E2EE_MESSAGE_RESEND_REQ" => E2eeOpKind::MessageResendRequest,
@@ -91,32 +96,51 @@ impl BaseClient {
         verifier: &[u8],
     ) -> Result<()> {
         let mut args = crate::tv!({"reqSeq": self.get_reqseq("talk").await?});
-        args.insert("temporaryPublicKey", Value::Binary(temporary_public_key.to_vec()));
+        args.insert(
+            "temporaryPublicKey",
+            Value::Binary(temporary_public_key.to_vec()),
+        );
         args.insert("publicKey", public_key);
         args.insert("verifier", Value::Binary(verifier.to_vec()));
-        self.talk().call("requestE2EEKeyExchange", args).await.map(drop)
+        self.talk()
+            .call("requestE2EEKeyExchange", args)
+            .await
+            .map(drop)
     }
 
     /// `respondE2EEKeyExchange`.
-    pub async fn respond_e2ee_key_exchange(&self, encrypted_key_chain: &[u8], hash_key_chain: &[u8]) -> Result<()> {
+    pub async fn respond_e2ee_key_exchange(
+        &self,
+        encrypted_key_chain: &[u8],
+        hash_key_chain: &[u8],
+    ) -> Result<()> {
         let mut args = crate::tv!({"reqSeq": self.get_reqseq("talk").await?});
-        args.insert("encryptedKeyChain", Value::Binary(encrypted_key_chain.to_vec()));
+        args.insert(
+            "encryptedKeyChain",
+            Value::Binary(encrypted_key_chain.to_vec()),
+        );
         args.insert("hashKeyChain", Value::Binary(hash_key_chain.to_vec()));
-        self.talk().call("respondE2EEKeyExchange", args).await.map(drop)
+        self.talk()
+            .call("respondE2EEKeyExchange", args)
+            .await
+            .map(drop)
     }
 
     /// `removeE2EEPublicKey` for one of our registered keys.
     pub async fn remove_e2ee_public_key(&self, public_key: Value) -> Result<()> {
         let mut args = Value::object();
         args.insert("publicKey", public_key);
-        self.talk().call("removeE2EEPublicKey", args).await.map(drop)
+        self.talk()
+            .call("removeE2EEPublicKey", args)
+            .await
+            .map(drop)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::thrift::{encode_struct, TValue};
+    use crate::thrift::{TValue, encode_struct};
 
     #[test]
     fn classifies_ops_by_name_and_number() {
@@ -127,9 +151,22 @@ mod tests {
         assert_eq!(e.param1.as_deref(), Some("u1"));
         assert_eq!(e.param3, None);
         let op = crate::tv!({"type": "NOTIFIED_E2EE_MESSAGE_RESEND_RESP"});
-        assert_eq!(E2eeOperation::from_op(&op).unwrap().kind, E2eeOpKind::MessageResendResponse);
-        assert_eq!(E2eeOperation::from_op(&crate::tv!({"type": 77})).unwrap().kind, E2eeOpKind::KeyUpdate);
-        assert_eq!(E2eeOperation::from_op(&crate::tv!({"type": 66})).unwrap().kind, E2eeOpKind::UpdatePublicKeyChain);
+        assert_eq!(
+            E2eeOperation::from_op(&op).unwrap().kind,
+            E2eeOpKind::MessageResendResponse
+        );
+        assert_eq!(
+            E2eeOperation::from_op(&crate::tv!({"type": 77}))
+                .unwrap()
+                .kind,
+            E2eeOpKind::KeyUpdate
+        );
+        assert_eq!(
+            E2eeOperation::from_op(&crate::tv!({"type": 66}))
+                .unwrap()
+                .kind,
+            E2eeOpKind::UpdatePublicKeyChain
+        );
         assert!(E2eeOperation::from_op(&crate::tv!({"type": "RECEIVE_MESSAGE"})).is_none());
         assert!(E2eeOperation::from_op(&crate::tv!({})).is_none());
     }

@@ -9,8 +9,8 @@ use indexmap::IndexMap;
 use serde_json::Value as Json;
 
 use super::types::{
-    sticon_url, AppLinkInfo, CallInfo, ChatEventInfo, ContactMeta, Decoration, Emoji, FileInfo, FlexMeta, GiftInfo,
-    MentionTarget, PostNotificationInfo,
+    AppLinkInfo, CallInfo, ChatEventInfo, ContactMeta, Decoration, Emoji, FileInfo, FlexMeta,
+    GiftInfo, MentionTarget, PostNotificationInfo, sticon_url,
 };
 use crate::error::{Error, Result};
 use crate::thrift::Value;
@@ -69,25 +69,37 @@ pub fn build_text_decorations(decorations: &[Decoration]) -> (String, IndexMap<S
             let end = start + utf16_len(&run);
             mentionees.push(match m {
                 MentionTarget::All => format!(r#"{{"S":"{start}","E":"{end}","A":"1"}}"#),
-                MentionTarget::User(mid) => format!(r#"{{"S":"{start}","E":"{end}","M":{}}}"#, q(mid)),
+                MentionTarget::User(mid) => {
+                    format!(r#"{{"S":"{start}","E":"{end}","M":{}}}"#, q(mid))
+                }
             });
         }
         text.push_str(&run);
     }
     let mut meta = IndexMap::new();
     if !resources.is_empty() {
-        meta.insert("REPLACE".into(), format!(r#"{{"sticon":{{"resources":[{}]}}}}"#, resources.join(",")));
+        meta.insert(
+            "REPLACE".into(),
+            format!(r#"{{"sticon":{{"resources":[{}]}}}}"#, resources.join(",")),
+        );
         let owners: Vec<String> = ownership.iter().map(|p| q(p)).collect();
         meta.insert("STICON_OWNERSHIP".into(), format!("[{}]", owners.join(",")));
     }
     if !mentionees.is_empty() {
-        meta.insert("MENTION".into(), format!(r#"{{"MENTIONEES":[{}]}}"#, mentionees.join(",")));
+        meta.insert(
+            "MENTION".into(),
+            format!(r#"{{"MENTIONEES":[{}]}}"#, mentionees.join(",")),
+        );
     }
     (text, meta)
 }
 
 /// Metadata for a sticker message (`contentType = STICKER`).
-pub fn sticker_metadata(package_id: &str, sticker_id: &str, version: &str) -> IndexMap<String, String> {
+pub fn sticker_metadata(
+    package_id: &str,
+    sticker_id: &str,
+    version: &str,
+) -> IndexMap<String, String> {
     IndexMap::from([
         ("STKPKGID".to_string(), package_id.to_string()),
         ("STKID".to_string(), sticker_id.to_string()),
@@ -114,12 +126,19 @@ pub struct MessageInput {
 
 impl MessageInput {
     pub fn text(text: impl Into<String>) -> Self {
-        Self { text: Some(text.into()), ..Default::default() }
+        Self {
+            text: Some(text.into()),
+            ..Default::default()
+        }
     }
     /// Text with mentions / emoji (see [`build_text_decorations`]).
     pub fn decorated(decorations: &[Decoration]) -> Self {
         let (text, content_metadata) = build_text_decorations(decorations);
-        Self { text: Some(text), content_metadata, ..Default::default() }
+        Self {
+            text: Some(text),
+            content_metadata,
+            ..Default::default()
+        }
     }
     /// A sticker (`STKVER` is usually `"1"` or `"100"`).
     pub fn sticker(package_id: &str, sticker_id: &str, version: &str) -> Self {
@@ -143,7 +162,10 @@ impl MessageInput {
     }
     /// A `Location` struct value.
     pub fn location(location: Value) -> Self {
-        Self { location: Some(location), ..Default::default() }
+        Self {
+            location: Some(location),
+            ..Default::default()
+        }
     }
     pub fn e2ee(mut self, e2ee: bool) -> Self {
         self.e2ee = Some(e2ee);
@@ -181,7 +203,11 @@ impl From<&String> for MessageInput {
 
 /// `contentMetadata` map → `Value::Map` for thrift.
 pub(crate) fn metadata_value(meta: &IndexMap<String, String>) -> Value {
-    Value::Map(meta.iter().map(|(k, v)| (Value::String(k.clone()), Value::String(v.clone()))).collect())
+    Value::Map(
+        meta.iter()
+            .map(|(k, v)| (Value::String(k.clone()), Value::String(v.clone())))
+            .collect(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -206,19 +232,31 @@ impl<'a> Content<'a> {
     }
 
     fn json(&self, key: &str) -> Option<Json> {
-        self.metadata.get(key).and_then(|s| serde_json::from_str(s).ok())
+        self.metadata
+            .get(key)
+            .and_then(|s| serde_json::from_str(s).ok())
     }
 
     pub fn sticker_url(&self) -> Result<String> {
         if self.content_type != "STICKER" {
             return Err(type_error("The message is not sticker."));
         }
-        let id = self.metadata.get("STKID").map(String::as_str).unwrap_or_default();
-        Ok(if self.metadata.get("STKOPT").map(String::as_str) == Some("A") {
-            format!("https://stickershop.line-scdn.net/stickershop/v1/sticker/{id}/android/sticker_animation.png")
-        } else {
-            format!("https://stickershop.line-scdn.net/stickershop/v1/sticker/{id}/android/sticker.png")
-        })
+        let id = self
+            .metadata
+            .get("STKID")
+            .map(String::as_str)
+            .unwrap_or_default();
+        Ok(
+            if self.metadata.get("STKOPT").map(String::as_str) == Some("A") {
+                format!(
+                    "https://stickershop.line-scdn.net/stickershop/v1/sticker/{id}/android/sticker_animation.png"
+                )
+            } else {
+                format!(
+                    "https://stickershop.line-scdn.net/stickershop/v1/sticker/{id}/android/sticker.png"
+                )
+            },
+        )
     }
 
     fn emoji_resources(&self) -> Vec<Json> {
@@ -228,7 +266,9 @@ impl<'a> Content<'a> {
     }
 
     fn mentionees(&self) -> Vec<Json> {
-        self.json("MENTION").and_then(|m| m["MENTIONEES"].as_array().cloned()).unwrap_or_default()
+        self.json("MENTION")
+            .and_then(|m| m["MENTIONEES"].as_array().cloned())
+            .unwrap_or_default()
     }
 
     pub fn emoji_urls(&self) -> Result<Vec<String>> {
@@ -238,7 +278,12 @@ impl<'a> Content<'a> {
         Ok(self
             .emoji_resources()
             .iter()
-            .map(|e| sticon_url(e["productId"].as_str().unwrap_or(""), e["sticonId"].as_str().unwrap_or("")))
+            .map(|e| {
+                sticon_url(
+                    e["productId"].as_str().unwrap_or(""),
+                    e["sticonId"].as_str().unwrap_or(""),
+                )
+            })
             .collect())
     }
 
@@ -258,14 +303,24 @@ impl<'a> Content<'a> {
             Emoji(Emoji),
         }
         let num = |v: &Json| -> usize {
-            v.as_u64().map(|n| n as usize).or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())).unwrap_or(0)
+            v.as_u64()
+                .map(|n| n as usize)
+                .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+                .unwrap_or(0)
         };
         let mut splits: Vec<(usize, usize, Kind)> = Vec::new();
         for m in self.mentionees() {
-            splits.push((num(&m["S"]), num(&m["E"]), Kind::Mention(mention_target(&m))));
+            splits.push((
+                num(&m["S"]),
+                num(&m["E"]),
+                Kind::Mention(mention_target(&m)),
+            ));
         }
         for e in self.emoji_resources() {
-            let mut emoji = Emoji::new(e["productId"].as_str().unwrap_or(""), e["sticonId"].as_str().unwrap_or(""));
+            let mut emoji = Emoji::new(
+                e["productId"].as_str().unwrap_or(""),
+                e["sticonId"].as_str().unwrap_or(""),
+            );
             emoji.version = e["version"].as_i64();
             emoji.resource_type = e["resourceType"].as_str().map(str::to_string);
             emoji.url = Some(emoji.image_url());
@@ -276,7 +331,11 @@ impl<'a> Content<'a> {
         let mut last = 0usize;
         for (start, end, kind) in splits {
             if last != start {
-                out.push(Decoration::text(utf16_substring(self.text, last, Some(start))));
+                out.push(Decoration::text(utf16_substring(
+                    self.text,
+                    last,
+                    Some(start),
+                )));
             }
             let mut d = Decoration::text(utf16_substring(self.text, start, Some(end)));
             match kind {
@@ -296,7 +355,11 @@ impl<'a> Content<'a> {
         }
         Ok(ContactMeta {
             mid: self.metadata.get("mid").cloned().unwrap_or_default(),
-            display_name: self.metadata.get("displayName").cloned().unwrap_or_default(),
+            display_name: self
+                .metadata
+                .get("displayName")
+                .cloned()
+                .unwrap_or_default(),
         })
     }
 
@@ -317,7 +380,12 @@ impl<'a> Content<'a> {
         if self.content_type != "FILE" {
             return Err(type_error("The message does not provide any files."));
         }
-        let int = |k: &str| self.metadata.get(k).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let int = |k: &str| {
+            self.metadata
+                .get(k)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0)
+        };
         Ok(FileInfo {
             size: int("FILE_SIZE"),
             expire: int("FILE_EXPIRE_TIMESTAMP"),
@@ -337,7 +405,9 @@ impl<'a> Content<'a> {
         Ok(AppLinkInfo {
             id: self.meta("id"),
             kind: self.meta("type"),
-            title: self.meta("text").or_else(|| (!self.text.is_empty()).then(|| self.text.to_string())),
+            title: self
+                .meta("text")
+                .or_else(|| (!self.text.is_empty()).then(|| self.text.to_string())),
             sub_text: self.meta("subText"),
             preview_url: self.meta("previewUrl"),
             link_uri: self.meta("linkUri"),
@@ -372,7 +442,10 @@ impl<'a> Content<'a> {
             kind: self.meta("TYPE"),
             result: self.meta("RESULT"),
             cause: self.meta("CAUSE"),
-            duration_ms: self.metadata.get("DURATION").and_then(|d| d.trim().parse().ok()),
+            duration_ms: self
+                .metadata
+                .get("DURATION")
+                .and_then(|d| d.trim().parse().ok()),
         })
     }
 
@@ -396,11 +469,17 @@ impl<'a> Content<'a> {
             .get("LOC_ARGS")
             .map(|a| a.split('\u{1e}').map(str::to_string).collect())
             .unwrap_or_default();
-        Ok(ChatEventInfo { loc_key: self.meta("LOC_KEY"), loc_args })
+        Ok(ChatEventInfo {
+            loc_key: self.meta("LOC_KEY"),
+            loc_args,
+        })
     }
 
     pub fn has_media(&self) -> bool {
-        matches!(self.content_type.as_str(), "IMAGE" | "VIDEO" | "AUDIO" | "FILE")
+        matches!(
+            self.content_type.as_str(),
+            "IMAGE" | "VIDEO" | "AUDIO" | "FILE"
+        )
     }
 }
 
@@ -422,7 +501,10 @@ fn mention_target(m: &Json) -> MentionTarget {
 pub(crate) fn reply_target(message: &Value) -> Option<String> {
     let rel = &message["messageRelationType"];
     let is_reply = rel.as_i64() == Some(3) || rel.as_str() == Some("REPLY");
-    message["relatedMessageId"].as_str().filter(|_| is_reply).map(str::to_string)
+    message["relatedMessageId"]
+        .as_str()
+        .filter(|_| is_reply)
+        .map(str::to_string)
 }
 
 /// Fetch a media URL (`DOWNLOAD_URL` / `PREVIEW_URL`) with the client's
@@ -472,7 +554,8 @@ mod tests {
 
     #[test]
     fn utf16_offsets() {
-        let (text, meta) = build_text_decorations(&[Decoration::text("😀"), Decoration::mention("u1", "@x")]);
+        let (text, meta) =
+            build_text_decorations(&[Decoration::text("😀"), Decoration::mention("u1", "@x")]);
         assert_eq!(text, "😀@x");
         assert!(meta["MENTION"].contains(r#""S":"2","E":"4""#));
         assert_eq!(utf16_substring(&text, 2, Some(4)), "@x");
@@ -493,7 +576,10 @@ mod tests {
         let mut msg = msg;
         msg.insert("contentMetadata", metadata_value(&meta));
         let c = Content::of(&msg);
-        assert_eq!(c.mentions().unwrap(), vec![MentionTarget::User("u1".into())]);
+        assert_eq!(
+            c.mentions().unwrap(),
+            vec![MentionTarget::User("u1".into())]
+        );
         assert_eq!(c.emoji_urls().unwrap(), vec![sticon_url("p", "s")]);
         let decos = c.text_decorations().unwrap();
         assert_eq!(decos.len(), 5);
@@ -501,14 +587,23 @@ mod tests {
         assert_eq!(decos[1].mention, Some(MentionTarget::User("u1".into())));
         assert_eq!(decos[2].text, " and ");
         let e = decos[3].emoji.as_ref().unwrap();
-        assert_eq!((e.product_id.as_str(), e.version, e.url.as_deref()), ("p", Some(1), Some(sticon_url("p", "s").as_str())));
+        assert_eq!(
+            (e.product_id.as_str(), e.version, e.url.as_deref()),
+            ("p", Some(1), Some(sticon_url("p", "s").as_str()))
+        );
         assert_eq!(decos[4].text, "");
     }
 
     #[test]
     fn sticker_and_type_errors() {
-        let mut m = tv!({"contentType": "STICKER", "contentMetadata": {"STKID": "52", "STKOPT": "A"}});
-        assert!(Content::of(&m).sticker_url().unwrap().ends_with("/52/android/sticker_animation.png"));
+        let mut m =
+            tv!({"contentType": "STICKER", "contentMetadata": {"STKID": "52", "STKOPT": "A"}});
+        assert!(
+            Content::of(&m)
+                .sticker_url()
+                .unwrap()
+                .ends_with("/52/android/sticker_animation.png")
+        );
         assert!(Content::of(&m).mentions().is_err());
         m.insert("contentType", 0);
         assert!(Content::of(&m).sticker_url().is_err());
@@ -521,7 +616,13 @@ mod tests {
         assert_eq!(input.content_type.as_deref(), Some("CONTACT"));
         let mut msg = tv!({"contentType": "CONTACT"});
         msg.insert("contentMetadata", metadata_value(&input.content_metadata));
-        assert_eq!(Content::of(&msg).shared_contact().unwrap(), ContactMeta { mid: "u1".into(), display_name: "Alice".into() });
+        assert_eq!(
+            Content::of(&msg).shared_contact().unwrap(),
+            ContactMeta {
+                mid: "u1".into(),
+                display_name: "Alice".into()
+            }
+        );
     }
 
     #[test]
@@ -538,8 +639,15 @@ mod tests {
         assert_eq!(info.country_code.as_deref(), Some("JP"));
         assert_eq!(info.ios_install_url, None);
         let link = tv!({"contentType": "LINK", "text": "https://x"});
-        assert_eq!(Content::of(&link).app_link().unwrap().title.as_deref(), Some("https://x"));
-        assert!(Content::of(&tv!({"contentType": "NONE"})).app_link().is_err());
+        assert_eq!(
+            Content::of(&link).app_link().unwrap().title.as_deref(),
+            Some("https://x")
+        );
+        assert!(
+            Content::of(&tv!({"contentType": "NONE"}))
+                .app_link()
+                .is_err()
+        );
     }
 
     #[test]
@@ -547,37 +655,72 @@ mod tests {
         let gift = tv!({"contentType": "GIFT", "contentMetadata": {"PRDID": "123", "PRDTYPE": "STICKER", "MSGTPL": "4"}});
         assert_eq!(
             Content::of(&gift).gift().unwrap(),
-            GiftInfo { product_id: "123".into(), product_type: "STICKER".into(), template: Some("4".into()) }
+            GiftInfo {
+                product_id: "123".into(),
+                product_type: "STICKER".into(),
+                template: Some("4".into())
+            }
         );
 
         let call = tv!({"contentType": 6, "contentMetadata": {"GC_EVT_TYPE": "E", "GC_MEDIA_TYPE": "VIDEO",
             "GC_CHAT_MID": "c1", "DURATION": "61000"}});
         let info = Content::of(&call).call().unwrap();
         assert!(info.is_group_call());
-        assert_eq!((info.group_media_type.as_deref(), info.duration_ms), (Some("VIDEO"), Some(61000)));
+        assert_eq!(
+            (info.group_media_type.as_deref(), info.duration_ms),
+            (Some("VIDEO"), Some(61000))
+        );
         let one = tv!({"contentType": "CALL", "contentMetadata": {"TYPE": "A", "RESULT": "CANCELED", "DURATION": "x"}});
         let info = Content::of(&one).call().unwrap();
         assert!(!info.is_group_call());
-        assert_eq!((info.kind.as_deref(), info.result.as_deref(), info.duration_ms), (Some("A"), Some("CANCELED"), None));
+        assert_eq!(
+            (
+                info.kind.as_deref(),
+                info.result.as_deref(),
+                info.duration_ms
+            ),
+            (Some("A"), Some("CANCELED"), None)
+        );
         assert!(Content::of(&gift).call().is_err());
 
         let post = tv!({"contentType": "POSTNOTIFICATION", "text": "hello",
             "contentMetadata": {"postEndUrl": "line://home/post?x", "serviceType": "MH"}});
         let info = Content::of(&post).post_notification().unwrap();
-        assert_eq!((info.post_end_url.as_deref(), info.service_type.as_deref(), info.text.as_str()),
-            (Some("line://home/post?x"), Some("MH"), "hello"));
+        assert_eq!(
+            (
+                info.post_end_url.as_deref(),
+                info.service_type.as_deref(),
+                info.text.as_str()
+            ),
+            (Some("line://home/post?x"), Some("MH"), "hello")
+        );
 
         let ev = tv!({"contentType": 18, "contentMetadata": {"LOC_KEY": "C_MI", "LOC_ARGS": "u1\u{1e}u2"}});
         let info = Content::of(&ev).chat_event().unwrap();
         assert_eq!(info.loc_key.as_deref(), Some("C_MI"));
         assert_eq!(info.loc_args, ["u1", "u2"]);
-        assert!(Content::of(&tv!({"contentType": 18})).chat_event().unwrap().loc_args.is_empty());
+        assert!(
+            Content::of(&tv!({"contentType": 18}))
+                .chat_event()
+                .unwrap()
+                .loc_args
+                .is_empty()
+        );
     }
 
     #[test]
     fn reply_target_detection() {
-        assert_eq!(reply_target(&tv!({"relatedMessageId": "1", "messageRelationType": "REPLY"})), Some("1".into()));
-        assert_eq!(reply_target(&tv!({"relatedMessageId": "1", "messageRelationType": 3})), Some("1".into()));
-        assert_eq!(reply_target(&tv!({"relatedMessageId": "1", "messageRelationType": 0})), None);
+        assert_eq!(
+            reply_target(&tv!({"relatedMessageId": "1", "messageRelationType": "REPLY"})),
+            Some("1".into())
+        );
+        assert_eq!(
+            reply_target(&tv!({"relatedMessageId": "1", "messageRelationType": 3})),
+            Some("1".into())
+        );
+        assert_eq!(
+            reply_target(&tv!({"relatedMessageId": "1", "messageRelationType": 0})),
+            None
+        );
     }
 }

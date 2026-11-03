@@ -23,7 +23,10 @@ struct Reply {
 }
 
 fn reply(method: &str, fields: Vec<(i16, TValue)>) -> Reply {
-    Reply { headers: Vec::new(), body: thrift::write_message(method, &fields, Protocol::Compact).unwrap() }
+    Reply {
+        headers: Vec::new(),
+        body: thrift::write_message(method, &fields, Protocol::Compact).unwrap(),
+    }
 }
 
 /// Serve `replies` in order (one connection each) and record requests.
@@ -51,10 +54,14 @@ async fn serve(replies: Vec<Reply>) -> (String, Arc<Mutex<Vec<Seen>>>) {
             let header = |name: &str| {
                 head.lines().find_map(|l| {
                     let (k, v) = l.split_once(':')?;
-                    k.trim().eq_ignore_ascii_case(name).then(|| v.trim().to_string())
+                    k.trim()
+                        .eq_ignore_ascii_case(name)
+                        .then(|| v.trim().to_string())
                 })
             };
-            let len: usize = header("content-length").and_then(|v| v.parse().ok()).unwrap_or(0);
+            let len: usize = header("content-length")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
             while buf.len() < head_end + len {
                 let n = sock.read(&mut chunk).await.unwrap();
                 if n == 0 {
@@ -62,9 +69,22 @@ async fn serve(replies: Vec<Reply>) -> (String, Arc<Mutex<Vec<Seen>>>) {
                 }
                 buf.extend_from_slice(&chunk[..n]);
             }
-            let path = head.lines().next().unwrap_or_default().split(' ').nth(1).unwrap_or_default().to_string();
-            log.lock().unwrap().push(Seen { path, access: header("x-line-access") });
-            let mut out = format!("HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: {}\r\n", r.body.len());
+            let path = head
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .split(' ')
+                .nth(1)
+                .unwrap_or_default()
+                .to_string();
+            log.lock().unwrap().push(Seen {
+                path,
+                access: header("x-line-access"),
+            });
+            let mut out = format!(
+                "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: {}\r\n",
+                r.body.len()
+            );
             for (k, v) in &r.headers {
                 out.push_str(&format!("{k}: {v}\r\n"));
             }
@@ -91,7 +111,11 @@ fn extras() -> crate::base::Config {
     }
 }
 
-fn client_with(endpoint: &str, storage: Arc<MemoryStorage>, config: crate::base::Config) -> BaseClient {
+fn client_with(
+    endpoint: &str,
+    storage: Arc<MemoryStorage>,
+    config: crate::base::Config,
+) -> BaseClient {
     let c = BaseClient::builder(Device::DesktopMac)
         .config(config)
         .endpoint(endpoint)
@@ -104,17 +128,32 @@ fn client_with(endpoint: &str, storage: Arc<MemoryStorage>, config: crate::base:
 }
 
 fn profile_reply() -> Reply {
-    reply("getProfile", vec![(0, TValue::Struct(vec![(1, TValue::string("u1"))]))])
+    reply(
+        "getProfile",
+        vec![(0, TValue::Struct(vec![(1, TValue::string("u1"))]))],
+    )
 }
 
 async fn get_profile(c: &BaseClient) -> Result<Value> {
-    c.call("getProfile", crate::tv!({"syncReason": "INTERNAL"}), "/S4", Protocol::Compact).await
+    c.call(
+        "getProfile",
+        crate::tv!({"syncReason": "INTERNAL"}),
+        "/S4",
+        Protocol::Compact,
+    )
+    .await
 }
 
 #[test]
 fn endpoint_url_keeps_explicit_scheme() {
-    assert_eq!(endpoint_url("legy.line-apps.com", "/S4"), "https://legy.line-apps.com/S4");
-    assert_eq!(endpoint_url("http://127.0.0.1:1/", "/S4"), "http://127.0.0.1:1/S4");
+    assert_eq!(
+        endpoint_url("legy.line-apps.com", "/S4"),
+        "https://legy.line-apps.com/S4"
+    );
+    assert_eq!(
+        endpoint_url("http://127.0.0.1:1/", "/S4"),
+        "http://127.0.0.1:1/S4"
+    );
 }
 
 #[tokio::test]
@@ -163,25 +202,36 @@ async fn proactive_refresh_when_expire_reached() {
                 ]),
             )],
         ),
-        reply("reportRefreshedAccessToken", vec![(0, TValue::Struct(vec![]))]),
+        reply(
+            "reportRefreshedAccessToken",
+            vec![(0, TValue::Struct(vec![]))],
+        ),
         profile_reply(),
         profile_reply(),
     ])
     .await;
     let c = client_with(&endpoint, storage.clone(), extras());
     storage.set("refreshToken", "R1".into()).await.unwrap();
-    c.set_token_expire(crate::base::session_now() - 10).await.unwrap();
+    c.set_token_expire(crate::base::session_now() - 10)
+        .await
+        .unwrap();
 
     get_profile(&c).await.unwrap();
     assert_eq!(c.auth_token().as_deref(), Some("FRESH"));
-    assert_eq!(storage.get_string("refreshToken").await.unwrap().as_deref(), Some("R2"));
+    assert_eq!(
+        storage.get_string("refreshToken").await.unwrap().as_deref(),
+        Some("R2")
+    );
     assert!(c.token_expire().await.unwrap().unwrap() > crate::base::session_now() + 3000);
     // Not due any more: the next request goes straight out.
     get_profile(&c).await.unwrap();
 
     let seen = seen.lock().unwrap();
     let paths: Vec<&str> = seen.iter().map(|s| s.path.as_str()).collect();
-    assert_eq!(paths, [TOKEN_REFRESH_PATH, TOKEN_REFRESH_PATH, "/S4", "/S4"]);
+    assert_eq!(
+        paths,
+        [TOKEN_REFRESH_PATH, TOKEN_REFRESH_PATH, "/S4", "/S4"]
+    );
     assert_eq!(seen[1].access.as_deref(), Some("FRESH"));
     assert_eq!(seen[2].access.as_deref(), Some("FRESH"));
 }
@@ -192,7 +242,10 @@ async fn not_due_token_is_not_refreshed() {
     let (endpoint, seen) = serve(vec![profile_reply()]).await;
     let c = client(&endpoint, storage.clone());
     storage.set("refreshToken", "R1".into()).await.unwrap();
-    storage.set("expire", (crate::base::session_now() + 3600).into()).await.unwrap();
+    storage
+        .set("expire", (crate::base::session_now() + 3600).into())
+        .await
+        .unwrap();
     get_profile(&c).await.unwrap();
     assert_eq!(seen.lock().unwrap().len(), 1);
     assert_eq!(c.auth_token().as_deref(), Some("OLD"));
@@ -202,7 +255,13 @@ async fn not_due_token_is_not_refreshed() {
 async fn kicked_out_session_stops_the_client() {
     let (endpoint, seen) = serve(vec![reply(
         "getProfile",
-        vec![(1, TValue::Struct(vec![(1, TValue::I32(8)), (2, TValue::string("device removed"))]))],
+        vec![(
+            1,
+            TValue::Struct(vec![
+                (1, TValue::I32(8)),
+                (2, TValue::string("device removed")),
+            ]),
+        )],
     )])
     .await;
     let c = client(&endpoint, Arc::new(MemoryStorage::new()));
@@ -212,7 +271,10 @@ async fn kicked_out_session_stops_the_client() {
     assert_eq!(c.kicked_out(), Some(LogoutReason::NotAuthorizedDevice));
     assert!(c.is_disabled());
     assert!(c.auth_token().is_none());
-    assert!(matches!(events.try_recv(), Ok(ClientEvent::KickedOut(LogoutReason::NotAuthorizedDevice))));
+    assert!(matches!(
+        events.try_recv(),
+        Ok(ClientEvent::KickedOut(LogoutReason::NotAuthorizedDevice))
+    ));
     assert!(matches!(events.try_recv(), Ok(ClientEvent::End(_))));
 
     let err = get_profile(&c).await.unwrap_err();

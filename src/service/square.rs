@@ -7,8 +7,7 @@ use crate::error::{Error, Result};
 use crate::thrift::Value;
 
 /// Cover image used by [`SquareService::create_square`] when none is given.
-pub const DEFAULT_SQUARE_COVER_IMAGE_OBS_HASH: &str =
-    "0h6tJfahRYaVt3H0eLAsAWDFheczgHd3wTCTx2eApNKSoefHNVGRdwfgxbdgUMLi8MSngnPFMeNmpbLi8MSngnPFMeNmpbLi8MSngnPQ";
+pub const DEFAULT_SQUARE_COVER_IMAGE_OBS_HASH: &str = "0h6tJfahRYaVt3H0eLAsAWDFheczgHd3wTCTx2eApNKSoefHNVGRdwfgxbdgUMLi8MSngnPFMeNmpbLi8MSngnPFMeNmpbLi8MSngnPQ";
 
 /// Options for [`SquareService::get_joined_squares`].
 #[derive(Debug, Clone, Default)]
@@ -57,7 +56,11 @@ pub struct SquareSendMessageOptions {
 impl SquareSendMessageOptions {
     /// A plain text message.
     pub fn text(square_chat_mid: impl Into<String>, text: impl Into<String>) -> Self {
-        Self { square_chat_mid: square_chat_mid.into(), text: Some(text.into()), ..Default::default() }
+        Self {
+            square_chat_mid: square_chat_mid.into(),
+            text: Some(text.into()),
+            ..Default::default()
+        }
     }
 }
 
@@ -124,10 +127,18 @@ fn request(req: Value) -> Value {
 pub(crate) fn send_message_args(req_seq: i64, o: &SquareSendMessageOptions) -> Value {
     let mut message = crate::tv!({"to": o.square_chat_mid});
     message.insert("text", o.text.clone());
-    message.insert("contentType", o.content_type.clone().unwrap_or(Value::Int(0)));
+    message.insert(
+        "contentType",
+        o.content_type.clone().unwrap_or(Value::Int(0)),
+    );
     message.insert(
         "contentMetadata",
-        Value::Struct(o.content_metadata.iter().map(|(k, v)| (k.clone(), Value::from(v))).collect()),
+        Value::Struct(
+            o.content_metadata
+                .iter()
+                .map(|(k, v)| (k.clone(), Value::from(v)))
+                .collect(),
+        ),
     );
     message.insert("location", o.location.clone());
     if let Some(id) = &o.related_message_id {
@@ -174,7 +185,8 @@ pub(crate) fn join_square_args(o: &JoinSquareOptions) -> Value {
     let mut join_value = Value::object();
     join_value.insert("approvalValue", approval);
     join_value.insert("codeValue", code);
-    let mut member = crate::tv!({"squareMid": o.square_mid, "displayName": o.display_name, "revision": 0});
+    let mut member =
+        crate::tv!({"squareMid": o.square_mid, "displayName": o.display_name, "revision": 0});
     member.insert("ableToReceiveMessage", o.able_to_receive_message);
     let mut req = crate::tv!({"squareMid": o.square_mid});
     req.insert("joinValue", join_value);
@@ -215,7 +227,10 @@ impl SquareService<'_> {
     }
 
     /// Poll events of one square chat.
-    pub async fn fetch_square_chat_events(&self, options: FetchSquareChatEventsOptions) -> Result<Value> {
+    pub async fn fetch_square_chat_events(
+        &self,
+        options: FetchSquareChatEventsOptions,
+    ) -> Result<Value> {
         let mut req = crate::tv!({"squareChatMid": options.square_chat_mid, "limit": options.limit.unwrap_or(100)});
         req.insert("threadMid", options.thread_mid);
         req.insert("syncToken", options.sync_token);
@@ -226,18 +241,21 @@ impl SquareService<'_> {
     /// Send a message to a square chat (reqseq bucket `sq`).
     pub async fn send_message(&self, options: SquareSendMessageOptions) -> Result<Value> {
         let seq = self.client.get_reqseq("sq").await?;
-        self.call("sendMessage", send_message_args(seq, &options)).await
+        self.call("sendMessage", send_message_args(seq, &options))
+            .await
     }
 
     /// A square by mid.
     pub async fn get_square(&self, square_mid: &str) -> Result<Value> {
-        self.call("getSquare", crate::tv!({"request": {"mid": square_mid}})).await
+        self.call("getSquare", crate::tv!({"request": {"mid": square_mid}}))
+            .await
     }
 
     /// Create an open square (reqseq bucket `sq`).
     pub async fn create_square(&self, options: CreateSquareOptions) -> Result<Value> {
         let seq = self.client.get_reqseq("sq").await?;
-        self.call("createSquare", create_square_args(seq, &options)).await
+        self.call("createSquare", create_square_args(seq, &options))
+            .await
     }
 
     /// Join a square.
@@ -247,7 +265,8 @@ impl SquareService<'_> {
 
     /// Destroy (delete for everyone) a square message.
     pub async fn destroy_message(&self, message: SquareMessageRef) -> Result<Value> {
-        self.call("destroyMessage", message_ref_args(&message)).await
+        self.call("destroyMessage", message_ref_args(&message))
+            .await
     }
 
     /// Unsend a square message.
@@ -256,17 +275,28 @@ impl SquareService<'_> {
     }
 
     /// Members of a square chat (default limit 100).
-    pub async fn get_square_chat_members(&self, options: SquareChatMembersOptions) -> Result<Value> {
-        self.call("getSquareChatMembers", chat_members_args(&options, false)).await
+    pub async fn get_square_chat_members(
+        &self,
+        options: SquareChatMembersOptions,
+    ) -> Result<Value> {
+        self.call("getSquareChatMembers", chat_members_args(&options, false))
+            .await
     }
 
     /// Search members of a square chat (default limit 100).
-    pub async fn search_square_chat_members(&self, options: SquareChatMembersOptions) -> Result<Value> {
-        self.call("searchSquareChatMembers", chat_members_args(&options, true)).await
+    pub async fn search_square_chat_members(
+        &self,
+        options: SquareChatMembersOptions,
+    ) -> Result<Value> {
+        self.call("searchSquareChatMembers", chat_members_args(&options, true))
+            .await
     }
 
     /// Pin a text message as a square chat announcement.
-    pub async fn create_square_chat_announcement(&self, o: CreateSquareChatAnnouncementOptions) -> Result<Value> {
+    pub async fn create_square_chat_announcement(
+        &self,
+        o: CreateSquareChatAnnouncementOptions,
+    ) -> Result<Value> {
         let args = crate::tv!({"createSquareChatAnnouncementRequest": {
             "reqSeq": 0,
             "squareChatMid": o.square_chat_mid,
@@ -286,18 +316,29 @@ impl SquareService<'_> {
 
     /// A square chat by mid.
     pub async fn get_square_chat(&self, square_chat_mid: &str) -> Result<Value> {
-        self.call("getSquareChat", crate::tv!({"request": {"squareChatMid": square_chat_mid}})).await
+        self.call(
+            "getSquareChat",
+            crate::tv!({"request": {"squareChatMid": square_chat_mid}}),
+        )
+        .await
     }
 
     /// A square member by mid.
     pub async fn get_square_member(&self, square_member_mid: &str) -> Result<Value> {
-        self.call("getSquareMember", crate::tv!({"request": {"squareMemberMid": square_member_mid}})).await
+        self.call(
+            "getSquareMember",
+            crate::tv!({"request": {"squareMemberMid": square_member_mid}}),
+        )
+        .await
     }
 
     /// Kick a member (`p...` mid) out of a square.
     pub async fn delete_other_from_square(&self, square_member_mid: &str) -> Result<Value> {
         if !square_member_mid.starts_with('p') {
-            return Err(Error::internal("TypeError", "Invalid value: squareMemberMid"));
+            return Err(Error::internal(
+                "TypeError",
+                "Invalid value: squareMemberMid",
+            ));
         }
         let res = self.get_square_member(square_member_mid).await?;
         let mut member = res["squareMember"].clone();
@@ -356,7 +397,10 @@ impl SquareService<'_> {
     }
 
     /// `findSquareByInvitationTicketV2(request: FindSquareByInvitationTicketV2Request)`.
-    pub async fn find_square_by_invitation_ticket_v2(&self, args: impl Into<Value>) -> Result<Value> {
+    pub async fn find_square_by_invitation_ticket_v2(
+        &self,
+        args: impl Into<Value>,
+    ) -> Result<Value> {
         self.call("findSquareByInvitationTicketV2", args).await
     }
 
@@ -687,10 +731,21 @@ mod tests {
 
     #[test]
     fn create_and_join_encode() {
-        let o = CreateSquareOptions { square_name: "n".into(), display_name: "me".into(), ..Default::default() };
-        let f = encode("SquareService_createSquare_args", &create_square_args(0, &o));
+        let o = CreateSquareOptions {
+            square_name: "n".into(),
+            display_name: "me".into(),
+            ..Default::default()
+        };
+        let f = encode(
+            "SquareService_createSquare_args",
+            &create_square_args(0, &o),
+        );
         assert!(path(&f, &[1]).is_some());
-        let o = JoinSquareOptions { square_mid: "s1".into(), display_name: "me".into(), ..Default::default() };
+        let o = JoinSquareOptions {
+            square_mid: "s1".into(),
+            display_name: "me".into(),
+            ..Default::default()
+        };
         let f = encode("SquareService_joinSquare_args", &join_square_args(&o));
         assert!(path(&f, &[1]).is_some());
     }

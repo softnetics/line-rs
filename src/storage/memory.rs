@@ -19,7 +19,9 @@ impl MemoryStorage {
 
     /// Create with initial data.
     pub fn with_data(data: impl IntoIterator<Item = (String, StorageValue)>) -> Self {
-        Self { data: RwLock::new(data.into_iter().collect()) }
+        Self {
+            data: RwLock::new(data.into_iter().collect()),
+        }
     }
 }
 
@@ -41,6 +43,12 @@ impl Storage for MemoryStorage {
         Ok(())
     }
     async fn get_all(&self) -> Result<serde_json::Map<String, StorageValue>> {
-        Ok(self.data.read().await.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        Ok(self
+            .data
+            .read()
+            .await
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect())
     }
 }

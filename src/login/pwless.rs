@@ -90,7 +90,11 @@ impl BaseClient {
         // it as an explicit empty struct (the schema encoder would drop it).
         let res = self
             .secondary_pwless_login()
-            .request("createSession", create_session_args(), crate::request::Parse::Result)
+            .request(
+                "createSession",
+                create_session_args(),
+                crate::request::Parse::Result,
+            )
             .await?;
         res["sessionId"]
             .as_str()
@@ -100,14 +104,21 @@ impl BaseClient {
 
     /// PAAK approval calls served at `path` (compact protocol).
     pub fn paak_approval(&self, path: &'static str) -> PaakApproval<'_> {
-        PaakApproval { service: Service::new(self, path, Protocol::Compact) }
+        PaakApproval {
+            service: Service::new(self, path, Protocol::Compact),
+        }
     }
 }
 
 impl PaakApproval<'_> {
     /// Who is trying to log in: `{applicationType, ipAddress, location}`.
     pub async fn get_login_actor_context(&self, session_id: &str) -> Result<Value> {
-        self.service.call("getLoginActorContext", tv!({"request": {"sessionId": session_id}})).await
+        self.service
+            .call(
+                "getLoginActorContext",
+                tv!({"request": {"sessionId": session_id}}),
+            )
+            .await
     }
 
     /// WebAuthn request options to sign with the passkey.
@@ -118,7 +129,13 @@ impl PaakApproval<'_> {
     /// `allowCredentials`, `userVerification`, `extensions`). That shape is
     /// an assumption; unknown field ids are kept as numeric keys.
     pub async fn get_challenge(&self, session_id: &str) -> Result<Value> {
-        let res = self.service.call("getChallengeForPaakAuth", tv!({"request": {"sessionId": session_id}})).await?;
+        let res = self
+            .service
+            .call(
+                "getChallengeForPaakAuth",
+                tv!({"request": {"sessionId": session_id}}),
+            )
+            .await?;
         Ok(rename_raw(
             Schema::line(),
             &TypeRef::Named("PublicKeyCredentialRequestOptions".into()),
@@ -136,23 +153,47 @@ impl PaakApproval<'_> {
         if let Value::Struct(m) = &mut args {
             m.insert("request".into(), request);
         }
-        self.service.call("authenticateWithPaak", args).await.map(drop)
+        self.service
+            .call("authenticateWithPaak", args)
+            .await
+            .map(drop)
     }
 
     /// Abort the session.
     pub async fn cancel(&self, session_id: &str) -> Result<()> {
-        self.service.call("cancelPaakAuth", tv!({"request": {"sessionId": session_id}})).await.map(drop)
+        self.service
+            .call(
+                "cancelPaakAuth",
+                tv!({"request": {"sessionId": session_id}}),
+            )
+            .await
+            .map(drop)
     }
 
     /// The logging-in device's key-exchange data (`map<string,string>`).
     pub async fn get_exchange_key(&self, session_id: &str) -> Result<Value> {
-        let res = self.service.call("getExchangeKey", tv!({"request": {"sessionId": session_id}})).await?;
+        let res = self
+            .service
+            .call(
+                "getExchangeKey",
+                tv!({"request": {"sessionId": session_id}}),
+            )
+            .await?;
         Ok(res["exchangeKey"].clone())
     }
 
     /// Hand the E2EE key material to the logging-in device.
-    pub async fn put_e2ee_key(&self, session_id: &str, e2ee_key: &[(String, String)]) -> Result<()> {
-        let map = Value::Map(e2ee_key.iter().map(|(k, v)| (Value::from(k.as_str()), Value::from(v.as_str()))).collect());
+    pub async fn put_e2ee_key(
+        &self,
+        session_id: &str,
+        e2ee_key: &[(String, String)],
+    ) -> Result<()> {
+        let map = Value::Map(
+            e2ee_key
+                .iter()
+                .map(|(k, v)| (Value::from(k.as_str()), Value::from(v.as_str())))
+                .collect(),
+        );
         let mut request = tv!({"sessionId": session_id});
         if let Value::Struct(m) = &mut request {
             m.insert("e2eeKey".into(), map);
@@ -212,7 +253,15 @@ mod tests {
                         TValue::Struct(vec![
                             (1, s("cid")),
                             (2, s("public-key")),
-                            (3, TValue::Struct(vec![(1, s("cd")), (2, s("ad")), (3, s("sig")), (4, s("uh"))])),
+                            (
+                                3,
+                                TValue::Struct(vec![
+                                    (1, s("cd")),
+                                    (2, s("ad")),
+                                    (3, s("sig")),
+                                    (4, s("uh"))
+                                ])
+                            ),
                             (4, TValue::Struct(vec![(91, TValue::Bool(true))])),
                         ])
                     ),
@@ -225,7 +274,12 @@ mod tests {
     fn session_id_requests_use_the_secondary_variant() {
         // The IDL defines two structs per name; the later (secondary pwless)
         // one with `sessionId` wins.
-        for m in ["getChallengeForPaakAuth", "cancelPaakAuth", "getLoginActorContext", "getExchangeKey"] {
+        for m in [
+            "getChallengeForPaakAuth",
+            "cancelPaakAuth",
+            "getLoginActorContext",
+            "getExchangeKey",
+        ] {
             assert_eq!(
                 encode(m, tv!({"request": {"sessionId": "S"}})),
                 vec![(1, TValue::Struct(vec![(1, TValue::string("S"))]))],

@@ -76,7 +76,9 @@ pub struct EnumDef {
 
 impl EnumDef {
     pub fn name_of(&self, value: i32) -> Option<&str> {
-        self.by_value.get(&value).map(|&i| self.variants[i].0.as_str())
+        self.by_value
+            .get(&value)
+            .map(|&i| self.variants[i].0.as_str())
     }
     pub fn value_of(&self, name: &str) -> Option<i32> {
         self.by_name.get(name).map(|&i| self.variants[i].1)
@@ -174,7 +176,10 @@ fn tokenize(src: &str) -> Vec<&str> {
             i += 1;
         } else {
             let start = i;
-            while i < bytes.len() && !bytes[i].is_ascii_whitespace() && !b"{}<>,;:=()".contains(&bytes[i]) {
+            while i < bytes.len()
+                && !bytes[i].is_ascii_whitespace()
+                && !b"{}<>,;:=()".contains(&bytes[i])
+            {
                 i += 1;
             }
             out.push(&src[start..i]);
@@ -200,11 +205,15 @@ impl<'a> Parser<'a> {
     fn expect(&mut self, want: &str) -> Result<()> {
         match self.next() {
             Some(t) if t == want => Ok(()),
-            other => Err(Error::Thrift(format!("IDL: expected `{want}`, got {other:?}"))),
+            other => Err(Error::Thrift(format!(
+                "IDL: expected `{want}`, got {other:?}"
+            ))),
         }
     }
     fn ident(&mut self) -> Result<String> {
-        self.next().map(str::to_string).ok_or_else(|| Error::Thrift("IDL: unexpected EOF".into()))
+        self.next()
+            .map(str::to_string)
+            .ok_or_else(|| Error::Thrift("IDL: unexpected EOF".into()))
     }
     fn skip_sep(&mut self) {
         while matches!(self.peek(), Some(",") | Some(";")) {
@@ -215,7 +224,10 @@ impl<'a> Parser<'a> {
     fn parse_struct(&mut self) -> Result<StructDef> {
         let name = self.ident()?;
         self.expect("{")?;
-        let mut s = StructDef { name, ..Default::default() };
+        let mut s = StructDef {
+            name,
+            ..Default::default()
+        };
         loop {
             self.skip_sep();
             if self.peek() == Some("}") {
@@ -240,7 +252,11 @@ impl<'a> Parser<'a> {
             let idx = s.fields.len();
             s.by_id.insert(id, idx);
             s.by_name.insert(fname.clone(), idx);
-            s.fields.push(FieldDef { id, name: fname, ty });
+            s.fields.push(FieldDef {
+                id,
+                name: fname,
+                ty,
+            });
         }
         Ok(s)
     }
@@ -283,7 +299,10 @@ impl<'a> Parser<'a> {
     fn parse_enum(&mut self) -> Result<EnumDef> {
         let name = self.ident()?;
         self.expect("{")?;
-        let mut e = EnumDef { name, ..Default::default() };
+        let mut e = EnumDef {
+            name,
+            ..Default::default()
+        };
         let mut next_value = 0i32;
         loop {
             self.skip_sep();
@@ -295,7 +314,8 @@ impl<'a> Parser<'a> {
             let value = if self.peek() == Some("=") {
                 self.next();
                 let raw = self.ident()?;
-                parse_int(&raw).ok_or_else(|| Error::Thrift(format!("IDL: bad enum value {raw}")))?
+                parse_int(&raw)
+                    .ok_or_else(|| Error::Thrift(format!("IDL: bad enum value {raw}")))?
             } else {
                 next_value
             };

@@ -55,7 +55,10 @@ pub enum MediaHmacVersion {
 
 /// SHA-256 digest of every [`MEDIA_CHUNK_SIZE`] chunk of `ciphertext`.
 pub fn chunk_hashes(ciphertext: &[u8]) -> Vec<[u8; 32]> {
-    ciphertext.chunks(MEDIA_CHUNK_SIZE).map(|c| Sha256::digest(c).into()).collect()
+    ciphertext
+        .chunks(MEDIA_CHUNK_SIZE)
+        .map(|c| Sha256::digest(c).into())
+        .collect()
 }
 
 /// The v2 trailer: `HMAC(macKey, SHA256(c0) ‖ SHA256(c1) ‖ …)`.
@@ -80,10 +83,17 @@ pub struct EncryptedMedia {
 
 /// Encrypt `raw` with `key_material` (random 32 bytes when `None`) and
 /// protect it with the given HMAC scheme.
-pub fn encrypt_media(raw: &[u8], key_material: Option<&[u8]>, version: MediaHmacVersion) -> EncryptedMedia {
-    let key_material = key_material.map(<[u8]>::to_vec).unwrap_or_else(|| random_bytes(32));
+pub fn encrypt_media(
+    raw: &[u8],
+    key_material: Option<&[u8]>,
+    version: MediaHmacVersion,
+) -> EncryptedMedia {
+    let key_material = key_material
+        .map(<[u8]>::to_vec)
+        .unwrap_or_else(|| random_bytes(32));
     let keys = derive_key_material(&key_material);
-    let mut data = aes_ctr(&keys.enc_key, &keys.nonce, raw).expect("derived key/nonce sizes are valid");
+    let mut data =
+        aes_ctr(&keys.enc_key, &keys.nonce, raw).expect("derived key/nonce sizes are valid");
     let hash_object = match version {
         MediaHmacVersion::V1 => {
             let mut mac = hmac(&keys.mac_key);
@@ -105,7 +115,11 @@ pub fn encrypt_media(raw: &[u8], key_material: Option<&[u8]>, version: MediaHmac
             Some(object)
         }
     };
-    EncryptedMedia { key_material: B64.encode(key_material), data, hash_object }
+    EncryptedMedia {
+        key_material: B64.encode(key_material),
+        data,
+        hash_object,
+    }
 }
 
 /// Check the trailing HMAC of `data` (`ciphertext ‖ HMAC`) under either
@@ -113,7 +127,10 @@ pub fn encrypt_media(raw: &[u8], key_material: Option<&[u8]>, version: MediaHmac
 /// so a forgery cannot pass as the other version.
 pub fn verify_media(data: &[u8], mac_key: &[u8]) -> Result<MediaHmacVersion> {
     if data.len() < MEDIA_HMAC_LEN {
-        return Err(media_error(format!("encrypted data too short ({} bytes) to contain HMAC", data.len())));
+        return Err(media_error(format!(
+            "encrypted data too short ({} bytes) to contain HMAC",
+            data.len()
+        )));
     }
     let (enc, tag) = data.split_at(data.len() - MEDIA_HMAC_LEN);
     let mut v1 = hmac(mac_key);
@@ -127,14 +144,22 @@ pub fn verify_media(data: &[u8], mac_key: &[u8]) -> Result<MediaHmacVersion> {
     }
     v2.verify_slice(tag)
         .map(|_| MediaHmacVersion::V2)
-        .map_err(|_| media_error("HMAC verification failed: ciphertext was tampered with or keyMaterial is wrong"))
+        .map_err(|_| {
+            media_error(
+                "HMAC verification failed: ciphertext was tampered with or keyMaterial is wrong",
+            )
+        })
 }
 
 /// Verify (v1 or v2) and decrypt `ciphertext ‖ HMAC`.
 pub fn decrypt_media(data: &[u8], key_material: &[u8]) -> Result<(Vec<u8>, MediaHmacVersion)> {
     let keys = derive_key_material(key_material);
     let version = verify_media(data, &keys.mac_key)?;
-    let plain = aes_ctr(&keys.enc_key, &keys.nonce, &data[..data.len() - MEDIA_HMAC_LEN])?;
+    let plain = aes_ctr(
+        &keys.enc_key,
+        &keys.nonce,
+        &data[..data.len() - MEDIA_HMAC_LEN],
+    )?;
     Ok((plain, version))
 }
 
@@ -149,7 +174,11 @@ pub struct ChunkedHmacValidator {
 
 impl ChunkedHmacValidator {
     pub fn new(mac_key: &[u8]) -> Self {
-        Self { mac: hmac(mac_key), pending: Vec::new(), tail: Vec::new() }
+        Self {
+            mac: hmac(mac_key),
+            pending: Vec::new(),
+            tail: Vec::new(),
+        }
     }
 
     pub fn update(&mut self, data: &[u8]) {
@@ -159,7 +188,8 @@ impl ChunkedHmacValidator {
             self.pending.extend(self.tail.drain(..body));
         }
         while self.pending.len() >= MEDIA_CHUNK_SIZE {
-            self.mac.update(&Sha256::digest(&self.pending[..MEDIA_CHUNK_SIZE]));
+            self.mac
+                .update(&Sha256::digest(&self.pending[..MEDIA_CHUNK_SIZE]));
             self.pending.drain(..MEDIA_CHUNK_SIZE);
         }
     }
@@ -171,7 +201,9 @@ impl ChunkedHmacValidator {
         if !self.pending.is_empty() {
             self.mac.update(&Sha256::digest(&self.pending));
         }
-        self.mac.verify_slice(&self.tail).map_err(|_| media_error("chunked HMAC verification failed"))
+        self.mac
+            .verify_slice(&self.tail)
+            .map_err(|_| media_error("chunked HMAC verification failed"))
     }
 }
 
@@ -187,14 +219,24 @@ impl ChunkHashes {
     /// (`E2EEHMACHelper` over everything but the last 32 bytes).
     pub fn parse(object: &[u8], mac_key: &[u8]) -> Result<Self> {
         if object.len() < MEDIA_HMAC_LEN || !object.len().is_multiple_of(MEDIA_HMAC_LEN) {
-            return Err(media_error(format!("invalid chunk hash object length {}", object.len())));
+            return Err(media_error(format!(
+                "invalid chunk hash object length {}",
+                object.len()
+            )));
         }
         let (body, tag) = object.split_at(object.len() - MEDIA_HMAC_LEN);
         let mut mac = hmac(mac_key);
         mac.update(body);
-        mac.verify_slice(tag).map_err(|_| media_error("chunk hash object HMAC verification failed"))?;
-        let hashes = body.chunks(MEDIA_HMAC_LEN).map(|h| h.try_into().expect("exact 32-byte chunks")).collect();
-        Ok(Self { hashes, hmac: tag.to_vec() })
+        mac.verify_slice(tag)
+            .map_err(|_| media_error("chunk hash object HMAC verification failed"))?;
+        let hashes = body
+            .chunks(MEDIA_HMAC_LEN)
+            .map(|h| h.try_into().expect("exact 32-byte chunks"))
+            .collect();
+        Ok(Self {
+            hashes,
+            hmac: tag.to_vec(),
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -212,19 +254,29 @@ impl ChunkHashes {
 
     /// Whether ciphertext chunk `index` matches its recorded digest.
     pub fn check_chunk(&self, index: usize, chunk: &[u8]) -> bool {
-        self.hashes.get(index).is_some_and(|h| Sha256::digest(chunk).as_slice() == h)
+        self.hashes
+            .get(index)
+            .is_some_and(|h| Sha256::digest(chunk).as_slice() == h)
     }
 
     /// Validate a whole downloaded file (`ciphertext ‖ HMAC`) chunk by chunk.
     pub fn check_file(&self, data: &[u8]) -> Result<()> {
         if data.len() < MEDIA_HMAC_LEN || data[data.len() - MEDIA_HMAC_LEN..] != self.hmac[..] {
-            return Err(media_error("media HMAC does not match the chunk hash object"));
+            return Err(media_error(
+                "media HMAC does not match the chunk hash object",
+            ));
         }
         let body = &data[..data.len() - MEDIA_HMAC_LEN];
         if body.chunks(MEDIA_CHUNK_SIZE).count() != self.hashes.len() {
-            return Err(media_error("chunk count does not match the chunk hash object"));
+            return Err(media_error(
+                "chunk count does not match the chunk hash object",
+            ));
         }
-        match body.chunks(MEDIA_CHUNK_SIZE).enumerate().find(|(i, c)| !self.check_chunk(*i, c)) {
+        match body
+            .chunks(MEDIA_CHUNK_SIZE)
+            .enumerate()
+            .find(|(i, c)| !self.check_chunk(*i, c))
+        {
             Some((i, _)) => Err(media_error(format!("chunk {i} failed validation"))),
             None => Ok(()),
         }
@@ -241,7 +293,15 @@ mod tests {
 
     #[test]
     fn v1_and_v2_round_trip_and_detect() {
-        for n in [0, 1, 1000, MEDIA_CHUNK_SIZE - 1, MEDIA_CHUNK_SIZE, MEDIA_CHUNK_SIZE + 1, 3 * MEDIA_CHUNK_SIZE + 5] {
+        for n in [
+            0,
+            1,
+            1000,
+            MEDIA_CHUNK_SIZE - 1,
+            MEDIA_CHUNK_SIZE,
+            MEDIA_CHUNK_SIZE + 1,
+            3 * MEDIA_CHUNK_SIZE + 5,
+        ] {
             let raw = sample(n);
             for version in [MediaHmacVersion::V1, MediaHmacVersion::V2] {
                 let enc = encrypt_media(&raw, Some(&[9; 32]), version);
@@ -249,7 +309,11 @@ mod tests {
                 let (plain, got) = decrypt_media(&enc.data, &[9; 32]).unwrap();
                 assert_eq!(plain, raw);
                 // Up to one chunk the two schemes only coincide on empty input.
-                let expect = if n == 0 { MediaHmacVersion::V1 } else { version };
+                let expect = if n == 0 {
+                    MediaHmacVersion::V1
+                } else {
+                    version
+                };
                 assert_eq!(got, expect, "n={n}");
                 assert_eq!(enc.hash_object.is_some(), version == MediaHmacVersion::V2);
             }
@@ -275,7 +339,10 @@ mod tests {
 
         let object = v2.hash_object.unwrap();
         assert_eq!(object.len(), 3 * 32);
-        assert_eq!(&object[..32], Sha256::digest(&body[..MEDIA_CHUNK_SIZE]).as_slice());
+        assert_eq!(
+            &object[..32],
+            Sha256::digest(&body[..MEDIA_CHUNK_SIZE]).as_slice()
+        );
         assert_eq!(&object[64..], tag.as_slice());
     }
 
@@ -303,7 +370,12 @@ mod tests {
         let err = decrypt_media(&bad, &[2; 32]).unwrap_err();
         assert!(err.to_string().contains("HMAC verification failed"));
         assert!(decrypt_media(&enc.data, &[3; 32]).is_err());
-        assert!(decrypt_media(&[0; 5], &[2; 32]).unwrap_err().to_string().contains("too short"));
+        assert!(
+            decrypt_media(&[0; 5], &[2; 32])
+                .unwrap_err()
+                .to_string()
+                .contains("too short")
+        );
     }
 
     #[test]
@@ -351,7 +423,13 @@ mod tests {
 
         let mut bad = enc.data.clone();
         bad[2 * MEDIA_CHUNK_SIZE] ^= 1;
-        assert!(hashes.check_file(&bad).unwrap_err().to_string().contains("chunk 2"));
+        assert!(
+            hashes
+                .check_file(&bad)
+                .unwrap_err()
+                .to_string()
+                .contains("chunk 2")
+        );
 
         let mut bad_object = object.clone();
         bad_object[0] ^= 1;

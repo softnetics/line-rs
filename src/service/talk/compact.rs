@@ -35,7 +35,10 @@ pub struct CompactMessageProtocolError {
 
 impl CompactMessageProtocolError {
     fn new(message: impl Into<String>) -> Self {
-        Self { message: message.into(), code: None }
+        Self {
+            message: message.into(),
+            code: None,
+        }
     }
 }
 
@@ -86,7 +89,9 @@ pub fn pack_compact_message(options: &CompactMessageProtocolOptions<'_>) -> Resu
         }
         CompactArgs::Chunks(chunks) => {
             if chunks.len() < 5 {
-                return Err(CompactMessageProtocolError::new("compact E2EE message requires 5 chunks"));
+                return Err(CompactMessageProtocolError::new(
+                    "compact E2EE message requires 5 chunks",
+                ));
             }
             out.push(2);
             for chunk in &chunks[..3] {
@@ -111,7 +116,12 @@ pub fn pack_compact_plain_message(seq_id: i32, to: &str, text: &str) -> Result<V
 }
 
 /// Pack an E2EE compact message (`/ECA5`); `msg_type` is 5 (default) or 6.
-pub fn pack_compact_e2ee_message(seq_id: i32, to: &str, chunks: &[Vec<u8>], msg_type: u8) -> Result<Vec<u8>> {
+pub fn pack_compact_e2ee_message(
+    seq_id: i32,
+    to: &str,
+    chunks: &[Vec<u8>],
+    msg_type: u8,
+) -> Result<Vec<u8>> {
     pack_compact_message(&CompactMessageProtocolOptions {
         msg_type,
         seq_id,
@@ -136,7 +146,11 @@ pub fn decode_compact_message_response(data: &[u8]) -> Result<CompactMessageResp
     let message_id = reader.read_i64()?;
     let created_ms = reader.read_i64()?;
     reader.assert_done()?;
-    Ok(CompactMessageResponse { sequence_id, message_id, created_time: created_ms / 1000 })
+    Ok(CompactMessageResponse {
+        sequence_id,
+        message_id,
+        created_time: created_ms / 1000,
+    })
 }
 
 /// Text as BOM-prefixed UTF-8, or BOM-prefixed UTF-16LE when that is shorter.
@@ -147,7 +161,11 @@ pub fn encode_compact_text(text: &str) -> Vec<u8> {
     for unit in text.encode_utf16() {
         utf16.extend_from_slice(&unit.to_le_bytes());
     }
-    if utf8.len() > utf16.len() { utf16 } else { utf8 }
+    if utf8.len() > utf16.len() {
+        utf16
+    } else {
+        utf8
+    }
 }
 
 /// Zigzag varint i32.
@@ -181,7 +199,9 @@ fn mid_type(mid: &str) -> Result<u8> {
         Some(b'u') => Ok(0),
         Some(b'r') => Ok(1),
         Some(b'c') => Ok(2),
-        _ => Err(CompactMessageProtocolError::new("unsupported compact message MID type")),
+        _ => Err(CompactMessageProtocolError::new(
+            "unsupported compact message MID type",
+        )),
     }
 }
 
@@ -194,8 +214,9 @@ fn mid_to_bytes(mid: &str) -> Result<[u8; 16]> {
 }
 
 fn read_signed_i32(bytes: &[u8]) -> Result<i32> {
-    let arr: [u8; 4] =
-        bytes.try_into().map_err(|_| CompactMessageProtocolError::new("compact E2EE key id chunk must be 4 bytes"))?;
+    let arr: [u8; 4] = bytes.try_into().map_err(|_| {
+        CompactMessageProtocolError::new("compact E2EE key id chunk must be 4 bytes")
+    })?;
     Ok(i32::from_be_bytes(arr))
 }
 
@@ -218,7 +239,9 @@ impl CompactReader<'_> {
         match self.read_byte()? {
             1 => Ok(true),
             2 => Ok(false),
-            v => Err(CompactMessageProtocolError::new(format!("invalid compact bool value {v}"))),
+            v => Err(CompactMessageProtocolError::new(format!(
+                "invalid compact bool value {v}"
+            ))),
         }
     }
 
@@ -233,7 +256,9 @@ impl CompactReader<'_> {
             }
             shift += 7;
             if shift > 70 {
-                return Err(CompactMessageProtocolError::new("compact varint is too long"));
+                return Err(CompactMessageProtocolError::new(
+                    "compact varint is too long",
+                ));
             }
         }
     }
@@ -244,7 +269,8 @@ impl CompactReader<'_> {
     }
 
     fn read_i32(&mut self) -> Result<i32> {
-        i32::try_from(self.read_zigzag()?).map_err(|_| CompactMessageProtocolError::new("compact i32 out of range"))
+        i32::try_from(self.read_zigzag()?)
+            .map_err(|_| CompactMessageProtocolError::new("compact i32 out of range"))
     }
 
     fn read_i64(&mut self) -> Result<i64> {
@@ -253,7 +279,9 @@ impl CompactReader<'_> {
 
     fn assert_done(&self) -> Result<()> {
         if self.offset != self.data.len() {
-            return Err(CompactMessageProtocolError::new("unexpected trailing compact message response bytes"));
+            return Err(CompactMessageProtocolError::new(
+                "unexpected trailing compact message response bytes",
+            ));
         }
         Ok(())
     }
@@ -265,7 +293,10 @@ mod tests {
 
     #[test]
     fn text_prefers_utf8_for_ascii() {
-        assert_eq!(hex::encode(encode_compact_text("hello")), "efbbbf68656c6c6f");
+        assert_eq!(
+            hex::encode(encode_compact_text("hello")),
+            "efbbbf68656c6c6f"
+        );
     }
 
     #[test]
@@ -277,17 +308,30 @@ mod tests {
     fn plain_message_layout() {
         let mid = format!("u{}", "00".repeat(16));
         let packed = pack_compact_plain_message(0, &mid, "hi").unwrap();
-        assert_eq!(hex::encode(packed), format!("0200{}{}05efbbbf686900", "00", "00".repeat(16)));
+        assert_eq!(
+            hex::encode(packed),
+            format!("0200{}{}05efbbbf686900", "00", "00".repeat(16))
+        );
     }
 
     #[test]
     fn e2ee_message_layout() {
         let mid = format!("c{}", "11".repeat(16));
         let salt: Vec<u8> = (0..16).collect();
-        let chunks = vec![salt.clone(), vec![0xaa, 0xbb, 0xcc], vec![0x22; 12], vec![0, 0, 0, 0x96], vec![0xff; 4]];
+        let chunks = vec![
+            salt.clone(),
+            vec![0xaa, 0xbb, 0xcc],
+            vec![0x22; 12],
+            vec![0, 0, 0, 0x96],
+            vec![0xff; 4],
+        ];
         let packed = pack_compact_e2ee_message(1, &mid, &chunks, MSG_TYPE_E2EE).unwrap();
-        let expected =
-            format!("050202{}0210{}03aabbcc0c{}ac0201", "11".repeat(16), hex::encode(&salt), "22".repeat(12));
+        let expected = format!(
+            "050202{}0210{}03aabbcc0c{}ac0201",
+            "11".repeat(16),
+            hex::encode(&salt),
+            "22".repeat(12)
+        );
         assert_eq!(hex::encode(packed), expected);
     }
 
@@ -299,7 +343,11 @@ mod tests {
         write_compact_i64(&mut body, 1_710_000_000_000);
         assert_eq!(
             decode_compact_message_response(&body).unwrap(),
-            CompactMessageResponse { sequence_id: 7, message_id: 1_234_567_890_123, created_time: 1_710_000_000 }
+            CompactMessageResponse {
+                sequence_id: 7,
+                message_id: 1_234_567_890_123,
+                created_time: 1_710_000_000
+            }
         );
     }
 

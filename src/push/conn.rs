@@ -9,10 +9,11 @@ use bytes::Bytes;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{Notify, mpsc};
 
 use super::frame::{
-    request_packet, AckType, PingFrame, PushFrame, SignOnResponseFrame, FRAME_PING, FRAME_PUSH, FRAME_SIGN_ON_RESPONSE,
+    AckType, FRAME_PING, FRAME_PUSH, FRAME_SIGN_ON_RESPONSE, PingFrame, PushFrame,
+    SignOnResponseFrame, request_packet,
 };
 use crate::error::{Error, Result};
 
@@ -67,13 +68,21 @@ impl FrameDecoder {
     }
 
     fn on_packet(&mut self, ty: u8, dd: Vec<u8>) -> Result<Option<Packet>> {
-        let short = || Error::internal("LegyPusherError", format!("PUSH frame type {ty} too short: {}", hex::encode(&dd)));
+        let short = || {
+            Error::internal(
+                "LegyPusherError",
+                format!("PUSH frame type {ty} too short: {}", hex::encode(&dd)),
+            )
+        };
         match ty {
             FRAME_PING => {
                 if dd.len() < 3 {
                     return Err(short());
                 }
-                let frame = PingFrame { ping_type: dd[0], ping_id: u16::from_be_bytes([dd[1], dd[2]]) };
+                let frame = PingFrame {
+                    ping_type: dd[0],
+                    ping_id: u16::from_be_bytes([dd[1], dd[2]]),
+                };
                 if AckType::from_u8(frame.ping_type) != Some(AckType::AckRequired) {
                     return Err(Error::internal(
                         "LegyPusherError",
@@ -91,7 +100,10 @@ impl FrameDecoder {
                 let is_fin = req & 0x8000 != 0;
                 let chunk = &dd[2..];
                 if !is_fin {
-                    self.not_fin.entry(request_id).or_default().extend_from_slice(chunk);
+                    self.not_fin
+                        .entry(request_id)
+                        .or_default()
+                        .extend_from_slice(chunk);
                     return Ok(None);
                 }
                 let payload = match self.not_fin.remove(&request_id) {
@@ -101,7 +113,11 @@ impl FrameDecoder {
                     }
                     None => chunk.to_vec(),
                 };
-                Ok(Some(Packet::SignOnResponse(SignOnResponseFrame { request_id, is_fin, payload })))
+                Ok(Some(Packet::SignOnResponse(SignOnResponseFrame {
+                    request_id,
+                    is_fin,
+                    payload,
+                })))
             }
             FRAME_PUSH => {
                 if dd.len() < 6 {
@@ -144,7 +160,13 @@ impl ConnWriter {
     /// A writer plus the receiver that feeds the request body.
     pub fn channel() -> (Self, mpsc::UnboundedReceiver<Bytes>) {
         let (tx, rx) = mpsc::unbounded_channel();
-        (Self { tx, closed: Arc::new(Notify::new()) }, rx)
+        (
+            Self {
+                tx,
+                closed: Arc::new(Notify::new()),
+            },
+            rx,
+        )
     }
 
     /// Queue raw bytes.
@@ -181,7 +203,10 @@ pub struct Conn {
 
 impl Conn {
     /// Assemble a connection from parts (used by tests and custom transports).
-    pub fn from_parts(writer: ConnWriter, response: BoxFuture<'static, Result<ByteStream>>) -> Self {
+    pub fn from_parts(
+        writer: ConnWriter,
+        response: BoxFuture<'static, Result<ByteStream>>,
+    ) -> Self {
         Self { writer, response }
     }
 
@@ -203,7 +228,10 @@ impl Conn {
                 let body = res.bytes().await.unwrap_or_default();
                 return Err(Error::internal(
                     "LegyPusherError",
-                    format!("PUSH responded with status {status}: {}", hex::encode(&body)),
+                    format!(
+                        "PUSH responded with status {status}: {}",
+                        hex::encode(&body)
+                    ),
                 ));
             }
             Ok(res.bytes_stream().map_err(Error::from).boxed())
@@ -225,7 +253,13 @@ mod tests {
     fn decodes_ping() {
         let mut d = FrameDecoder::new();
         let p = d.feed(&ping(7)).unwrap();
-        assert_eq!(p, vec![Packet::Ping(PingFrame { ping_type: 2, ping_id: 7 })]);
+        assert_eq!(
+            p,
+            vec![Packet::Ping(PingFrame {
+                ping_type: 2,
+                ping_id: 7
+            })]
+        );
         assert_eq!(d.pending(), 0);
     }
 
@@ -274,13 +308,21 @@ mod tests {
         let out = d.feed(&fin).unwrap();
         assert_eq!(
             out,
-            vec![Packet::SignOnResponse(SignOnResponseFrame { request_id: 5, is_fin: true, payload: vec![1, 2, 3] })]
+            vec![Packet::SignOnResponse(SignOnResponseFrame {
+                request_id: 5,
+                is_fin: true,
+                payload: vec![1, 2, 3]
+            })]
         );
         // The continuation buffer is consumed.
         let again = d.feed(&fin).unwrap();
         assert_eq!(
             again,
-            vec![Packet::SignOnResponse(SignOnResponseFrame { request_id: 5, is_fin: true, payload: vec![3] })]
+            vec![Packet::SignOnResponse(SignOnResponseFrame {
+                request_id: 5,
+                is_fin: true,
+                payload: vec![3]
+            })]
         );
     }
 
@@ -291,7 +333,12 @@ mod tests {
         let out = d.feed(&raw).unwrap();
         assert_eq!(
             out,
-            vec![Packet::Push(PushFrame { push_type: 2, service_type: 3, push_id: 256, payload: vec![0xde, 0xad] })]
+            vec![Packet::Push(PushFrame {
+                push_type: 2,
+                service_type: 3,
+                push_id: 256,
+                payload: vec![0xde, 0xad]
+            })]
         );
     }
 
@@ -300,7 +347,10 @@ mod tests {
         let mut d = FrameDecoder::new();
         assert!(d.feed(&request_packet(9, &[1, 2])).is_err());
         let mut d = FrameDecoder::new();
-        assert!(d.feed(&request_packet(FRAME_PUSH, &[1, 3, 0, 0, 0, 1])).is_err());
+        assert!(
+            d.feed(&request_packet(FRAME_PUSH, &[1, 3, 0, 0, 0, 1]))
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -316,7 +366,9 @@ mod tests {
     async fn close_wakes_reader_even_if_called_first() {
         let (w, _rx) = ConnWriter::channel();
         w.close();
-        tokio::time::timeout(std::time::Duration::from_millis(100), w.closed()).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_millis(100), w.closed())
+            .await
+            .unwrap();
     }
 
     // `Conn.new reports a transport failure`: a failed connect surfaces as an

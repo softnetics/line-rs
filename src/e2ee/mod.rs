@@ -28,16 +28,20 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 
 pub use crypto::{
-    byte2int, decode_base64, decrypt_aes_gcm_siv, decrypt_by_key_material, decrypt_by_key_material_b64,
-    decrypt_encrypted_qr_identifier, decrypt_key_chain, decrypt_key_chain_entries, derive_key_iv,
-    encrypt_aes_ecb, encrypt_by_key_material, generate_aad, generate_key_pair, generate_shared_secret,
-    int_bytes, public_key_of, sha256, sha256_sum, verify_key_pair, xor, KeyChainEntry,
+    KeyChainEntry, byte2int, decode_base64, decrypt_aes_gcm_siv, decrypt_by_key_material,
+    decrypt_by_key_material_b64, decrypt_encrypted_qr_identifier, decrypt_key_chain,
+    decrypt_key_chain_entries, derive_key_iv, encrypt_aes_ecb, encrypt_by_key_material,
+    generate_aad, generate_key_pair, generate_shared_secret, int_bytes, public_key_of, sha256,
+    sha256_sum, verify_key_pair, xor,
 };
 pub use exchange::{E2eeOpKind, E2eeOperation};
 pub use keys::{E2eeKey, GroupKey};
-pub use media::{decrypt_media, encrypt_media, ChunkHashes, ChunkedHmacValidator, EncryptedMedia, MediaHmacVersion};
-pub use recovery::{send_recovery, E2eeSendRecovery, MAX_E2EE_SEND_ATTEMPTS};
+pub use media::{
+    ChunkHashes, ChunkedHmacValidator, EncryptedMedia, MediaHmacVersion, decrypt_media,
+    encrypt_media,
+};
 pub use message::{content_type_number, decrypt_message_v1, decrypt_message_v2, encrypt_payload};
+pub use recovery::{E2eeSendRecovery, MAX_E2EE_SEND_ATTEMPTS, send_recovery};
 
 use crate::base::BaseClient;
 use crate::error::Result;
@@ -61,6 +65,9 @@ pub struct E2eeState {
     /// `(keyId, private key)` chosen at login, verified against the server by
     /// [`BaseClient::verify_login_key`] once the token is installed.
     login_key: Mutex<Option<(String, Vec<u8>)>>,
+    /// Own key ids whose stored private key matched the public key LINE
+    /// has registered, so [`E2ee::check_sealed`] asks the server once per id.
+    pub(crate) confirmed_keys: Mutex<std::collections::HashSet<i64>>,
 }
 
 impl BaseClient {
@@ -77,7 +84,10 @@ impl BaseClient {
         if pk_only {
             (private, public)
         } else {
-            (private, format!("?secret={}&e2eeVersion=1", crypto::uri_encode(&public)))
+            (
+                private,
+                format!("?secret={}&e2eeVersion=1", crypto::uri_encode(&public)),
+            )
         }
     }
 
@@ -88,7 +98,9 @@ impl BaseClient {
     /// `{keyId, privKey, pubKey, e2eeVersion}` (keys as binary), or `None`
     /// when `data` holds no key chain.
     pub async fn decode_e2ee_key_v1(&self, data: &Value, secret: &[u8]) -> Result<Option<Value>> {
-        let Some((key, private, public)) = self.e2ee().decode_key_v1(data, secret).await? else { return Ok(None) };
+        let Some((key, private, public)) = self.e2ee().decode_key_v1(data, secret).await? else {
+            return Ok(None);
+        };
         let mut out = Value::object();
         out.insert("keyId", key.key_id);
         out.insert("privKey", private);
@@ -101,7 +113,10 @@ impl BaseClient {
     /// swallowed; use [`Self::try_register_e2ee_key_pair`] to see it.
     pub async fn register_e2ee_key_pair(&self) -> Result<()> {
         if let Err(e) = self.try_register_e2ee_key_pair().await {
-            self.log("e2ee", serde_json::json!({"type": "registerE2EEKeyPairFailed", "message": e.to_string()}));
+            self.log(
+                "e2ee",
+                serde_json::json!({"type": "registerE2EEKeyPairFailed", "message": e.to_string()}),
+            );
         }
         Ok(())
     }
@@ -120,7 +135,10 @@ impl BaseClient {
     /// Whether the server's public key for `key_id` matches `private_key`
     /// (`false` when unknown or unreachable).
     pub async fn verify_stored_key_against_server(&self, key_id: i64, private_key: &[u8]) -> bool {
-        self.e2ee().check_stored_key_against_server(&key_id.to_string(), private_key).await == Some(true)
+        self.e2ee()
+            .check_stored_key_against_server(&key_id.to_string(), private_key)
+            .await
+            == Some(true)
     }
 
     /// Device secret for `confirmE2EELogin` (see [`crypto::encrypt_device_secret`]).
@@ -130,7 +148,11 @@ impl BaseClient {
         private_key: &[u8],
         encrypted_key_chain: &[u8],
     ) -> Result<Vec<u8>> {
-        Ok(crypto::encrypt_device_secret(public_key, private_key, encrypted_key_chain))
+        Ok(crypto::encrypt_device_secret(
+            public_key,
+            private_key,
+            encrypted_key_chain,
+        ))
     }
 
     /// The current own key (`e2eeKeys:<mid>`), recovered through the server's
@@ -143,7 +165,11 @@ impl BaseClient {
         self.e2ee().get_self_key_by_key_id(key_id).await
     }
 
-    pub async fn save_e2ee_self_key_data_by_key_id(&self, key_id: i64, key: &E2eeKey) -> Result<()> {
+    pub async fn save_e2ee_self_key_data_by_key_id(
+        &self,
+        key_id: i64,
+        key: &E2eeKey,
+    ) -> Result<()> {
         self.e2ee().save_self_key_by_key_id(key_id, key).await
     }
 
@@ -153,12 +179,20 @@ impl BaseClient {
     }
 
     /// A user's public key for `key_id` (or the current one), cached per mid.
-    pub async fn get_e2ee_local_public_key(&self, mid: &str, key_id: Option<i64>) -> Result<Vec<u8>> {
+    pub async fn get_e2ee_local_public_key(
+        &self,
+        mid: &str,
+        key_id: Option<i64>,
+    ) -> Result<Vec<u8>> {
         self.e2ee().get_user_public_key(mid, key_id).await
     }
 
     /// A group's shared key for generation `key_id` (or the current one).
-    pub async fn get_e2ee_group_key(&self, chat_mid: &str, key_id: Option<i64>) -> Result<GroupKey> {
+    pub async fn get_e2ee_group_key(
+        &self,
+        chat_mid: &str,
+        key_id: Option<i64>,
+    ) -> Result<GroupKey> {
         self.e2ee().get_group_key(chat_mid, key_id).await
     }
 
@@ -177,7 +211,9 @@ impl BaseClient {
         content_type: i32,
         spec_version: i32,
     ) -> Result<Vec<Vec<u8>>> {
-        self.e2ee().encrypt_message(to, content, content_type, spec_version).await
+        self.e2ee()
+            .encrypt_message(to, content, content_type, spec_version)
+            .await
     }
 
     /// Decrypt a `Message` (as decoded from thrift) if it is E2EE; returns the
@@ -188,7 +224,10 @@ impl BaseClient {
     }
 
     /// `(text, extra metadata)` of an E2EE text message.
-    pub async fn decrypt_e2ee_text_message(&self, message: &Value) -> Result<(String, Vec<(String, String)>)> {
+    pub async fn decrypt_e2ee_text_message(
+        &self,
+        message: &Value,
+    ) -> Result<(String, Vec<(String, String)>)> {
         self.e2ee().decrypt_text(message).await
     }
 

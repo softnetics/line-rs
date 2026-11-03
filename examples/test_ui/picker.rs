@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 
 use line_rs::client::{Chat, Client, User};
-use line_rs::{tv, Value};
+use line_rs::{Value, tv};
 use serde::Serialize;
 
 use crate::cases::Throttle;
@@ -70,7 +70,13 @@ pub struct PickList {
 
 impl Default for PickList {
     fn default() -> Self {
-        Self { status: "idle", items: Vec::new(), error: None, note: None, fetched_ms: None }
+        Self {
+            status: "idle",
+            items: Vec::new(),
+            error: None,
+            note: None,
+            fetched_ms: None,
+        }
     }
 }
 
@@ -93,8 +99,7 @@ pub async fn load(kind: Kind, client: &Client, throttle: &Throttle) -> Result<Lo
 /// `/kp`, on legy and ga2, with the Keep and timeline channel tokens, over
 /// HTTP/1.1. LEGY does not route `/kp` for this client, so the picker makes
 /// no requests until that changes.
-pub const KEEP_UNAVAILABLE: &str =
-    "Keep ใช้ไม่ได้: LEGY ไม่ route /kp ให้ client นี้ (ทดสอบจริง 2026-10-21: ทุก path ใต้ /kp ได้ 404 จาก server=legy) — ไม่ได้ส่ง request";
+pub const KEEP_UNAVAILABLE: &str = "Keep ใช้ไม่ได้: LEGY ไม่ route /kp ให้ client นี้ (ทดสอบจริง 2026-10-21: ทุก path ใต้ /kp ได้ 404 จาก server=legy) — ไม่ได้ส่ง request";
 
 /// Flip once LEGY is seen routing `/kp` again.
 const KEEP_ROUTED: bool = false;
@@ -105,9 +110,15 @@ async fn load_keep(client: &Client, throttle: &Throttle) -> Result<Loaded, Strin
     }
     throttle.wait().await;
     let rest = client.base.rest();
-    rest.channel_token(line_rs::rest::channels::KEEP).await.map_err(|e| format!("Keep channel token: {e}"))?;
+    rest.channel_token(line_rs::rest::channels::KEEP)
+        .await
+        .map_err(|e| format!("Keep channel token: {e}"))?;
     throttle.wait().await;
-    let res = rest.keep().sync(0, Some(KEEP_LIMIT), None).await.map_err(|e| format!("keep/sync.json: {e}"))?;
+    let res = rest
+        .keep()
+        .sync(0, Some(KEEP_LIMIT), None)
+        .await
+        .map_err(|e| format!("keep/sync.json: {e}"))?;
     Ok(keep_loaded(&res))
 }
 
@@ -115,13 +126,21 @@ fn keep_loaded(res: &serde_json::Value) -> Loaded {
     let items = keep_picks(res);
     let mut notes = Vec::new();
     if items.is_empty() {
-        let keys = res.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>().join(", ")).unwrap_or_default();
+        let keys = res
+            .as_object()
+            .map(|o| o.keys().cloned().collect::<Vec<_>>().join(", "))
+            .unwrap_or_default();
         let body: String = res.to_string().chars().take(300).collect();
-        notes.push(format!("no contentId in keep/sync.json response (keys: {keys}; body: {body})"));
+        notes.push(format!(
+            "no contentId in keep/sync.json response (keys: {keys}; body: {body})"
+        ));
     } else if items.len() >= KEEP_LIMIT as usize {
         notes.push(format!("first {KEEP_LIMIT} items only"));
     }
-    Loaded { items, note: (!notes.is_empty()).then(|| notes.join(" · ")) }
+    Loaded {
+        items,
+        note: (!notes.is_empty()).then(|| notes.join(" · ")),
+    }
 }
 
 /// Every object with a string `contentId`, de-duplicated, newest first when a
@@ -130,9 +149,20 @@ fn keep_picks(res: &serde_json::Value) -> Vec<Pick> {
     fn walk(v: &serde_json::Value, out: &mut Vec<(i64, Pick)>) {
         match v {
             serde_json::Value::Object(o) => {
-                if let Some(id) = o.get("contentId").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
+                if let Some(id) = o
+                    .get("contentId")
+                    .and_then(|x| x.as_str())
+                    .filter(|s| !s.is_empty())
+                {
                     if !out.iter().any(|(_, p)| p.mid == id) {
-                        out.push((keep_time(v), Pick { mid: id.to_string(), name: keep_title(v), detail: keep_detail(v) }));
+                        out.push((
+                            keep_time(v),
+                            Pick {
+                                mid: id.to_string(),
+                                name: keep_title(v),
+                                detail: keep_detail(v),
+                            },
+                        ));
                     }
                     return;
                 }
@@ -151,12 +181,26 @@ fn keep_picks(res: &serde_json::Value) -> Vec<Pick> {
 /// First non-empty text-like field, searched breadth-first so top-level
 /// titles win over nested ones.
 fn keep_title(item: &serde_json::Value) -> String {
-    const KEYS: [&str; 8] = ["title", "text", "name", "fileName", "displayName", "description", "summary", "url"];
+    const KEYS: [&str; 8] = [
+        "title",
+        "text",
+        "name",
+        "fileName",
+        "displayName",
+        "description",
+        "summary",
+        "url",
+    ];
     let mut level = vec![item];
     for _ in 0..4 {
         for v in &level {
             for k in KEYS {
-                if let Some(s) = v.get(k).and_then(|x| x.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
+                if let Some(s) = v
+                    .get(k)
+                    .and_then(|x| x.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
                     let one_line = s.split_whitespace().collect::<Vec<_>>().join(" ");
                     return one_line.chars().take(80).collect();
                 }
@@ -175,16 +219,31 @@ fn keep_title(item: &serde_json::Value) -> String {
 }
 
 fn keep_time(item: &serde_json::Value) -> i64 {
-    ["updatedTime", "createdTime", "modifiedTime", "createdAt", "updatedAt"]
-        .iter()
-        .find_map(|k| item.get(*k).and_then(|x| x.as_i64().or_else(|| x.as_str()?.parse().ok())))
-        .unwrap_or(0)
+    [
+        "updatedTime",
+        "createdTime",
+        "modifiedTime",
+        "createdAt",
+        "updatedAt",
+    ]
+    .iter()
+    .find_map(|k| {
+        item.get(*k)
+            .and_then(|x| x.as_i64().or_else(|| x.as_str()?.parse().ok()))
+    })
+    .unwrap_or(0)
 }
 
 fn keep_detail(item: &serde_json::Value) -> String {
     ["contentType", "type", "category"]
         .iter()
-        .find_map(|k| item.get(*k).and_then(|x| x.as_str().map(str::to_string).or_else(|| x.as_i64().map(|i| i.to_string()))))
+        .find_map(|k| {
+            item.get(*k).and_then(|x| {
+                x.as_str()
+                    .map(str::to_string)
+                    .or_else(|| x.as_i64().map(|i| i.to_string()))
+            })
+        })
         .unwrap_or_default()
 }
 
@@ -193,12 +252,21 @@ async fn load_groups(client: &Client, throttle: &Throttle) -> Result<Loaded, Str
     let joined = client
         .base
         .talk()
-        .call("getAllChatMids", tv!({"request": {"withMemberChats": true}, "syncReason": "INTERNAL"}))
+        .call(
+            "getAllChatMids",
+            tv!({"request": {"withMemberChats": true}, "syncReason": "INTERNAL"}),
+        )
         .await
         .map_err(|e| format!("getAllChatMids: {e}"))?;
-    let mids: Vec<Value> = joined["memberChatMids"].as_list().unwrap_or_default().to_vec();
+    let mids: Vec<Value> = joined["memberChatMids"]
+        .as_list()
+        .unwrap_or_default()
+        .to_vec();
     if mids.is_empty() {
-        return Ok(Loaded { items: Vec::new(), note: None });
+        return Ok(Loaded {
+            items: Vec::new(),
+            note: None,
+        });
     }
     throttle.wait().await;
     // Members are needed for the count; invitees are not.
@@ -206,9 +274,17 @@ async fn load_groups(client: &Client, throttle: &Throttle) -> Result<Loaded, Str
     request.insert("chatMids", Value::List(mids));
     let mut args = tv!({"syncReason": "INTERNAL"});
     args.insert("request", request);
-    let res = client.base.talk().call("getChats", args).await.map_err(|e| format!("getChats: {e}"))?;
+    let res = client
+        .base
+        .talk()
+        .call("getChats", args)
+        .await
+        .map_err(|e| format!("getChats: {e}"))?;
     let chats = res["chats"].as_list().unwrap_or_default();
-    Ok(Loaded { items: group_picks(client, chats), note: None })
+    Ok(Loaded {
+        items: group_picks(client, chats),
+        note: None,
+    })
 }
 
 async fn load_peers(client: &Client, throttle: &Throttle) -> Result<Loaded, String> {
@@ -234,37 +310,53 @@ async fn load_peers(client: &Client, throttle: &Throttle) -> Result<Loaded, Stri
             throttle.wait().await;
             let res = match api {
                 ContactsApi::V3 => {
-                    let targets: Vec<serde_json::Value> =
-                        chunk.iter().map(|m| serde_json::json!({"targetUserMid": m})).collect();
+                    let targets: Vec<serde_json::Value> = chunk
+                        .iter()
+                        .map(|m| serde_json::json!({"targetUserMid": m}))
+                        .collect();
                     client
                         .base
                         .relation()
-                        .call("getContactsV3", tv!({"request": {"targetUsers": targets, "syncReason": "INTERNAL"}}))
+                        .call(
+                            "getContactsV3",
+                            tv!({"request": {"targetUsers": targets, "syncReason": "INTERNAL"}}),
+                        )
                         .await
                         .map(|r| v3_names(client, &r))
                 }
-                ContactsApi::V2 => client.base.talk().get_contacts_v2(chunk).await.map(|r| v2_names(&r)),
+                ContactsApi::V2 => client
+                    .base
+                    .talk()
+                    .get_contacts_v2(chunk)
+                    .await
+                    .map(|r| v2_names(&r)),
             };
             match res {
                 Ok(found) => {
                     names.extend(found);
                     break;
                 }
-                Err(e) if is_not_capable(&e) => match api {
-                    ContactsApi::V3 => api = ContactsApi::V2,
-                    ContactsApi::V2 => {
-                        return Ok(Loaded {
+                Err(e) if is_not_capable(&e) => {
+                    match api {
+                        ContactsApi::V3 => api = ContactsApi::V2,
+                        ContactsApi::V2 => {
+                            return Ok(Loaded {
                             items: peer_picks(&mids, &names),
                             note: Some("getContactsV3/V2 not capable on this device: names unavailable".into()),
                         });
+                        }
                     }
-                },
+                }
                 Err(e) => return Err(format!("{}: {e}", api.method())),
             }
         }
     }
-    let note = (api == ContactsApi::V2).then(|| "names via getContactsV2 (V3 not capable on this device)".into());
-    Ok(Loaded { items: peer_picks(&mids, &names), note })
+    let note = (api == ContactsApi::V2)
+        .then(|| "names via getContactsV2 (V3 not capable on this device)".into());
+    Ok(Loaded {
+        items: peer_picks(&mids, &names),
+        note,
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -283,7 +375,9 @@ impl ContactsApi {
 }
 
 fn is_not_capable(e: &line_rs::Error) -> bool {
-    e.to_string().to_ascii_lowercase().contains("api method not capable")
+    e.to_string()
+        .to_ascii_lowercase()
+        .contains("api method not capable")
 }
 
 /// mid -> (display name, status message)
@@ -297,8 +391,14 @@ fn v3_names(client: &Client, res: &Value) -> Names {
         .iter()
         .filter_map(|r| {
             let mid = r["targetUserMid"].as_str()?.to_string();
-            let name = User::new(client.clone(), r.clone()).display_name().unwrap_or("").to_string();
-            let status = r["targetProfileDetail"]["statusMessage"].as_str().unwrap_or("").to_string();
+            let name = User::new(client.clone(), r.clone())
+                .display_name()
+                .unwrap_or("")
+                .to_string();
+            let status = r["targetProfileDetail"]["statusMessage"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
             Some((mid, (name, status)))
         })
         .collect()
@@ -333,7 +433,11 @@ fn group_picks(client: &Client, chats: &[Value]) -> Vec<Pick> {
             Pick {
                 mid: chat.mid().to_string(),
                 name: chat.name().to_string(),
-                detail: if members > 0 { format!("{members} members") } else { String::new() },
+                detail: if members > 0 {
+                    format!("{members} members")
+                } else {
+                    String::new()
+                },
             }
         })
         .filter(|p| p.mid.starts_with('c'))
@@ -348,7 +452,11 @@ fn peer_picks(mids: &[String], names: &Names) -> Vec<Pick> {
         .iter()
         .map(|mid| {
             let (name, detail) = names.get(mid).cloned().unwrap_or_default();
-            Pick { mid: mid.clone(), name, detail }
+            Pick {
+                mid: mid.clone(),
+                name,
+                detail,
+            }
         })
         .collect();
     sort(&mut out);
@@ -358,7 +466,11 @@ fn peer_picks(mids: &[String], names: &Names) -> Vec<Pick> {
 /// Named rows first, by name (case-insensitive), then unnamed by mid.
 fn sort(items: &mut [Pick]) {
     items.sort_by(|a, b| {
-        (a.name.is_empty(), a.name.to_lowercase(), &a.mid).cmp(&(b.name.is_empty(), b.name.to_lowercase(), &b.mid))
+        (a.name.is_empty(), a.name.to_lowercase(), &a.mid).cmp(&(
+            b.name.is_empty(),
+            b.name.to_lowercase(),
+            &b.mid,
+        ))
     });
 }
 
@@ -395,8 +507,14 @@ mod tests {
             {"targetUserMid": "u2", "targetProfileDetail": {"profileName": "amy"}}
         ]});
         let p = peer_picks(&mids, &v3_names(&client(), &res));
-        let rows: Vec<_> = p.iter().map(|x| (x.mid.as_str(), x.name.as_str(), x.detail.as_str())).collect();
-        assert_eq!(rows, [("u2", "amy", ""), ("u1", "Zed", "hi"), ("u3", "", "")]);
+        let rows: Vec<_> = p
+            .iter()
+            .map(|x| (x.mid.as_str(), x.name.as_str(), x.detail.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            [("u2", "amy", ""), ("u1", "Zed", "hi"), ("u3", "", "")]
+        );
         assert_eq!(peer_picks(&mids, &Names::new()).len(), 3);
     }
 
@@ -423,8 +541,18 @@ mod tests {
             {"other": {"contentId": "K3"}}
         ]}});
         let p = keep_picks(&res);
-        let rows: Vec<_> = p.iter().map(|x| (x.mid.as_str(), x.name.as_str(), x.detail.as_str())).collect();
-        assert_eq!(rows, [("K2", "Trip", ""), ("K1", "hello world", "TEXT"), ("K3", "", "")]);
+        let rows: Vec<_> = p
+            .iter()
+            .map(|x| (x.mid.as_str(), x.name.as_str(), x.detail.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("K2", "Trip", ""),
+                ("K1", "hello world", "TEXT"),
+                ("K3", "", "")
+            ]
+        );
         assert!(keep_picks(&serde_json::json!({"result": []})).is_empty());
     }
 

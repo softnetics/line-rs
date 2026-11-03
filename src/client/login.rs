@@ -56,7 +56,10 @@ impl InitOptions {
         self.endpoint = Some(host.into());
         self
     }
-    pub fn backup_endpoints<I: IntoIterator<Item = S>, S: Into<String>>(mut self, hosts: I) -> Self {
+    pub fn backup_endpoints<I: IntoIterator<Item = S>, S: Into<String>>(
+        mut self,
+        hosts: I,
+    ) -> Self {
         self.backup_endpoints = Some(hosts.into_iter().map(Into::into).collect());
         self
     }
@@ -157,7 +160,13 @@ pub async fn login_with_qr(
     on_pincode: impl Fn(String) + Send + Sync + 'static,
 ) -> Result<Client> {
     let base = create_base_client(init)?;
-    login_forwarding(&base, LoginOption::qr(), Some(Box::new(on_qr_url)), Box::new(on_pincode)).await?;
+    login_forwarding(
+        &base,
+        LoginOption::qr(),
+        Some(Box::new(on_qr_url)),
+        Box::new(on_pincode),
+    )
+    .await?;
     Ok(Client::new(base))
 }
 
@@ -196,10 +205,17 @@ mod tests {
 
     #[test]
     fn passes_version_and_endpoint_to_base_client() {
-        let base = create_base_client(InitOptions::new(Device::Android).version("26.6.2").endpoint("example.invalid"))
-            .unwrap();
+        let base = create_base_client(
+            InitOptions::new(Device::Android)
+                .version("26.6.2")
+                .endpoint("example.invalid"),
+        )
+        .unwrap();
         assert_eq!(base.endpoint, "example.invalid");
-        assert_eq!(base.device_details.application(), "ANDROID\t26.6.2\tAndroid OS\t16");
+        assert_eq!(
+            base.device_details.application(),
+            "ANDROID\t26.6.2\tAndroid OS\t16"
+        );
         // A custom endpoint has no implicit backup host.
         assert!(base.backup_endpoints.is_empty());
     }
@@ -207,11 +223,15 @@ mod tests {
     #[test]
     fn default_endpoint_has_backup_and_proxy_is_applied() {
         let base = create_base_client(
-            InitOptions::new(Device::DesktopMac).proxy(ProxyConfig::socks5("127.0.0.1:1080").auth("u", "p")),
+            InitOptions::new(Device::DesktopMac)
+                .proxy(ProxyConfig::socks5("127.0.0.1:1080").auth("u", "p")),
         )
         .unwrap();
         assert_eq!(base.current_endpoint(), "legy.line-apps.com");
-        assert_eq!(base.backup_endpoints, vec!["legy-backup.line-apps.com".to_string()]);
+        assert_eq!(
+            base.backup_endpoints,
+            vec!["legy-backup.line-apps.com".to_string()]
+        );
         assert!(base.proxy.is_some());
         // A proxy cannot be combined with a caller-built HTTP client.
         let both = InitOptions::new(Device::DesktopMac)
@@ -221,8 +241,14 @@ mod tests {
     }
 
     fn jwt(payload: serde_json::Value) -> String {
-        let b = |v: &serde_json::Value| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string());
-        format!("{}.{}.sig", b(&serde_json::json!({"alg": "none", "typ": "JWT"})), b(&payload))
+        let b = |v: &serde_json::Value| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string())
+        };
+        format!(
+            "{}.{}.sig",
+            b(&serde_json::json!({"alg": "none", "typ": "JWT"})),
+            b(&payload)
+        )
     }
 
     // Offline: the profile fetch fails (connection refused), but the V3
@@ -238,6 +264,9 @@ mod tests {
             .storage_arc(storage.clone());
         let token = serde_json::json!({"accessToken": access, "refreshToken": refresh}).to_string();
         assert!(login_with_auth_token(&token, init).await.is_err());
-        assert_eq!(storage.get_string("refreshToken").await.unwrap().as_deref(), Some(refresh.as_str()));
+        assert_eq!(
+            storage.get_string("refreshToken").await.unwrap().as_deref(),
+            Some(refresh.as_str())
+        );
     }
 }

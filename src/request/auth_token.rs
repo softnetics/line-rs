@@ -20,9 +20,16 @@ pub struct AuthTokenCredential {
 pub fn parse_auth_token_input(input: &str) -> Result<AuthTokenCredential> {
     let value = input.trim();
     if value.is_empty() {
-        return Ok(AuthTokenCredential { access_token: String::new(), ..Default::default() });
+        return Ok(AuthTokenCredential {
+            access_token: String::new(),
+            ..Default::default()
+        });
     }
-    let lines: Vec<&str> = value.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let lines: Vec<&str> = value
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
     if lines.len() >= 2 && is_jwt(lines[0]) && is_jwt(lines[1]) {
         return Ok(AuthTokenCredential {
             access_token: lines[0].to_string(),
@@ -32,26 +39,46 @@ pub fn parse_auth_token_input(input: &str) -> Result<AuthTokenCredential> {
     }
     if value.starts_with('{') {
         let parsed: serde_json::Value = serde_json::from_str(value)?;
-        let s = |v: &serde_json::Value| v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+        let s = |v: &serde_json::Value| {
+            v.as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
         let nested = &parsed["tokenV3IssueResult"];
         let access_token = s(&parsed["accessToken"])
             .or_else(|| s(&parsed["authToken"]))
             .or_else(|| s(&nested["accessToken"]))
-            .ok_or_else(|| Error::internal("InvalidToken", "auth token JSON must contain accessToken"))?;
+            .ok_or_else(|| {
+                Error::internal("InvalidToken", "auth token JSON must contain accessToken")
+            })?;
         let refresh_token = s(&parsed["refreshToken"]).or_else(|| s(&nested["refreshToken"]));
         let expire = parsed["expire"].as_i64();
-        return Ok(AuthTokenCredential { access_token, refresh_token, expire });
+        return Ok(AuthTokenCredential {
+            access_token,
+            refresh_token,
+            expire,
+        });
     }
-    Ok(AuthTokenCredential { access_token: value.to_string(), ..Default::default() })
+    Ok(AuthTokenCredential {
+        access_token: value.to_string(),
+        ..Default::default()
+    })
 }
 
 /// The value sent as `x-lt` inside LEGY encrypted requests.
 pub fn resolve_line_access_token(token: &str) -> String {
     let value = token.trim();
-    let Some(colon) = value.find(':') else { return value.to_string() };
+    let Some(colon) = value.find(':') else {
+        return value.to_string();
+    };
     let payload = &value[colon + 1..];
     if is_jwt(payload) || is_primary_access_token(value) {
-        return if is_jwt(payload) { payload.to_string() } else { value.to_string() };
+        return if is_jwt(payload) {
+            payload.to_string()
+        } else {
+            value.to_string()
+        };
     }
     if looks_like_auth_key(value) {
         return create_primary_access_token(value, now_ms());
@@ -65,13 +92,17 @@ pub fn should_use_legy_encrypted_access(token: Option<&str>) -> bool {
     if is_jwt(value) {
         return true;
     }
-    let Some(colon) = value.find(':') else { return false };
+    let Some(colon) = value.find(':') else {
+        return false;
+    };
     let payload = &value[colon + 1..];
     is_jwt(payload) || is_primary_access_token(value) || looks_like_auth_key(value)
 }
 
 fn b64url_decode(s: &str) -> Option<Vec<u8>> {
-    URL_SAFE_NO_PAD.decode(s.trim_end_matches('=').replace('+', "-").replace('/', "_")).ok()
+    URL_SAFE_NO_PAD
+        .decode(s.trim_end_matches('=').replace('+', "-").replace('/', "_"))
+        .ok()
 }
 
 pub fn is_jwt(value: &str) -> bool {
@@ -79,25 +110,39 @@ pub fn is_jwt(value: &str) -> bool {
     if parts.len() != 3 {
         return false;
     }
-    let parse = |s: &str| -> Option<serde_json::Value> { serde_json::from_slice(&b64url_decode(s)?).ok() };
-    let (Some(header), Some(payload)) = (parse(parts[0]), parse(parts[1])) else { return false };
+    let parse =
+        |s: &str| -> Option<serde_json::Value> { serde_json::from_slice(&b64url_decode(s)?).ok() };
+    let (Some(header), Some(payload)) = (parse(parts[0]), parse(parts[1])) else {
+        return false;
+    };
     header["alg"].is_string()
-        && ["ver", "scp", "exp", "iat", "sub", "iss", "aud"].iter().any(|k| payload.get(*k).is_some())
+        && ["ver", "scp", "exp", "iat", "sub", "iss", "aud"]
+            .iter()
+            .any(|k| payload.get(*k).is_some())
 }
 
 pub fn is_primary_access_token(value: &str) -> bool {
-    let Some(colon) = value.find(':') else { return false };
+    let Some(colon) = value.find(':') else {
+        return false;
+    };
     let first = value[colon + 1..].split('.').next().unwrap_or("");
-    lenient_b64(first).map(|b| String::from_utf8_lossy(&b).starts_with("iat:")).unwrap_or(false)
+    lenient_b64(first)
+        .map(|b| String::from_utf8_lossy(&b).starts_with("iat:"))
+        .unwrap_or(false)
 }
 
 /// Build a primary access token (`mid:base64("iat: ...\n").:hmac`) from an
 /// auth key (`mid:base64key`).
 pub fn create_primary_access_token(auth_key: &str, now_ms: i64) -> String {
-    let Some(colon) = auth_key.find(':') else { return auth_key.to_string() };
+    let Some(colon) = auth_key.find(':') else {
+        return auth_key.to_string();
+    };
     let mid = &auth_key[..colon];
     let key = lenient_b64(&auth_key[colon + 1..]).unwrap_or_default();
-    let iat = format!("{}.", STANDARD.encode(format!("iat: {}\n", (now_ms / 1000) * 60)));
+    let iat = format!(
+        "{}.",
+        STANDARD.encode(format!("iat: {}\n", (now_ms / 1000) * 60))
+    );
     let mut mac = Hmac::<sha1::Sha1>::new_from_slice(&key).expect("hmac accepts any key length");
     mac.update(iat.as_bytes());
     let digest = STANDARD.encode(mac.finalize().into_bytes());
@@ -105,7 +150,9 @@ pub fn create_primary_access_token(auth_key: &str, now_ms: i64) -> String {
 }
 
 fn looks_like_auth_key(value: &str) -> bool {
-    let Some(colon) = value.find(':') else { return false };
+    let Some(colon) = value.find(':') else {
+        return false;
+    };
     let mid = &value[..colon];
     let payload = &value[colon + 1..];
     let mut chars = mid.chars();
@@ -117,17 +164,28 @@ fn looks_like_auth_key(value: &str) -> bool {
 
 /// Node's `Buffer.from(s, "base64")` is lenient; approximate that.
 fn lenient_b64(s: &str) -> Option<Vec<u8>> {
-    let cleaned: String = s.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '-' | '_')).collect();
+    let cleaned: String = s
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '-' | '_'))
+        .collect();
     let std = cleaned.replace('-', "+").replace('_', "/");
-    base64::engine::general_purpose::STANDARD_NO_PAD.decode(std.trim_end_matches('=')).ok().or_else(|| {
-        // drop a dangling partial quantum like Node does
-        let n = std.len() - std.len() % 4;
-        base64::engine::general_purpose::STANDARD_NO_PAD.decode(&std[..n]).ok()
-    })
+    base64::engine::general_purpose::STANDARD_NO_PAD
+        .decode(std.trim_end_matches('='))
+        .ok()
+        .or_else(|| {
+            // drop a dangling partial quantum like Node does
+            let n = std.len() - std.len() % 4;
+            base64::engine::general_purpose::STANDARD_NO_PAD
+                .decode(&std[..n])
+                .ok()
+        })
 }
 
 pub(crate) fn now_ms() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -145,9 +203,18 @@ mod tests {
         let j = jwt();
         let c = parse_auth_token_input(&format!("{j}\n{j}")).unwrap();
         assert_eq!(c.refresh_token.as_deref(), Some(j.as_str()));
-        let c = parse_auth_token_input(r#"{"tokenV3IssueResult":{"accessToken":"a","refreshToken":"r"},"expire":5}"#)
-            .unwrap();
-        assert_eq!(c, AuthTokenCredential { access_token: "a".into(), refresh_token: Some("r".into()), expire: Some(5) });
+        let c = parse_auth_token_input(
+            r#"{"tokenV3IssueResult":{"accessToken":"a","refreshToken":"r"},"expire":5}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            c,
+            AuthTokenCredential {
+                access_token: "a".into(),
+                refresh_token: Some("r".into()),
+                expire: Some(5)
+            }
+        );
         assert_eq!(parse_auth_token_input(" tok ").unwrap().access_token, "tok");
     }
 

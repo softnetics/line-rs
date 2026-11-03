@@ -35,7 +35,13 @@ pub struct Emoji {
 
 impl Emoji {
     pub fn new(product_id: impl Into<String>, sticon_id: impl Into<String>) -> Self {
-        Self { product_id: product_id.into(), sticon_id: sticon_id.into(), version: None, resource_type: None, url: None }
+        Self {
+            product_id: product_id.into(),
+            sticon_id: sticon_id.into(),
+            version: None,
+            resource_type: None,
+            url: None,
+        }
     }
 
     /// `https://stickershop.line-scdn.net/sticonshop/v1/sticon/<product>/android/<sticon>.png`
@@ -45,7 +51,9 @@ impl Emoji {
 }
 
 pub(crate) fn sticon_url(product_id: &str, sticon_id: &str) -> String {
-    format!("https://stickershop.line-scdn.net/sticonshop/v1/sticon/{product_id}/android/{sticon_id}.png")
+    format!(
+        "https://stickershop.line-scdn.net/sticonshop/v1/sticon/{product_id}/android/{sticon_id}.png"
+    )
 }
 
 /// One run of text, optionally decorated with an emoji or a mention.
@@ -59,19 +67,34 @@ pub struct Decoration {
 impl Decoration {
     /// Plain text.
     pub fn text(text: impl Into<String>) -> Self {
-        Self { text: text.into(), ..Default::default() }
+        Self {
+            text: text.into(),
+            ..Default::default()
+        }
     }
     /// A mention of `mid`, displayed as `text` (e.g. `@Alice`).
     pub fn mention(mid: impl Into<String>, text: impl Into<String>) -> Self {
-        Self { text: text.into(), mention: Some(MentionTarget::User(mid.into())), ..Default::default() }
+        Self {
+            text: text.into(),
+            mention: Some(MentionTarget::User(mid.into())),
+            ..Default::default()
+        }
     }
     /// An `@All` mention displayed as `text`.
     pub fn mention_all(text: impl Into<String>) -> Self {
-        Self { text: text.into(), mention: Some(MentionTarget::All), ..Default::default() }
+        Self {
+            text: text.into(),
+            mention: Some(MentionTarget::All),
+            ..Default::default()
+        }
     }
     /// An emoji; `text` is the fallback text (default `(linejs)` when empty).
     pub fn emoji(emoji: Emoji, text: impl Into<String>) -> Self {
-        Self { text: text.into(), emoji: Some(emoji), ..Default::default() }
+        Self {
+            text: text.into(),
+            emoji: Some(emoji),
+            ..Default::default()
+        }
     }
 }
 
@@ -233,7 +256,9 @@ impl ReactionType {
 
     /// From the IDL variant name (`NICE`, ...).
     pub fn from_name(name: &str) -> Option<Self> {
-        (0..=7).filter_map(Self::from_i64).find(|r| r.as_str() == name)
+        (0..=7)
+            .filter_map(Self::from_i64)
+            .find(|r| r.as_str() == name)
     }
 }
 
@@ -253,7 +278,10 @@ pub(crate) fn enum_name(v: &Value, enum_name: &str) -> Option<String> {
 /// Numeric value of an enum given by name or number.
 pub(crate) fn enum_value(v: &Value, enum_name: &str) -> Option<i32> {
     match v {
-        Value::String(s) => Schema::line().get_enum(enum_name).and_then(|e| e.value_of(s)).or_else(|| s.parse().ok()),
+        Value::String(s) => Schema::line()
+            .get_enum(enum_name)
+            .and_then(|e| e.value_of(s))
+            .or_else(|| s.parse().ok()),
         other => other.as_i64().map(|i| i as i32),
     }
 }

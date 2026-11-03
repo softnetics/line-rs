@@ -145,7 +145,10 @@ impl Value {
     pub fn entries(&self) -> Vec<(String, &Value)> {
         match self {
             Value::Struct(m) => m.iter().map(|(k, v)| (k.clone(), v)).collect(),
-            Value::Map(m) => m.iter().filter_map(|(k, v)| k.key_string().map(|k| (k, v))).collect(),
+            Value::Map(m) => m
+                .iter()
+                .filter_map(|(k, v)| k.key_string().map(|k| (k, v)))
+                .collect(),
             _ => Vec::new(),
         }
     }
@@ -176,7 +179,9 @@ impl Value {
             Value::Null => serde_json::Value::Null,
             Value::Bool(b) => (*b).into(),
             Value::Int(i) => (*i).into(),
-            Value::Double(d) => serde_json::Number::from_f64(*d).map(Into::into).unwrap_or(serde_json::Value::Null),
+            Value::Double(d) => serde_json::Number::from_f64(*d)
+                .map(Into::into)
+                .unwrap_or(serde_json::Value::Null),
             Value::String(s) => s.clone().into(),
             Value::Binary(b) => base64::engine::general_purpose::STANDARD.encode(b).into(),
             Value::List(l) => l.iter().map(Value::to_json).collect(),
@@ -185,9 +190,11 @@ impl Value {
                 .map(|(k, v)| (k.key_string().unwrap_or_default(), v.to_json()))
                 .collect::<serde_json::Map<_, _>>()
                 .into(),
-            Value::Struct(m) => {
-                m.iter().map(|(k, v)| (k.clone(), v.to_json())).collect::<serde_json::Map<_, _>>().into()
-            }
+            Value::Struct(m) => m
+                .iter()
+                .map(|(k, v)| (k.clone(), v.to_json()))
+                .collect::<serde_json::Map<_, _>>()
+                .into(),
         }
     }
 
@@ -303,7 +310,9 @@ impl From<serde_json::Value> for Value {
             }
             serde_json::Value::String(s) => Value::String(s),
             serde_json::Value::Array(a) => Value::List(a.into_iter().map(Into::into).collect()),
-            serde_json::Value::Object(o) => Value::Struct(o.into_iter().map(|(k, v)| (k, v.into())).collect()),
+            serde_json::Value::Object(o) => {
+                Value::Struct(o.into_iter().map(|(k, v)| (k, v.into())).collect())
+            }
         }
     }
 }
@@ -392,17 +401,26 @@ impl<'de> Deserialize<'de> for Value {
             fn visit_unit<E>(self) -> std::result::Result<Value, E> {
                 Ok(Value::Null)
             }
-            fn visit_some<D: Deserializer<'de>>(self, d: D) -> std::result::Result<Value, D::Error> {
+            fn visit_some<D: Deserializer<'de>>(
+                self,
+                d: D,
+            ) -> std::result::Result<Value, D::Error> {
                 Value::deserialize(d)
             }
-            fn visit_seq<A: SeqAccess<'de>>(self, mut a: A) -> std::result::Result<Value, A::Error> {
+            fn visit_seq<A: SeqAccess<'de>>(
+                self,
+                mut a: A,
+            ) -> std::result::Result<Value, A::Error> {
                 let mut out = Vec::new();
                 while let Some(v) = a.next_element()? {
                     out.push(v);
                 }
                 Ok(Value::List(out))
             }
-            fn visit_map<A: MapAccess<'de>>(self, mut a: A) -> std::result::Result<Value, A::Error> {
+            fn visit_map<A: MapAccess<'de>>(
+                self,
+                mut a: A,
+            ) -> std::result::Result<Value, A::Error> {
                 let mut out = Map::new();
                 while let Some((k, v)) = a.next_entry::<String, Value>()? {
                     out.insert(k, v);
@@ -451,12 +469,13 @@ impl<'de> Deserializer<'de> for Value {
                 Err(e) => v.visit_byte_buf(e.into_bytes()),
             },
             Value::List(l) => v.visit_seq(de::value::SeqDeserializer::new(l.into_iter())),
-            Value::Map(m) => v.visit_map(de::value::MapDeserializer::new(
-                m.into_iter().map(|(k, val)| (Value::String(k.key_string().unwrap_or_default()), val)),
+            Value::Map(m) => v
+                .visit_map(de::value::MapDeserializer::new(m.into_iter().map(
+                    |(k, val)| (Value::String(k.key_string().unwrap_or_default()), val),
+                ))),
+            Value::Struct(m) => v.visit_map(de::value::MapDeserializer::new(
+                m.into_iter().map(|(k, val)| (Value::String(k), val)),
             )),
-            Value::Struct(m) => {
-                v.visit_map(de::value::MapDeserializer::new(m.into_iter().map(|(k, val)| (Value::String(k), val))))
-            }
         }
     }
 

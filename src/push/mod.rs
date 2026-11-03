@@ -18,8 +18,8 @@ pub mod tmc;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use futures::future::BoxFuture;
 use futures::FutureExt;
+use futures::future::BoxFuture;
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 
@@ -92,9 +92,11 @@ impl Channel {
 fn clone_error(e: &Error) -> Error {
     match e {
         Error::Internal { kind, message } => Error::internal(kind.clone(), message.clone()),
-        Error::Request { method, path, data } => {
-            Error::Request { method: method.clone(), path: path.clone(), data: data.clone() }
-        }
+        Error::Request { method, path, data } => Error::Request {
+            method: method.clone(),
+            path: path.clone(),
+            data: data.clone(),
+        },
         other => Error::internal("LegyPusherError", other.to_string()),
     }
 }
@@ -230,7 +232,11 @@ impl PushHost for BaseClient {
         headers.retain(|(k, _)| k != "content-type" && k != "accept");
         headers.push(("content-type".into(), "application/octet-stream".into()));
         headers.push(("accept".into(), "application/octet-stream".into()));
-        Ok(Conn::open(&self.push_http, &format!("https://{}{}", self.endpoint, path), headers))
+        Ok(Conn::open(
+            &self.push_http,
+            &format!("https://{}{}", self.endpoint, path),
+            headers,
+        ))
     }
 
     fn fetch_my_events(&self, args: Value) -> BoxFuture<'static, Result<Value>> {
@@ -241,7 +247,12 @@ impl PushHost for BaseClient {
     fn noop(&self) -> BoxFuture<'static, Result<()>> {
         let c = self.clone();
         async move {
-            c.request(Vec::new(), "noop", RequestOptions::new("/S4", Protocol::Compact)).await?;
+            c.request(
+                Vec::new(),
+                "noop",
+                RequestOptions::new("/S4", Protocol::Compact),
+            )
+            .await?;
             Ok(())
         }
         .boxed()
@@ -258,9 +269,15 @@ mod tests {
         let hub = Hub::default();
         hub.deliver(Kind::Talk, tv!({"revision": 1}));
         let mut rx = hub.subscribe_raw(Kind::Talk);
-        assert_eq!(rx.try_recv().unwrap().unwrap()["revision"].as_i64(), Some(1));
+        assert_eq!(
+            rx.try_recv().unwrap().unwrap()["revision"].as_i64(),
+            Some(1)
+        );
         hub.deliver(Kind::Talk, tv!({"revision": 2}));
-        assert_eq!(rx.try_recv().unwrap().unwrap()["revision"].as_i64(), Some(2));
+        assert_eq!(
+            rx.try_recv().unwrap().unwrap()["revision"].as_i64(),
+            Some(2)
+        );
     }
 
     #[test]
@@ -279,7 +296,9 @@ mod tests {
     #[test]
     fn finish_ends_streams_with_error_and_frees_slot() {
         let hub = Hub::default();
-        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
         let _g = rt.enter();
         let spawn = |_| tokio::spawn(async {}).abort_handle();
         let mut a = hub.subscribe(Kind::Talk, spawn);
@@ -292,6 +311,9 @@ mod tests {
         assert!(!hub.is_running());
         assert!(matches!(a.try_recv(), Ok(Err(Error::Internal { kind, .. })) if kind == "X"));
         assert!(matches!(b.try_recv(), Ok(Err(_))));
-        assert!(matches!(a.try_recv(), Err(mpsc::error::TryRecvError::Disconnected)));
+        assert!(matches!(
+            a.try_recv(),
+            Err(mpsc::error::TryRecvError::Disconnected)
+        ));
     }
 }

@@ -21,31 +21,39 @@ use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Request, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::stream::{self, Stream, StreamExt};
+use line_rs::Device;
 use line_rs::client::{
-    login_with_auth_token, login_with_qr, Client, ClientEvent, InitOptions, ListenHandle, ListenOptions,
+    Client, ClientEvent, InitOptions, ListenHandle, ListenOptions, login_with_auth_token,
+    login_with_qr,
 };
 use line_rs::storage::{FileStorage, Storage};
-use line_rs::Device;
 use serde::Deserialize;
-use serde_json::{json, Value as JValue};
-use tokio::sync::{broadcast, Notify};
+use serde_json::{Value as JValue, json};
+use tokio::sync::{Notify, broadcast};
 use tokio::task::AbortHandle;
 
-use cases::{Ctx, Inputs, Outcome, Throttle, CATALOGUE, MIN_GAP_SECS};
+use cases::{CATALOGUE, Ctx, Inputs, MIN_GAP_SECS, Outcome, Throttle};
 
 const STORAGE_PATH: &str = "./storage.test.json";
 /// Storage keys for the token saved after login (server side only).
 const KEY_TOKEN: &str = "testUi:authToken";
 const KEY_DEVICE: &str = "testUi:device";
 const INDEX_HTML: &str = include_str!("index.html");
-const DEVICES: &[&str] = &["DESKTOPWIN", "DESKTOPMAC", "IOSIPAD", "ANDROIDSECONDARY", "WATCHOS", "WEAROS"];
+const DEVICES: &[&str] = &[
+    "DESKTOPWIN",
+    "DESKTOPMAC",
+    "IOSIPAD",
+    "ANDROIDSECONDARY",
+    "WATCHOS",
+    "WEAROS",
+];
 
 // ---------------------------------------------------------------------------
 // State
@@ -107,7 +115,10 @@ struct Inner {
 
 impl Inner {
     fn test(&mut self, id: &'static str) -> &mut TestState {
-        self.tests.entry(id).or_insert_with(|| TestState { status: "idle", ..Default::default() })
+        self.tests.entry(id).or_insert_with(|| TestState {
+            status: "idle",
+            ..Default::default()
+        })
     }
 
     fn picks(&mut self, kind: picker::Kind) -> &mut picker::PickList {
@@ -149,7 +160,10 @@ struct App {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 impl App {
@@ -161,7 +175,10 @@ impl App {
         let cases: Vec<JValue> = CATALOGUE
             .iter()
             .map(|c| {
-                let st = g.tests.get(c.id).cloned().unwrap_or(TestState { status: "idle", ..Default::default() });
+                let st = g.tests.get(c.id).cloned().unwrap_or(TestState {
+                    status: "idle",
+                    ..Default::default()
+                });
                 json!({"info": c, "state": st})
             })
             .collect();
@@ -201,9 +218,15 @@ impl App {
 
     fn ensure_listen(&self) {
         let mut g = self.lock();
-        let Some(client) = g.client.clone() else { return };
+        let Some(client) = g.client.clone() else {
+            return;
+        };
         if g.listen.as_ref().is_none_or(ListenHandle::is_finished) {
-            g.listen = Some(client.listen(ListenOptions { talk: true, square: false, polling: false }));
+            g.listen = Some(client.listen(ListenOptions {
+                talk: true,
+                square: false,
+                polling: false,
+            }));
         }
     }
 }
@@ -217,7 +240,10 @@ fn event_json(ev: &ClientEvent) -> JValue {
         ClientEvent::Message(m) => ("Message".to_string(), m.raw.to_json()),
         ClientEvent::MessageEdit(m) => ("MessageEdit".to_string(), m.raw.to_json()),
         ClientEvent::Event(v) => {
-            let t = v["type"].as_str().map(str::to_string).unwrap_or_else(|| v["type"].to_string());
+            let t = v["type"]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| v["type"].to_string());
             (format!("Event {t}"), v.to_json())
         }
         ClientEvent::Talk(t) => ("Talk".to_string(), JValue::String(format!("{t:?}"))),
@@ -251,8 +277,14 @@ fn spawn_forwarders(app: &Arc<App>, client: &Client) -> Vec<AbortHandle> {
             match rx.recv().await {
                 Ok(line_rs::ClientEvent::UpdateAuthToken(t)) => {
                     let saved = c.base.storage.set(KEY_TOKEN, t.into()).await;
-                    let note = if saved.is_ok() { "rotated token saved to storage" } else { "rotated token NOT saved" };
-                    a.line_event(json!({"type": "UpdateAuthToken", "time_ms": now_ms(), "data": note}));
+                    let note = if saved.is_ok() {
+                        "rotated token saved to storage"
+                    } else {
+                        "rotated token NOT saved"
+                    };
+                    a.line_event(
+                        json!({"type": "UpdateAuthToken", "time_ms": now_ms(), "data": note}),
+                    );
                 }
                 Ok(line_rs::ClientEvent::KickedOut(r)) => {
                     {
@@ -260,7 +292,9 @@ fn spawn_forwarders(app: &Arc<App>, client: &Client) -> Vec<AbortHandle> {
                         g.login.status = "kicked_out";
                         g.login.message = format!("{r:?}");
                     }
-                    a.line_event(json!({"type": "KickedOut", "time_ms": now_ms(), "data": format!("{r:?}")}));
+                    a.line_event(
+                        json!({"type": "KickedOut", "time_ms": now_ms(), "data": format!("{r:?}")}),
+                    );
                     a.changed();
                 }
                 Ok(line_rs::ClientEvent::End(v)) => {
@@ -291,7 +325,11 @@ struct LoginReq {
 async fn read_saved() -> Option<(String, String)> {
     let s = FileStorage::new(STORAGE_PATH).ok()?;
     let token = s.get_string(KEY_TOKEN).await.ok()??;
-    let device = s.get_string(KEY_DEVICE).await.ok()?.unwrap_or_else(|| "DESKTOPWIN".into());
+    let device = s
+        .get_string(KEY_DEVICE)
+        .await
+        .ok()?
+        .unwrap_or_else(|| "DESKTOPWIN".into());
     Some((token, device))
 }
 
@@ -394,9 +432,17 @@ async fn do_login(app: Arc<App>, req: LoginReq) {
             let mid = client.mid();
             if let Some(t) = client.auth_token() {
                 let _ = client.base.storage.set(KEY_TOKEN, t.into()).await;
-                let _ = client.base.storage.set(KEY_DEVICE, device.as_str().into()).await;
+                let _ = client
+                    .base
+                    .storage
+                    .set(KEY_DEVICE, device.as_str().into())
+                    .await;
             }
-            println!("logged in as {} ({})", mid.clone().unwrap_or_default(), device.as_str());
+            println!(
+                "logged in as {} ({})",
+                mid.clone().unwrap_or_default(),
+                device.as_str()
+            );
             let fwd = spawn_forwarders(&app, &client);
             {
                 let mut g = app.lock();
@@ -416,7 +462,11 @@ async fn do_login(app: Arc<App>, req: LoginReq) {
         }
         Err(e) => {
             let mut g = app.lock();
-            g.login = LoginState { status: "failed", message: format!("login failed (not retried): {e}"), ..Default::default() };
+            g.login = LoginState {
+                status: "failed",
+                message: format!("login failed (not retried): {e}"),
+                ..Default::default()
+            };
             g.login_task = None;
         }
     }
@@ -431,7 +481,11 @@ async fn worker(app: Arc<App>) {
     loop {
         let next = {
             let mut g = app.lock();
-            if g.running.is_none() { g.queue.pop_front() } else { None }
+            if g.running.is_none() {
+                g.queue.pop_front()
+            } else {
+                None
+            }
         };
         let Some(id) = next else {
             app.wake.notified().await;
@@ -473,11 +527,21 @@ async fn run_one(app: &Arc<App>, id: &'static str) {
     let prompt: cases::PromptFn = Arc::new(move |p: Option<(String, u64)>| {
         {
             let mut g = a.lock();
-            g.prompt = p.map(|(text, secs)| Prompt { test: id, text, deadline_ms: now_ms() + secs * 1000 });
+            g.prompt = p.map(|(text, secs)| Prompt {
+                test: id,
+                text,
+                deadline_ms: now_ms() + secs * 1000,
+            });
         }
         a.changed();
     });
-    let ctx = Ctx { client, throttle: app.throttle.clone(), inputs, prompt, log: log.clone() };
+    let ctx = Ctx {
+        client,
+        throttle: app.throttle.clone(),
+        inputs,
+        prompt,
+        log: log.clone(),
+    };
     let started = Instant::now();
     let task = tokio::spawn(async move { cases::run_case(id, &ctx).await });
     {
@@ -545,15 +609,24 @@ async fn gate(State(app): State<Arc<App>>, req: Request, next: Next) -> Response
         req.uri().query(),
     );
     if !ok {
-        return (StatusCode::FORBIDDEN, "403: missing/invalid secret or Host. Use the URL printed in the terminal.\n")
+        return (
+            StatusCode::FORBIDDEN,
+            "403: missing/invalid secret or Host. Use the URL printed in the terminal.\n",
+        )
             .into_response();
     }
     let mut res = next.run(req).await;
     let h = res.headers_mut();
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    h.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
     h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
-    h.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+    h.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
     h.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
@@ -573,7 +646,9 @@ async fn get_state(State(app): State<Arc<App>>) -> Json<JValue> {
 
 async fn sse(State(app): State<Arc<App>>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let rx = app.tx.subscribe();
-    let first = Event::default().event("state").data(app.snapshot().to_string());
+    let first = Event::default()
+        .event("state")
+        .data(app.snapshot().to_string());
     let rest = stream::unfold(rx, |mut rx| async move {
         loop {
             match rx.recv().await {
@@ -621,7 +696,10 @@ async fn post_login(State(app): State<Arc<App>>, Json(req): Json<LoginReq>) -> R
             return err(StatusCode::BAD_REQUEST, "ติ๊กช่องยอมรับความเสี่ยงก่อน");
         }
         if g.login.status == "logging_in" || g.client.is_some() {
-            return err(StatusCode::CONFLICT, "already logged in or logging in; use Stop all first");
+            return err(
+                StatusCode::CONFLICT,
+                "already logged in or logging in; use Stop all first",
+            );
         }
     }
     let task = tokio::spawn(do_login(app.clone(), req));
@@ -642,7 +720,9 @@ async fn post_pick(
     axum::extract::Path(kind): axum::extract::Path<String>,
     body: Option<Json<PickReq>>,
 ) -> Response {
-    let Some(kind) = picker::Kind::parse(&kind) else { return err(StatusCode::NOT_FOUND, "unknown picker") };
+    let Some(kind) = picker::Kind::parse(&kind) else {
+        return err(StatusCode::NOT_FOUND, "unknown picker");
+    };
     let refresh = body.map(|b| b.refresh).unwrap_or_default();
     let (client, session) = {
         let mut g = app.lock();
@@ -657,7 +737,11 @@ async fn post_pick(
         if list.status == "loading" || (list.status == "ready" && !refresh) {
             return Json(json!({"ok": true})).into_response();
         }
-        *list = picker::PickList { status: "loading", items: std::mem::take(&mut list.items), ..Default::default() };
+        *list = picker::PickList {
+            status: "loading",
+            items: std::mem::take(&mut list.items),
+            ..Default::default()
+        };
         (client, session)
     };
     app.changed();
@@ -681,7 +765,11 @@ async fn post_pick(
                     fetched_ms: Some(now_ms()),
                     ..Default::default()
                 },
-                Err(e) => picker::PickList { status: "error", error: Some(e), ..Default::default() },
+                Err(e) => picker::PickList {
+                    status: "error",
+                    error: Some(e),
+                    ..Default::default()
+                },
             };
         }
         a.changed();
@@ -705,8 +793,11 @@ async fn post_run(State(app): State<Arc<App>>, Json(req): Json<RunReq>) -> Respo
             return err(StatusCode::BAD_REQUEST, "login first");
         }
         for id in &req.ids {
-            let Some(info) = cases::find(id) else { continue };
-            let busy = g.queue.contains(&info.id) || g.running.as_ref().is_some_and(|r| r.0 == info.id);
+            let Some(info) = cases::find(id) else {
+                continue;
+            };
+            let busy =
+                g.queue.contains(&info.id) || g.running.as_ref().is_some_and(|r| r.0 == info.id);
             if !busy {
                 g.queue.push_back(info.id);
                 let t = g.test(info.id);
@@ -742,7 +833,11 @@ async fn post_stop(State(app): State<Arc<App>>) -> Json<JValue> {
         }
         g.prompt = None;
         g.drop_client();
-        g.login = LoginState { status: "logged_out", message: "stopped; client dropped".into(), ..Default::default() };
+        g.login = LoginState {
+            status: "logged_out",
+            message: "stopped; client dropped".into(),
+            ..Default::default()
+        };
     }
     println!("stop-all: queue cleared, client dropped");
     app.changed();
@@ -758,7 +853,9 @@ struct VerdictReq {
 }
 
 async fn post_verdict(State(app): State<Arc<App>>, Json(req): Json<VerdictReq>) -> Response {
-    let Some(info) = cases::find(&req.id) else { return err(StatusCode::NOT_FOUND, "unknown test") };
+    let Some(info) = cases::find(&req.id) else {
+        return err(StatusCode::NOT_FOUND, "unknown test");
+    };
     {
         let mut g = app.lock();
         let t = g.test(info.id);
@@ -771,7 +868,10 @@ async fn post_verdict(State(app): State<Arc<App>>, Json(req): Json<VerdictReq>) 
 
 async fn export_md(State(app): State<Arc<App>>) -> impl IntoResponse {
     let g = app.lock();
-    let empty = TestState { status: "idle", ..Default::default() };
+    let empty = TestState {
+        status: "idle",
+        ..Default::default()
+    };
     let rows: Vec<report::ReportRow<'_>> = CATALOGUE
         .iter()
         .map(|c| {
@@ -786,17 +886,36 @@ async fn export_md(State(app): State<Arc<App>>) -> impl IntoResponse {
             }
         })
         .collect();
-    let device = g.login.device.clone().or_else(|| g.saved_device.clone()).unwrap_or_default();
-    let md = report::render(&report::utc_datetime(report::now_secs()), &app.commit, &device, &rows);
+    let device = g
+        .login
+        .device
+        .clone()
+        .or_else(|| g.saved_device.clone())
+        .unwrap_or_default();
+    let md = report::render(
+        &report::utc_datetime(report::now_secs()),
+        &app.commit,
+        &device,
+        &rows,
+    );
     let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/markdown; charset=utf-8"));
-    headers.insert(header::CONTENT_DISPOSITION, HeaderValue::from_static("attachment; filename=\"results.md\""));
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/markdown; charset=utf-8"),
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment; filename=\"results.md\""),
+    );
     (headers, md)
 }
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let port: u16 = std::env::var("TEST_UI_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(7878);
+    let port: u16 = std::env::var("TEST_UI_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(7878);
     let (tx, _) = broadcast::channel(512);
     let saved_device = read_saved().await.map(|(_, d)| d);
     let app = Arc::new(App {
@@ -804,7 +923,10 @@ async fn main() -> std::io::Result<()> {
         port,
         commit: report::git_commit(),
         inner: StdMutex::new(Inner {
-            login: LoginState { status: "logged_out", ..Default::default() },
+            login: LoginState {
+                status: "logged_out",
+                ..Default::default()
+            },
             saved_device,
             ..Default::default()
         }),

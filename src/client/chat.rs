@@ -1,7 +1,7 @@
 //! [`Chat`]: a talk group chat (linejs `features/chat`).
 
 use super::message::{MessageInput, TalkMessage};
-use super::{list, Client};
+use super::{Client, list};
 use crate::error::{Error, Result};
 use crate::obs::{E2eeMediaUpload, ObjType, ObsFile};
 use crate::thrift::Value;
@@ -23,7 +23,12 @@ pub(crate) fn uses_e2ee_media(mid: &str, e2ee: bool) -> bool {
 }
 
 /// `setChatHiddenStatus` arguments.
-pub(crate) fn hidden_status_args(req_seq: i64, chat_mid: &str, last_message_id: i64, hidden: bool) -> Value {
+pub(crate) fn hidden_status_args(
+    req_seq: i64,
+    chat_mid: &str,
+    last_message_id: i64,
+    hidden: bool,
+) -> Value {
     tv!({"setChatHiddenStatusRequest": {
         "reqSeq": req_seq, "chatMid": chat_mid, "lastMessageId": last_message_id, "hidden": hidden,
     }})
@@ -69,7 +74,10 @@ impl Chat {
     }
 
     /// Send a compact talk message through `/CA5` or `/ECA5`.
-    pub async fn send_compact_message(&self, text: &str) -> Result<crate::service::talk::compact::CompactMessageResponse> {
+    pub async fn send_compact_message(
+        &self,
+        text: &str,
+    ) -> Result<crate::service::talk::compact::CompactMessageResponse> {
         self.client.send_compact_message(self.mid(), text).await
     }
 
@@ -97,8 +105,13 @@ impl Chat {
                 .await?;
             return Ok(SentMedia::E2ee(sent));
         }
-        let up = obs.upload_obj_talk(self.mid(), o_type, file, None, duration_ms).await?;
-        Ok(SentMedia::Plain { obj_id: up.obj_id, obj_hash: up.obj_hash })
+        let up = obs
+            .upload_obj_talk(self.mid(), o_type, file, None, duration_ms)
+            .await?;
+        Ok(SentMedia::Plain {
+            obj_id: up.obj_id,
+            obj_hash: up.obj_hash,
+        })
     }
 
     fn named(data: Vec<u8>, filename: Option<&str>) -> ObsFile {
@@ -111,25 +124,45 @@ impl Chat {
 
     /// Send an image (E2EE; see [`send_media`](Self::send_media)).
     pub async fn send_image(&self, data: Vec<u8>, filename: Option<&str>) -> Result<SentMedia> {
-        self.send_media(ObjType::Image, Self::named(data, filename), None, true).await
+        self.send_media(ObjType::Image, Self::named(data, filename), None, true)
+            .await
     }
 
-    pub async fn send_video(&self, data: Vec<u8>, filename: Option<&str>, duration_ms: Option<u64>) -> Result<SentMedia> {
-        self.send_media(ObjType::Video, Self::named(data, filename), duration_ms, true).await
+    pub async fn send_video(
+        &self,
+        data: Vec<u8>,
+        filename: Option<&str>,
+        duration_ms: Option<u64>,
+    ) -> Result<SentMedia> {
+        self.send_media(
+            ObjType::Video,
+            Self::named(data, filename),
+            duration_ms,
+            true,
+        )
+        .await
     }
 
-    pub async fn send_audio(&self, data: Vec<u8>, filename: Option<&str>, duration_ms: Option<u64>) -> Result<SentMedia> {
+    pub async fn send_audio(
+        &self,
+        data: Vec<u8>,
+        filename: Option<&str>,
+        duration_ms: Option<u64>,
+    ) -> Result<SentMedia> {
         let file = Self::named(data, Some(filename.unwrap_or("voice.m4a")));
-        self.send_media(ObjType::Audio, file, duration_ms, true).await
+        self.send_media(ObjType::Audio, file, duration_ms, true)
+            .await
     }
 
     pub async fn send_file(&self, data: Vec<u8>, filename: &str) -> Result<SentMedia> {
-        self.send_media(ObjType::File, Self::named(data, Some(filename)), None, true).await
+        self.send_media(ObjType::File, Self::named(data, Some(filename)), None, true)
+            .await
     }
 
     /// Share a contact card (`CONTACT` message).
     pub async fn send_contact(&self, mid: &str, display_name: &str) -> Result<TalkMessage> {
-        self.send_message(MessageInput::contact(mid, display_name)).await
+        self.send_message(MessageInput::contact(mid, display_name))
+            .await
     }
 
     /// `updateChat` with a partial `Chat` and the `Pb1_O2` attribute name
@@ -139,8 +172,7 @@ impl Chat {
         if chat.get("chatMid").is_none() {
             chat.insert("chatMid", self.mid());
         }
-        let mut request =
-            tv!({"updatedAttribute": updated_attribute, "reqSeq": self.client.base.get_reqseq("talk").await?});
+        let mut request = tv!({"updatedAttribute": updated_attribute, "reqSeq": self.client.base.get_reqseq("talk").await?});
         request.insert("chat", chat);
         let mut args = Value::object();
         args.insert("request", request);
@@ -153,7 +185,8 @@ impl Chat {
 
     /// Turn notifications off (`true`) or on (`false`).
     pub async fn set_muted(&self, muted: bool) -> Result<Value> {
-        self.update_chat(tv!({"notificationDisabled": muted}), "NOTIFICATION_SETTING").await
+        self.update_chat(tv!({"notificationDisabled": muted}), "NOTIFICATION_SETTING")
+            .await
     }
 
     pub async fn mute(&self) -> Result<Value> {
@@ -167,7 +200,8 @@ impl Chat {
     /// Add to (`true`) or remove from (`false`) favorites.
     pub async fn set_favorite(&self, favorite: bool) -> Result<Value> {
         let ts = if favorite { now_ms() } else { 0 };
-        self.update_chat(tv!({"favoriteTimestamp": ts}), "FAVORITE_TIMESTAMP").await
+        self.update_chat(tv!({"favoriteTimestamp": ts}), "FAVORITE_TIMESTAMP")
+            .await
     }
 
     pub async fn favorite(&self) -> Result<Value> {
@@ -182,24 +216,50 @@ impl Chat {
     /// `last_message_id` is the newest message id the hide applies to.
     pub async fn set_hidden(&self, hidden: bool, last_message_id: i64) -> Result<Value> {
         let seq = self.client.base.get_reqseq("talk").await?;
-        self.client.base.talk().call("setChatHiddenStatus", hidden_status_args(seq, self.mid(), last_message_id, hidden)).await
+        self.client
+            .base
+            .talk()
+            .call(
+                "setChatHiddenStatus",
+                hidden_status_args(seq, self.mid(), last_message_id, hidden),
+            )
+            .await
     }
 
     /// Mark the chat as read up to `last_message_id` (`sendChatChecked`).
     pub async fn mark_as_read(&self, last_message_id: &str) -> Result<Value> {
         let seq = self.client.base.get_reqseq("talk").await?;
-        self.client.base.talk().call("sendChatChecked", chat_marker_args(seq, self.mid(), last_message_id)).await
+        self.client
+            .base
+            .talk()
+            .call(
+                "sendChatChecked",
+                chat_marker_args(seq, self.mid(), last_message_id),
+            )
+            .await
     }
 
     /// Delete the local history up to `last_message_id` (`sendChatRemoved`).
     pub async fn delete_history(&self, last_message_id: &str) -> Result<Value> {
         let seq = self.client.base.get_reqseq("talk").await?;
-        self.client.base.talk().call("sendChatRemoved", chat_marker_args(seq, self.mid(), last_message_id)).await
+        self.client
+            .base
+            .talk()
+            .call(
+                "sendChatRemoved",
+                chat_marker_args(seq, self.mid(), last_message_id),
+            )
+            .await
     }
 
     /// Pinned announcements (`list<ChatRoomAnnouncement>`).
     pub async fn announcements(&self) -> Result<Vec<Value>> {
-        let res = self.client.base.talk().call("getChatRoomAnnouncements", tv!({"chatRoomMid": self.mid()})).await?;
+        let res = self
+            .client
+            .base
+            .talk()
+            .call("getChatRoomAnnouncements", tv!({"chatRoomMid": self.mid()}))
+            .await?;
         Ok(list(&res))
     }
 
@@ -223,16 +283,24 @@ impl Chat {
             .client
             .base
             .talk()
-            .call("getMessageReadRange", tv!({"chatIds": [self.mid()], "syncReason": "INTERNAL"}))
+            .call(
+                "getMessageReadRange",
+                tv!({"chatIds": [self.mid()], "syncReason": "INTERNAL"}),
+            )
             .await?;
-        Ok(list(&res).into_iter().find(|r| r["chatId"].as_str() == Some(self.mid())))
+        Ok(list(&res)
+            .into_iter()
+            .find(|r| r["chatId"].as_str() == Some(self.mid())))
     }
 
     pub async fn invite(&self, mids: &[&str]) -> Result<Value> {
         self.client
             .base
             .talk()
-            .call("inviteIntoChat", tv!({"request": {"targetUserMids": mids, "chatMid": self.mid()}}))
+            .call(
+                "inviteIntoChat",
+                tv!({"request": {"targetUserMids": mids, "chatMid": self.mid()}}),
+            )
             .await
     }
 
@@ -240,12 +308,22 @@ impl Chat {
         self.client
             .base
             .talk()
-            .call("deleteOtherFromChat", tv!({"request": {"targetUserMids": [mid], "chatMid": self.mid()}}))
+            .call(
+                "deleteOtherFromChat",
+                tv!({"request": {"targetUserMids": [mid], "chatMid": self.mid()}}),
+            )
             .await
     }
 
     pub async fn leave(&self) -> Result<Value> {
-        self.client.base.talk().call("deleteSelfFromChat", tv!({"request": {"chatMid": self.mid()}})).await
+        self.client
+            .base
+            .talk()
+            .call(
+                "deleteSelfFromChat",
+                tv!({"request": {"chatMid": self.mid()}}),
+            )
+            .await
     }
 
     /// The latest `limit` messages.
@@ -260,15 +338,32 @@ impl Chat {
     /// message (`getRecentMessagesV2`, one call), which the fetcher then
     /// returns first.
     pub async fn message_fetcher(&self) -> Result<MessageFetcher> {
-        let boxes = self.client.base.talk().call("getMessageBoxes", tv!({"messageBoxListRequest": {}})).await?;
+        let boxes = self
+            .client
+            .base
+            .talk()
+            .call("getMessageBoxes", tv!({"messageBoxListRequest": {}}))
+            .await?;
         let mid = self.mid();
-        let found = list(&boxes["messageBoxes"]).into_iter().find(|b| b["id"].as_str() == Some(mid));
+        let found = list(&boxes["messageBoxes"])
+            .into_iter()
+            .find(|b| b["id"].as_str() == Some(mid));
         if let Some(found) = found {
             return Ok(MessageFetcher::new(self.client.clone(), found));
         }
-        let recent = list(&self.client.base.talk().get_recent_messages_v2(mid, 1).await?);
+        let recent = list(
+            &self
+                .client
+                .base
+                .talk()
+                .get_recent_messages_v2(mid, 1)
+                .await?,
+        );
         if recent.is_empty() {
-            return Err(Error::internal("NotFound", "Message box not found and the chat has no messages."));
+            return Err(Error::internal(
+                "NotFound",
+                "Message box not found and the chat has no messages.",
+            ));
         }
         let mut fetcher = MessageFetcher::new(self.client.clone(), tv!({"id": mid}));
         fetcher.advance(&recent);
@@ -278,7 +373,12 @@ impl Chat {
 
     /// The chat BGM, if set (`getChatRoomBGMs`).
     pub async fn bgm(&self) -> Result<Option<Value>> {
-        let res = self.client.base.talk().call("getChatRoomBGMs", tv!({"chatRoomMids": [self.mid()]})).await?;
+        let res = self
+            .client
+            .base
+            .talk()
+            .call("getChatRoomBGMs", tv!({"chatRoomMids": [self.mid()]}))
+            .await?;
         Ok(res.get(self.mid()).cloned())
     }
 
@@ -297,14 +397,21 @@ impl Chat {
 }
 
 fn now_ms() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 impl Client {
     /// Chat effect definitions (`getChatEffectMetaList`) for `Pb1_Q2`
     /// categories (`BACKGROUND`, `KEYWORD`, `CONTENT_METADATA_TAG_BASED`).
     pub async fn chat_effects(&self, categories: &[&str]) -> Result<Vec<Value>> {
-        let res = self.base.talk().call("getChatEffectMetaList", tv!({"categories": categories})).await?;
+        let res = self
+            .base
+            .talk()
+            .call("getChatEffectMetaList", tv!({"categories": categories}))
+            .await?;
         Ok(list(&res))
     }
 }
@@ -354,7 +461,12 @@ impl MessageFetcher {
         let rest = limit - page.len() as i32;
         if rest > 0 {
             let args = self.request_args(rest);
-            let res = self.client.base.talk().call("getPreviousMessagesV2WithRequest", args).await?;
+            let res = self
+                .client
+                .base
+                .talk()
+                .call("getPreviousMessagesV2WithRequest", args)
+                .await?;
             let older = list(&res);
             self.advance(&older);
             page.extend(older);
@@ -383,10 +495,23 @@ mod tests {
         assert!(!uses_e2ee_media("r-room", true));
         assert!(!uses_e2ee_media("c-group", false));
         let a = hidden_status_args(3, "c1", 9_007_199_254_740_993, true);
-        assert_eq!(a["setChatHiddenStatusRequest"]["lastMessageId"].as_i64(), Some(9_007_199_254_740_993));
-        assert_eq!(a["setChatHiddenStatusRequest"]["hidden"].as_bool(), Some(true));
+        assert_eq!(
+            a["setChatHiddenStatusRequest"]["lastMessageId"].as_i64(),
+            Some(9_007_199_254_740_993)
+        );
+        assert_eq!(
+            a["setChatHiddenStatusRequest"]["hidden"].as_bool(),
+            Some(true)
+        );
         let m = chat_marker_args(4, "c1", "77");
-        assert_eq!((m["seq"].as_i64(), m["chatMid"].as_str(), m["lastMessageId"].as_str()), (Some(4), Some("c1"), Some("77")));
+        assert_eq!(
+            (
+                m["seq"].as_i64(),
+                m["chatMid"].as_str(),
+                m["lastMessageId"].as_str()
+            ),
+            (Some(4), Some("c1"), Some("77"))
+        );
     }
 
     // 2^53 + 1 is not representable as an f64; the cursor must stay exact and
@@ -399,18 +524,33 @@ mod tests {
             tv!({"id": "c-chat", "lastDeliveredMessageId": {"deliveredTime": 100, "messageId": 9007199254740993_i64}}),
         );
         let first = f.request_args(10);
-        assert_eq!(first["request"]["endMessageId"]["messageId"].as_i64(), Some(9007199254740993));
+        assert_eq!(
+            first["request"]["endMessageId"]["messageId"].as_i64(),
+            Some(9007199254740993)
+        );
         assert_eq!(first["request"]["messageBoxId"].as_str(), Some("c-chat"));
 
         f.advance(&[tv!({"id": "9007199254740993", "deliveredTime": 100, "contentType": "NONE", "text": "hi"})]);
-        assert_eq!(f.request_args(10)["request"]["endMessageId"]["messageId"].as_i64(), Some(9007199254740993));
+        assert_eq!(
+            f.request_args(10)["request"]["endMessageId"]["messageId"].as_i64(),
+            Some(9007199254740993)
+        );
         f.advance(&[]);
-        assert_eq!(f.request_args(10)["request"]["endMessageId"]["messageId"].as_i64(), Some(9007199254740993));
+        assert_eq!(
+            f.request_args(10)["request"]["endMessageId"]["messageId"].as_i64(),
+            Some(9007199254740993)
+        );
 
         f.advance(&[tv!({"id": "9223372036854775807", "deliveredTime": 5})]);
         let next = f.request_args(10);
-        assert_eq!(next["request"]["endMessageId"]["messageId"].as_i64(), Some(i64::MAX));
-        assert_eq!(next["request"]["endMessageId"]["deliveredTime"].as_i64(), Some(5));
+        assert_eq!(
+            next["request"]["endMessageId"]["messageId"].as_i64(),
+            Some(i64::MAX)
+        );
+        assert_eq!(
+            next["request"]["endMessageId"]["deliveredTime"].as_i64(),
+            Some(5)
+        );
     }
 
     // The fallback fetcher (box located via its newest message) hands that
@@ -427,6 +567,12 @@ mod tests {
         assert_eq!(page[0].id(), "42");
         assert!(f.pending.is_empty());
         let cursor = &f.request_args(5)["request"]["endMessageId"];
-        assert_eq!((cursor["messageId"].as_i64(), cursor["deliveredTime"].as_i64()), (Some(42), Some(7)));
+        assert_eq!(
+            (
+                cursor["messageId"].as_i64(),
+                cursor["deliveredTime"].as_i64()
+            ),
+            (Some(42), Some(7))
+        );
     }
 }

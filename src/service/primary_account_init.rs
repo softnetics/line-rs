@@ -24,12 +24,19 @@ impl PrimaryAccountInitService<'_> {
     }
 
     /// `getPasswordHashingParametersForPwdReg(request: GetPasswordHashingParametersForPwdRegRequest)`.
-    pub async fn get_password_hashing_parameters_for_pwd_reg(&self, args: impl Into<Value>) -> Result<Value> {
-        self.call("getPasswordHashingParametersForPwdReg", args).await
+    pub async fn get_password_hashing_parameters_for_pwd_reg(
+        &self,
+        args: impl Into<Value>,
+    ) -> Result<Value> {
+        self.call("getPasswordHashingParametersForPwdReg", args)
+            .await
     }
 
     /// `getPhoneVerifMethodForRegistration(request: GetPhoneVerifMethodForRegistrationRequest)`.
-    pub async fn get_phone_verif_method_for_registration(&self, args: impl Into<Value>) -> Result<Value> {
+    pub async fn get_phone_verif_method_for_registration(
+        &self,
+        args: impl Into<Value>,
+    ) -> Result<Value> {
         self.call("getPhoneVerifMethodForRegistration", args).await
     }
 
@@ -49,13 +56,20 @@ impl PrimaryAccountInitService<'_> {
     }
 
     /// `registerPrimaryUsingEapAccount(authSessionId: string)`.
-    pub async fn register_primary_using_eap_account(&self, args: impl Into<Value>) -> Result<Value> {
+    pub async fn register_primary_using_eap_account(
+        &self,
+        args: impl Into<Value>,
+    ) -> Result<Value> {
         self.call("registerPrimaryUsingEapAccount", args).await
     }
 
     /// `registerPrimaryUsingPhoneWithTokenV3(authSessionId: string)`.
-    pub async fn register_primary_using_phone_with_token_v3(&self, args: impl Into<Value>) -> Result<Value> {
-        self.call("registerPrimaryUsingPhoneWithTokenV3", args).await
+    pub async fn register_primary_using_phone_with_token_v3(
+        &self,
+        args: impl Into<Value>,
+    ) -> Result<Value> {
+        self.call("registerPrimaryUsingPhoneWithTokenV3", args)
+            .await
     }
 
     /// `requestToSendPhonePinCode(request: ReqToSendPhonePinCodeRequest)`.
@@ -79,7 +93,10 @@ impl PrimaryAccountInitService<'_> {
     }
 
     /// `verifyEapAccountForRegistration(authSessionId: string, device: Device, socialLogin: SocialLogin)`.
-    pub async fn verify_eap_account_for_registration(&self, args: impl Into<Value>) -> Result<Value> {
+    pub async fn verify_eap_account_for_registration(
+        &self,
+        args: impl Into<Value>,
+    ) -> Result<Value> {
         self.call("verifyEapAccountForRegistration", args).await
     }
 

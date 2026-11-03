@@ -14,7 +14,7 @@ use rand::RngCore;
 use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
-use crate::thrift::{read_struct, Protocol, TValue};
+use crate::thrift::{Protocol, TValue, read_struct};
 
 type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
 type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
@@ -117,13 +117,15 @@ pub fn encrypt_aes_ecb(key: &[u8], data: &[u8]) -> Vec<u8> {
 
 /// AES-256-CBC with PKCS#7 padding.
 pub fn encrypt_aes_cbc(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>> {
-    let enc = Aes256CbcEnc::new_from_slices(key, iv).map_err(|e| Error::Crypto(format!("aes-256-cbc: {e}")))?;
+    let enc = Aes256CbcEnc::new_from_slices(key, iv)
+        .map_err(|e| Error::Crypto(format!("aes-256-cbc: {e}")))?;
     Ok(enc.encrypt_padded_vec_mut::<Pkcs7>(data))
 }
 
 /// AES-256-CBC decryption; `padded` strips PKCS#7 padding.
 pub fn decrypt_aes_cbc(key: &[u8], iv: &[u8], data: &[u8], padded: bool) -> Result<Vec<u8>> {
-    let dec = Aes256CbcDec::new_from_slices(key, iv).map_err(|e| Error::Crypto(format!("aes-256-cbc: {e}")))?;
+    let dec = Aes256CbcDec::new_from_slices(key, iv)
+        .map_err(|e| Error::Crypto(format!("aes-256-cbc: {e}")))?;
     let res = if padded {
         dec.decrypt_padded_vec_mut::<Pkcs7>(data)
     } else {
@@ -134,23 +136,36 @@ pub fn decrypt_aes_cbc(key: &[u8], iv: &[u8], data: &[u8], padded: bool) -> Resu
 
 /// AES-256-GCM; returns `ciphertext ‖ tag`.
 pub fn encrypt_aes_gcm(key: &[u8], nonce: &[u8], data: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
-    let cipher = aes_gcm::Aes256Gcm::new_from_slice(key).map_err(|e| Error::Crypto(format!("aes-256-gcm: {e}")))?;
+    let cipher = aes_gcm::Aes256Gcm::new_from_slice(key)
+        .map_err(|e| Error::Crypto(format!("aes-256-gcm: {e}")))?;
     if nonce.len() != 12 {
-        return Err(Error::Crypto(format!("aes-256-gcm: nonce must be 12 bytes, got {}", nonce.len())));
+        return Err(Error::Crypto(format!(
+            "aes-256-gcm: nonce must be 12 bytes, got {}",
+            nonce.len()
+        )));
     }
     cipher
-        .encrypt(aes_gcm::Nonce::from_slice(nonce), Payload { msg: data, aad })
+        .encrypt(
+            aes_gcm::Nonce::from_slice(nonce),
+            Payload { msg: data, aad },
+        )
         .map_err(|_| Error::Crypto("aes-256-gcm: encryption failed".into()))
 }
 
 /// AES-256-GCM over `ciphertext ‖ tag`.
 pub fn decrypt_aes_gcm(key: &[u8], nonce: &[u8], data: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
-    let cipher = aes_gcm::Aes256Gcm::new_from_slice(key).map_err(|e| Error::Crypto(format!("aes-256-gcm: {e}")))?;
+    let cipher = aes_gcm::Aes256Gcm::new_from_slice(key)
+        .map_err(|e| Error::Crypto(format!("aes-256-gcm: {e}")))?;
     if nonce.len() != 12 || data.len() < 16 {
-        return Err(Error::Crypto("aes-256-gcm: malformed nonce or ciphertext".into()));
+        return Err(Error::Crypto(
+            "aes-256-gcm: malformed nonce or ciphertext".into(),
+        ));
     }
     cipher
-        .decrypt(aes_gcm::Nonce::from_slice(nonce), Payload { msg: data, aad })
+        .decrypt(
+            aes_gcm::Nonce::from_slice(nonce),
+            Payload { msg: data, aad },
+        )
         .map_err(|_| Error::Crypto("aes-256-gcm: unable to authenticate data".into()))
 }
 
@@ -161,7 +176,8 @@ pub fn int_bytes(i: i64) -> [u8; 4] {
 
 /// Big-endian unsigned integer of any length (linejs `byte2int`).
 pub fn byte2int(b: &[u8]) -> i64 {
-    b.iter().fold(0i64, |acc, &x| acc.wrapping_mul(256).wrapping_add(x as i64))
+    b.iter()
+        .fold(0i64, |acc, &x| acc.wrapping_mul(256).wrapping_add(x as i64))
 }
 
 /// Message AAD: `to ‖ from ‖ senderKeyId ‖ receiverKeyId ‖ specVersion ‖ contentType`.
@@ -212,21 +228,36 @@ pub fn decrypt_key_chain_entries(
         .iter()
         .map(|entry| {
             let key_id = match entry.field(2) {
-                Some(v @ (TValue::Byte(_) | TValue::I16(_) | TValue::I32(_) | TValue::I64(_))) => v.as_i64().unwrap(),
-                _ => return Err(no_e2ee_key("Login keychain contains an invalid or duplicate keyId")),
+                Some(v @ (TValue::Byte(_) | TValue::I16(_) | TValue::I32(_) | TValue::I64(_))) => {
+                    v.as_i64().unwrap()
+                }
+                _ => {
+                    return Err(no_e2ee_key(
+                        "Login keychain contains an invalid or duplicate keyId",
+                    ));
+                }
             };
             if !seen.insert(key_id) {
-                return Err(no_e2ee_key("Login keychain contains an invalid or duplicate keyId"));
+                return Err(no_e2ee_key(
+                    "Login keychain contains an invalid or duplicate keyId",
+                ));
             }
             let bytes = |fid| match entry.field(fid) {
                 Some(TValue::Binary(b)) => b.clone(),
                 _ => Vec::new(),
             };
             let (public_key, private_key) = (bytes(4), bytes(5));
-            if private_key.len() != 32 || public_key.len() != 32 || !verify_key_pair(&private_key, &public_key) {
+            if private_key.len() != 32
+                || public_key.len() != 32
+                || !verify_key_pair(&private_key, &public_key)
+            {
                 return Err(no_e2ee_key("Login keychain contains an invalid key pair"));
             }
-            Ok(KeyChainEntry { key_id, private_key, public_key })
+            Ok(KeyChainEntry {
+                key_id,
+                private_key,
+                public_key,
+            })
         })
         .collect()
 }
@@ -253,7 +284,11 @@ pub fn decrypt_key_chain(
 
 /// The device secret answered to `confirmE2EELogin`:
 /// `AES-ECB(sha256(shared ‖ "Key"), xor(sha256(encryptedKeyChain)))`.
-pub fn encrypt_device_secret(public_key: &[u8], private_key: &[u8], encrypted_key_chain: &[u8]) -> Vec<u8> {
+pub fn encrypt_device_secret(
+    public_key: &[u8],
+    private_key: &[u8],
+    encrypted_key_chain: &[u8],
+) -> Vec<u8> {
     let shared = generate_shared_secret(private_key, public_key);
     let key = sha256_sum(&[&shared, b"Key"]);
     encrypt_aes_ecb(&key, &xor(&sha256(encrypted_key_chain)))
@@ -279,12 +314,17 @@ pub fn derive_key_material(key_material: &[u8]) -> DerivedKeys {
         .expect("76 bytes is a valid HKDF-SHA256 length");
     let mut nonce = okm[64..76].to_vec();
     nonce.extend_from_slice(&[0; 4]);
-    DerivedKeys { enc_key: okm[..32].to_vec(), mac_key: okm[32..64].to_vec(), nonce }
+    DerivedKeys {
+        enc_key: okm[..32].to_vec(),
+        mac_key: okm[32..64].to_vec(),
+        nonce,
+    }
 }
 
 /// AES-256-CTR (32-bit counter) with a 16-byte initial counter block.
 pub fn aes_ctr(key: &[u8], nonce: &[u8], data: &[u8]) -> Result<Vec<u8>> {
-    let mut c = Aes256Ctr32::new_from_slices(key, nonce).map_err(|e| Error::Crypto(format!("aes-256-ctr: {e}")))?;
+    let mut c = Aes256Ctr32::new_from_slices(key, nonce)
+        .map_err(|e| Error::Crypto(format!("aes-256-ctr: {e}")))?;
     let mut buf = data.to_vec();
     c.apply_keystream(&mut buf);
     Ok(buf)
@@ -300,9 +340,12 @@ pub fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
 /// generated when none is given. Returns `(base64 key material,
 /// ciphertext ‖ HMAC-SHA256)`.
 pub fn encrypt_by_key_material(data: &[u8], key_material: Option<&[u8]>) -> (String, Vec<u8>) {
-    let key_material = key_material.map(<[u8]>::to_vec).unwrap_or_else(|| random_bytes(32));
+    let key_material = key_material
+        .map(<[u8]>::to_vec)
+        .unwrap_or_else(|| random_bytes(32));
     let keys = derive_key_material(&key_material);
-    let mut out = aes_ctr(&keys.enc_key, &keys.nonce, data).expect("derived key/nonce sizes are valid");
+    let mut out =
+        aes_ctr(&keys.enc_key, &keys.nonce, data).expect("derived key/nonce sizes are valid");
     let sign = hmac_sha256(&keys.mac_key, &out);
     out.extend_from_slice(&sign);
     (B64.encode(key_material), out)
@@ -326,17 +369,32 @@ pub fn decrypt_by_key_material_b64(data: &[u8], key_material: &str) -> Result<Ve
 
 /// AES-GCM-SIV (RFC 8452) decryption of `ciphertext ‖ tag`; the key is 16 or
 /// 32 bytes.
-pub fn decrypt_aes_gcm_siv(key: &[u8], nonce: &[u8], data: &[u8], aad: Option<&[u8]>) -> Result<Vec<u8>> {
+pub fn decrypt_aes_gcm_siv(
+    key: &[u8],
+    nonce: &[u8],
+    data: &[u8],
+    aad: Option<&[u8]>,
+) -> Result<Vec<u8>> {
     use aes_gcm_siv::{Aes128GcmSiv, Aes256GcmSiv, Nonce};
     if nonce.len() != 12 {
-        return Err(Error::Crypto(format!("aes-gcm-siv: nonce must be 12 bytes, got {}", nonce.len())));
+        return Err(Error::Crypto(format!(
+            "aes-gcm-siv: nonce must be 12 bytes, got {}",
+            nonce.len()
+        )));
     }
-    let payload = Payload { msg: data, aad: aad.unwrap_or_default() };
+    let payload = Payload {
+        msg: data,
+        aad: aad.unwrap_or_default(),
+    };
     let nonce = Nonce::from_slice(nonce);
     let res = match key.len() {
         16 => Aes128GcmSiv::new_from_slice(key).map(|c| c.decrypt(nonce, payload)),
         32 => Aes256GcmSiv::new_from_slice(key).map(|c| c.decrypt(nonce, payload)),
-        n => return Err(Error::Crypto(format!("aes-gcm-siv: invalid key length {n}"))),
+        n => {
+            return Err(Error::Crypto(format!(
+                "aes-gcm-siv: invalid key length {n}"
+            )));
+        }
     };
     res.map_err(|e| Error::Crypto(format!("aes-gcm-siv: {e}")))?
         .map_err(|_| Error::Crypto("aes-gcm-siv: unable to authenticate data".into()))
@@ -344,7 +402,11 @@ pub fn decrypt_aes_gcm_siv(key: &[u8], nonce: &[u8], data: &[u8], aad: Option<&[
 
 /// Decrypt the `<12-byte nonce><ciphertext ‖ tag>` QR identifier of the
 /// secure-login handshake, keyed by the X25519 shared secret.
-pub fn decrypt_encrypted_qr_identifier(encrypted: &[u8], private_key: &[u8], public_key: &[u8]) -> Result<Vec<u8>> {
+pub fn decrypt_encrypted_qr_identifier(
+    encrypted: &[u8],
+    private_key: &[u8],
+    public_key: &[u8],
+) -> Result<Vec<u8>> {
     if encrypted.len() < 12 {
         return Err(Error::Crypto("encrypted QR identifier is too short".into()));
     }
@@ -395,7 +457,8 @@ pub(crate) mod tests {
     #[test]
     fn aes_gcm_siv_rfc8452_vector() {
         // RFC 8452 §C.2: AES-256-GCM-SIV with a one-byte AAD.
-        let key = hex::decode("0100000000000000000000000000000000000000000000000000000000000000").unwrap();
+        let key = hex::decode("0100000000000000000000000000000000000000000000000000000000000000")
+            .unwrap();
         let nonce = hex::decode("030000000000000000000000").unwrap();
         let ct = hex::decode("1de22967237a813291213f267e3b452f02d01ae33e4ec854").unwrap();
         let pt = decrypt_aes_gcm_siv(&key, &nonce, &ct, Some(&[1])).unwrap();
@@ -431,7 +494,10 @@ pub(crate) mod tests {
         let keys = derive_key_material(&km);
         assert_eq!(keys.nonce.len(), 16);
         assert_eq!(&keys.nonce[12..], &[0; 4]);
-        assert_eq!(aes_ctr(&keys.enc_key, &keys.nonce, &enc[..3]).unwrap(), b"abc");
+        assert_eq!(
+            aes_ctr(&keys.enc_key, &keys.nonce, &enc[..3]).unwrap(),
+            b"abc"
+        );
         assert_eq!(&enc[3..], hmac_sha256(&keys.mac_key, &enc[..3]).as_slice());
     }
 
@@ -439,7 +505,10 @@ pub(crate) mod tests {
     fn shared_secret_is_symmetric() {
         let (a, ap) = generate_key_pair();
         let (b, bp) = generate_key_pair();
-        assert_eq!(generate_shared_secret(&a, &bp), generate_shared_secret(&b, &ap));
+        assert_eq!(
+            generate_shared_secret(&a, &bp),
+            generate_shared_secret(&b, &ap)
+        );
         assert!(verify_key_pair(&a, &ap));
         assert!(!verify_key_pair(&a, &bp));
     }
@@ -447,7 +516,10 @@ pub(crate) mod tests {
     #[test]
     fn aad_and_int_helpers() {
         let aad = generate_aad("t", "f", 1, 258, 2, 15);
-        assert_eq!(aad, [b't', b'f', 0, 0, 0, 1, 0, 0, 1, 2, 0, 0, 0, 2, 0, 0, 0, 15]);
+        assert_eq!(
+            aad,
+            [b't', b'f', 0, 0, 0, 1, 0, 0, 1, 2, 0, 0, 0, 2, 0, 0, 0, 15]
+        );
         assert_eq!(byte2int(&int_bytes(123456)), 123456);
         assert_eq!(xor(&[1, 2, 3, 4]), [2, 6]);
         assert_eq!(uri_encode("a+b/c="), "a%2Bb%2Fc%3D");
@@ -456,13 +528,20 @@ pub(crate) mod tests {
     }
 
     /// Build an encrypted login key chain like the server does.
-    pub(crate) fn key_chain_fixture(ids: &[i64], corrupt: bool) -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<KeyChainEntry>) {
+    pub(crate) fn key_chain_fixture(
+        ids: &[i64],
+        corrupt: bool,
+    ) -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<KeyChainEntry>) {
         let keys: Vec<KeyChainEntry> = ids
             .iter()
             .enumerate()
             .map(|(i, &key_id)| {
                 let private_key = vec![i as u8 + 1; 32];
-                KeyChainEntry { key_id, public_key: public_key_of(&private_key), private_key }
+                KeyChainEntry {
+                    key_id,
+                    public_key: public_key_of(&private_key),
+                    private_key,
+                }
             })
             .collect();
         let entries = keys
@@ -472,7 +551,14 @@ pub(crate) mod tests {
                 TValue::Struct(vec![
                     (1, TValue::I32(1)),
                     (2, TValue::I32(k.key_id as i32)),
-                    (4, TValue::Binary(if corrupt && i == 0 { vec![0; 32] } else { k.public_key.clone() })),
+                    (
+                        4,
+                        TValue::Binary(if corrupt && i == 0 {
+                            vec![0; 32]
+                        } else {
+                            k.public_key.clone()
+                        }),
+                    ),
                     (5, TValue::Binary(k.private_key.clone())),
                 ])
             })
@@ -488,14 +574,21 @@ pub(crate) mod tests {
 
     #[test]
     fn decrypt_key_chain_by_id_and_ambiguity() {
-        let (secret, public, encrypted, keys) = key_chain_fixture(&[10, 20, 30, 40, 50, 60, 70, 80], false);
-        let (priv_key, pub_key) = decrypt_key_chain(&public, &secret, &encrypted, Some(80)).unwrap();
+        let (secret, public, encrypted, keys) =
+            key_chain_fixture(&[10, 20, 30, 40, 50, 60, 70, 80], false);
+        let (priv_key, pub_key) =
+            decrypt_key_chain(&public, &secret, &encrypted, Some(80)).unwrap();
         assert_eq!(priv_key, keys[7].private_key);
         assert_eq!(pub_key, keys[7].public_key);
         assert!(decrypt_key_chain(&public, &secret, &encrypted, None).is_err());
 
         let (secret, public, encrypted, keys) = key_chain_fixture(&[80], false);
-        assert_eq!(decrypt_key_chain(&public, &secret, &encrypted, None).unwrap().0, keys[0].private_key);
+        assert_eq!(
+            decrypt_key_chain(&public, &secret, &encrypted, None)
+                .unwrap()
+                .0,
+            keys[0].private_key
+        );
     }
 
     #[test]

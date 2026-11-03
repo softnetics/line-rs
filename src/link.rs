@@ -47,7 +47,10 @@ pub enum LineLink {
     /// `square/livetalk/{ticket}`: OpenChat live talk invitation.
     LiveTalk(String),
     /// `nv/chatMsg?chatId=…&messageId=…`.
-    ChatMessage { chat_id: String, message_id: Option<String> },
+    ChatMessage {
+        chat_id: String,
+        message_id: Option<String>,
+    },
     /// `nv/profilePopup/mid={mid}`.
     ProfilePopup(String),
     /// Any other route (`chat`, `settings/…`, `shop/…`, …): the path after
@@ -60,10 +63,15 @@ impl LineLink {
     pub fn parse(input: &str) -> Option<Self> {
         let input = input.trim();
         let lower = input.to_ascii_lowercase();
-        let rest = if let Some(i) = ["line://", "lineb://"].iter().find_map(|p| lower.starts_with(p).then_some(p.len())) {
+        let rest = if let Some(i) = ["line://", "lineb://"]
+            .iter()
+            .find_map(|p| lower.starts_with(p).then_some(p.len()))
+        {
             &input[i..]
         } else {
-            let i = ["https://", "http://"].iter().find_map(|p| lower.starts_with(p).then_some(p.len()))?;
+            let i = ["https://", "http://"]
+                .iter()
+                .find_map(|p| lower.starts_with(p).then_some(p.len()))?;
             let after = &input[i..];
             let (host, path) = after.split_once('/').unwrap_or((after, ""));
             if !host.eq_ignore_ascii_case("line.me") {
@@ -83,10 +91,18 @@ impl LineLink {
         };
         let path = path.trim_start_matches('/');
         let path = path.strip_prefix("nv/").unwrap_or(path);
-        let segs: Vec<String> = path.split('/').filter(|s| !s.is_empty()).map(percent_decode).collect();
+        let segs: Vec<String> = path
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .map(percent_decode)
+            .collect();
         let segs: Vec<&str> = segs.iter().map(String::as_str).collect();
         let query_param = |name: &str| {
-            query.and_then(|q| url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == name).map(|(_, v)| v.into_owned()))
+            query.and_then(|q| {
+                url::form_urlencoded::parse(q.as_bytes())
+                    .find(|(k, _)| k == name)
+                    .map(|(_, v)| v.into_owned())
+            })
         };
         Some(match segs.as_slice() {
             ["ti", "g", t, ..] => LineLink::GroupTicket(t.to_string()),
@@ -106,8 +122,13 @@ impl LineLink {
                 chat_id: query_param("chatId").unwrap_or_default(),
                 message_id: query_param("messageId"),
             },
-            ["profilePopup", m, ..] if m.starts_with("mid=") => LineLink::ProfilePopup(m["mid=".len()..].to_string()),
-            _ => LineLink::Other { path: path.to_string(), query: query.map(str::to_string) },
+            ["profilePopup", m, ..] if m.starts_with("mid=") => {
+                LineLink::ProfilePopup(m["mid=".len()..].to_string())
+            }
+            _ => LineLink::Other {
+                path: path.to_string(),
+                query: query.map(str::to_string),
+            },
         })
     }
 
@@ -123,7 +144,10 @@ impl LineLink {
             LineLink::MeetingList => "meeting/list".into(),
             LineLink::Call => "call".into(),
             LineLink::LiveTalk(t) => format!("square/livetalk/{t}"),
-            LineLink::ChatMessage { chat_id, message_id } => {
+            LineLink::ChatMessage {
+                chat_id,
+                message_id,
+            } => {
                 let mut q = url::form_urlencoded::Serializer::new(String::new());
                 q.append_pair("chatId", chat_id);
                 if let Some(m) = message_id {
@@ -132,7 +156,10 @@ impl LineLink {
                 format!("nv/chatMsg?{}", q.finish())
             }
             LineLink::ProfilePopup(mid) => format!("nv/profilePopup/mid={mid}"),
-            LineLink::Other { path, query: Some(q) } => format!("{path}?{q}"),
+            LineLink::Other {
+                path,
+                query: Some(q),
+            } => format!("{path}?{q}"),
             LineLink::Other { path, query: None } => path.clone(),
         };
         format!("https://line.me/R/{path}")
@@ -148,7 +175,8 @@ impl fmt::Display for LineLink {
 impl std::str::FromStr for LineLink {
     type Err = Error;
     fn from_str(s: &str) -> Result<Self> {
-        LineLink::parse(s).ok_or_else(|| Error::internal("InvalidLink", format!("not a LINE link: {s}")))
+        LineLink::parse(s)
+            .ok_or_else(|| Error::internal("InvalidLink", format!("not a LINE link: {s}")))
     }
 }
 
@@ -157,7 +185,11 @@ fn percent_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() && b[i + 1].is_ascii_hexdigit() && b[i + 2].is_ascii_hexdigit() {
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && b[i + 1].is_ascii_hexdigit()
+            && b[i + 2].is_ascii_hexdigit()
+        {
             let hex = |c: u8| (c as char).to_digit(16).unwrap_or(0) as u8;
             out.push(hex(b[i + 1]) << 4 | hex(b[i + 2]));
             i += 3;
@@ -185,16 +217,30 @@ impl BaseClient {
     /// Other links give an `UnsupportedLink` error.
     pub async fn resolve_link(&self, link: &LineLink) -> Result<Value> {
         match link {
-            LineLink::GroupTicket(t) => self.talk().find_chat_by_ticket(tv!({"request": {"ticketId": t}})).await,
+            LineLink::GroupTicket(t) => {
+                self.talk()
+                    .find_chat_by_ticket(tv!({"request": {"ticketId": t}}))
+                    .await
+            }
             LineLink::SquareTicket(t) => {
-                self.square().find_square_by_invitation_ticket(tv!({"request": {"invitationTicket": t}})).await
+                self.square()
+                    .find_square_by_invitation_ticket(tv!({"request": {"invitationTicket": t}}))
+                    .await
             }
             LineLink::LiveTalk(t) => {
-                self.livetalk().find_live_talk_by_invitation_ticket(tv!({"request": {"invitationTicket": t}})).await
+                self.livetalk()
+                    .find_live_talk_by_invitation_ticket(tv!({"request": {"invitationTicket": t}}))
+                    .await
             }
-            LineLink::Profile(ProfileRef::UserId(id)) => self.talk().find_contact_by_userid(tv!({"searchId": id})).await,
+            LineLink::Profile(ProfileRef::UserId(id)) => {
+                self.talk()
+                    .find_contact_by_userid(tv!({"searchId": id}))
+                    .await
+            }
             LineLink::Profile(ProfileRef::Ticket(t)) => {
-                self.talk().find_contact_by_user_ticket(tv!({"ticketIdWithTag": t})).await
+                self.talk()
+                    .find_contact_by_user_ticket(tv!({"ticketIdWithTag": t}))
+                    .await
             }
             _ => Err(unsupported(link, "resolve")),
         }
@@ -214,21 +260,30 @@ impl BaseClient {
     pub async fn join_link(&self, link: &LineLink) -> Result<Value> {
         match link {
             LineLink::GroupTicket(t) => {
-                let found = self.talk().find_chat_by_ticket(tv!({"request": {"ticketId": t}})).await?;
+                let found = self
+                    .talk()
+                    .find_chat_by_ticket(tv!({"request": {"ticketId": t}}))
+                    .await?;
                 let chat = found["chat"].clone();
                 let chat_mid = chat["chatMid"]
                     .as_str()
-                    .ok_or_else(|| Error::internal("InvalidLink", "findChatByTicket returned no chat"))?
+                    .ok_or_else(|| {
+                        Error::internal("InvalidLink", "findChatByTicket returned no chat")
+                    })?
                     .to_string();
                 let seq = self.get_reqseq("talk").await? as i32;
                 self.talk()
-                    .accept_chat_invitation_by_ticket(tv!({"request": {"reqSeq": seq, "chatMid": chat_mid, "ticketId": t}}))
+                    .accept_chat_invitation_by_ticket(
+                        tv!({"request": {"reqSeq": seq, "chatMid": chat_mid, "ticketId": t}}),
+                    )
                     .await?;
                 Ok(chat)
             }
             LineLink::Meeting(id) => {
                 let seq = self.get_reqseq("talk").await? as i32;
-                self.call_service().join_chat_by_call_url(tv!({"request": {"urlId": id, "reqSeq": seq}})).await
+                self.call_service()
+                    .join_chat_by_call_url(tv!({"request": {"urlId": id, "reqSeq": seq}}))
+                    .await
             }
             _ => Err(unsupported(link, "join")),
         }
@@ -261,24 +316,57 @@ mod tests {
 
     #[test]
     fn parses_routes() {
-        assert_eq!(p("https://line.me/ti/g2/sQtKt"), LineLink::SquareTicket("sQtKt".into()));
-        assert_eq!(p("line://ti/p/~my.id"), LineLink::Profile(ProfileRef::UserId("my.id".into())));
-        assert_eq!(p("https://line.me/R/ti/p/%40oa_id"), LineLink::Profile(ProfileRef::OfficialAccount("oa_id".into())));
-        assert_eq!(p("line://ti/p/TiCkEt"), LineLink::Profile(ProfileRef::Ticket("TiCkEt".into())));
+        assert_eq!(
+            p("https://line.me/ti/g2/sQtKt"),
+            LineLink::SquareTicket("sQtKt".into())
+        );
+        assert_eq!(
+            p("line://ti/p/~my.id"),
+            LineLink::Profile(ProfileRef::UserId("my.id".into()))
+        );
+        assert_eq!(
+            p("https://line.me/R/ti/p/%40oa_id"),
+            LineLink::Profile(ProfileRef::OfficialAccount("oa_id".into()))
+        );
+        assert_eq!(
+            p("line://ti/p/TiCkEt"),
+            LineLink::Profile(ProfileRef::Ticket("TiCkEt".into()))
+        );
         assert_eq!(p("line://meeting/list"), LineLink::MeetingList);
-        assert_eq!(p("https://line.me/R/meeting/m1x"), LineLink::Meeting("m1x".into()));
+        assert_eq!(
+            p("https://line.me/R/meeting/m1x"),
+            LineLink::Meeting("m1x".into())
+        );
         assert_eq!(p("line://call"), LineLink::Call);
-        assert_eq!(p("line://nv/square/livetalk/LT1"), LineLink::LiveTalk("LT1".into()));
+        assert_eq!(
+            p("line://nv/square/livetalk/LT1"),
+            LineLink::LiveTalk("LT1".into())
+        );
         assert_eq!(
             p("line://nv/chatMsg?chatId=c123&messageId=456"),
-            LineLink::ChatMessage { chat_id: "c123".into(), message_id: Some("456".into()) }
+            LineLink::ChatMessage {
+                chat_id: "c123".into(),
+                message_id: Some("456".into())
+            }
         );
-        assert_eq!(p("line://nv/profilePopup/mid=u00ff"), LineLink::ProfilePopup("u00ff".into()));
+        assert_eq!(
+            p("line://nv/profilePopup/mid=u00ff"),
+            LineLink::ProfilePopup("u00ff".into())
+        );
         assert_eq!(
             p("line://settings/privacy"),
-            LineLink::Other { path: "settings/privacy".into(), query: None }
+            LineLink::Other {
+                path: "settings/privacy".into(),
+                query: None
+            }
         );
-        assert_eq!(p("line://nv/chat"), LineLink::Other { path: "chat".into(), query: None });
+        assert_eq!(
+            p("line://nv/chat"),
+            LineLink::Other {
+                path: "chat".into(),
+                query: None
+            }
+        );
     }
 
     #[test]
@@ -319,19 +407,41 @@ mod tests {
             vec![(1, TValue::Struct(vec![(1, TValue::string("T"))]))]
         );
         assert_eq!(
-            enc("acceptChatInvitationByTicket_args", tv!({"request": {"reqSeq": 1, "chatMid": "c", "ticketId": "T"}})),
-            vec![(1, TValue::Struct(vec![(1, TValue::I32(1)), (2, TValue::string("c")), (3, TValue::string("T"))]))]
+            enc(
+                "acceptChatInvitationByTicket_args",
+                tv!({"request": {"reqSeq": 1, "chatMid": "c", "ticketId": "T"}})
+            ),
+            vec![(
+                1,
+                TValue::Struct(vec![
+                    (1, TValue::I32(1)),
+                    (2, TValue::string("c")),
+                    (3, TValue::string("T"))
+                ])
+            )]
         );
         assert_eq!(
-            enc("joinChatByCallUrl_args", tv!({"request": {"urlId": "u", "reqSeq": 2}})),
-            vec![(2, TValue::Struct(vec![(1, TValue::string("u")), (2, TValue::I32(2))]))]
+            enc(
+                "joinChatByCallUrl_args",
+                tv!({"request": {"urlId": "u", "reqSeq": 2}})
+            ),
+            vec![(
+                2,
+                TValue::Struct(vec![(1, TValue::string("u")), (2, TValue::I32(2))])
+            )]
         );
         assert_eq!(
-            enc("SquareService_findSquareByInvitationTicket_args", tv!({"request": {"invitationTicket": "S"}})),
+            enc(
+                "SquareService_findSquareByInvitationTicket_args",
+                tv!({"request": {"invitationTicket": "S"}})
+            ),
             vec![(1, TValue::Struct(vec![(2, TValue::string("S"))]))]
         );
         assert_eq!(
-            enc("SquareService_findLiveTalkByInvitationTicket_args", tv!({"request": {"invitationTicket": "L"}})),
+            enc(
+                "SquareService_findLiveTalkByInvitationTicket_args",
+                tv!({"request": {"invitationTicket": "L"}})
+            ),
             vec![(1, TValue::Struct(vec![(1, TValue::string("L"))]))]
         );
     }
@@ -340,6 +450,10 @@ mod tests {
     async fn unsupported_links_fail_without_network() {
         let base = BaseClient::new(crate::Device::DesktopMac).unwrap();
         assert!(base.resolve_link(&LineLink::Call).await.is_err());
-        assert!(base.join_link(&LineLink::SquareTicket("x".into())).await.is_err());
+        assert!(
+            base.join_link(&LineLink::SquareTicket("x".into()))
+                .await
+                .is_err()
+        );
     }
 }

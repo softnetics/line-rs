@@ -65,7 +65,12 @@ impl SearchNote {
 
     /// Body of the group search (`POST search/note.json`).
     pub fn body(&self) -> Json {
-        Json::Object(self.pairs().into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+        Json::Object(
+            self.pairs()
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+        )
     }
 }
 
@@ -88,12 +93,20 @@ fn get(home_id: &str, path: &str) -> RestRequest {
 impl Note<'_> {
     /// `GET post/report.json?homeId&postId&reason`.
     pub async fn report_post(&self, home_id: &str, post_id: &str, reason: &str) -> Result<Json> {
-        self.rest.send(get(home_id, REPORT_POST).query("postId", post_id).query("reason", reason)).await
+        self.rest
+            .send(
+                get(home_id, REPORT_POST)
+                    .query("postId", post_id)
+                    .query("reason", reason),
+            )
+            .await
     }
 
     /// `GET like/cancel.json?homeId&contentId` (content id = post id).
     pub async fn cancel_like(&self, home_id: &str, content_id: &str) -> Result<Json> {
-        self.rest.send(get(home_id, CANCEL_LIKE).query("contentId", content_id)).await
+        self.rest
+            .send(get(home_id, CANCEL_LIKE).query("contentId", content_id))
+            .await
     }
 
     /// `GET comment/getList.json?homeId&actorId&contentId&limit&scrollId`.
@@ -114,13 +127,35 @@ impl Note<'_> {
     }
 
     /// `GET comment/delete.json?homeId&commentId&actorId`.
-    pub async fn delete_comment(&self, home_id: &str, comment_id: &str, actor_id: Option<&str>) -> Result<Json> {
-        self.rest.send(get(home_id, DELETE_COMMENT).query("commentId", comment_id).query_opt("actorId", actor_id)).await
+    pub async fn delete_comment(
+        &self,
+        home_id: &str,
+        comment_id: &str,
+        actor_id: Option<&str>,
+    ) -> Result<Json> {
+        self.rest
+            .send(
+                get(home_id, DELETE_COMMENT)
+                    .query("commentId", comment_id)
+                    .query_opt("actorId", actor_id),
+            )
+            .await
     }
 
     /// `GET comment/report.json?homeId&commentId&reason`.
-    pub async fn report_comment(&self, home_id: &str, comment_id: &str, reason: &str) -> Result<Json> {
-        self.rest.send(get(home_id, REPORT_COMMENT).query("commentId", comment_id).query("reason", reason)).await
+    pub async fn report_comment(
+        &self,
+        home_id: &str,
+        comment_id: &str,
+        reason: &str,
+    ) -> Result<Json> {
+        self.rest
+            .send(
+                get(home_id, REPORT_COMMENT)
+                    .query("commentId", comment_id)
+                    .query("reason", reason),
+            )
+            .await
     }
 
     /// Search posts. Groups: `POST /ext/note/nt/.../search/note.json?homeId`
@@ -130,11 +165,18 @@ impl Note<'_> {
         let req = if opts.home_id.starts_with('s') {
             let mut req = RestRequest::get(RestPrefix::SquareNote, SEARCH_SQUARE_NOTE, AUTH);
             for (k, v) in opts.pairs() {
-                req = req.query(k, v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()));
+                req = req.query(
+                    k,
+                    v.as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| v.to_string()),
+                );
             }
             req
         } else {
-            RestRequest::post(RestPrefix::Note, SEARCH_NOTE, AUTH).query("homeId", &opts.home_id).body(opts.body())
+            RestRequest::post(RestPrefix::Note, SEARCH_NOTE, AUTH)
+                .query("homeId", &opts.home_id)
+                .body(opts.body())
         };
         self.rest.send(req).await
     }
@@ -145,12 +187,20 @@ impl Note<'_> {
 
     /// `GET /sn/.../announce/list.json?homeId&limit`.
     pub async fn list_announcements(&self, home_id: &str, limit: Option<i32>) -> Result<Json> {
-        self.rest.send(Self::sn(home_id, LIST_ANNOUNCEMENTS).query_opt("limit", limit)).await
+        self.rest
+            .send(Self::sn(home_id, LIST_ANNOUNCEMENTS).query_opt("limit", limit))
+            .await
     }
 
     /// `GET /sn/.../announce/postlist.json?homeId&scrollId`.
-    pub async fn list_announced_posts(&self, home_id: &str, scroll_id: Option<&str>) -> Result<Json> {
-        self.rest.send(Self::sn(home_id, ANNOUNCED_POSTS).query_opt("scrollId", scroll_id)).await
+    pub async fn list_announced_posts(
+        &self,
+        home_id: &str,
+        scroll_id: Option<&str>,
+    ) -> Result<Json> {
+        self.rest
+            .send(Self::sn(home_id, ANNOUNCED_POSTS).query_opt("scrollId", scroll_id))
+            .await
     }
 
     /// `POST /sn/.../announce/create.json?homeId` `{postId}`.
@@ -163,6 +213,8 @@ impl Note<'_> {
 
     /// `GET /sn/.../announce/delete.json?homeId&postId`.
     pub async fn delete_announcement(&self, home_id: &str, post_id: &str) -> Result<Json> {
-        self.rest.send(Self::sn(home_id, DELETE_ANNOUNCEMENT).query("postId", post_id)).await
+        self.rest
+            .send(Self::sn(home_id, DELETE_ANNOUNCEMENT).query("postId", post_id))
+            .await
     }
 }

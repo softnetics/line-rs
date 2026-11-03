@@ -14,8 +14,12 @@ impl PrimaryAccountSmartSwitchRestoreService<'_> {
     }
 
     /// `checkIfPasswordSetVerificationEmailVerified(authSessionId: string)`.
-    pub async fn check_if_password_set_verification_email_verified(&self, args: impl Into<Value>) -> Result<Value> {
-        self.call("checkIfPasswordSetVerificationEmailVerified", args).await
+    pub async fn check_if_password_set_verification_email_verified(
+        &self,
+        args: impl Into<Value>,
+    ) -> Result<Value> {
+        self.call("checkIfPasswordSetVerificationEmailVerified", args)
+            .await
     }
 
     /// `getAcctVerifMethod(authSessionId: string, accountIdentifier: AccountIdentifier)`.
@@ -34,13 +38,21 @@ impl PrimaryAccountSmartSwitchRestoreService<'_> {
     }
 
     /// `getPasswordHashingParametersForPwdReg(request: GetPasswordHashingParametersForPwdRegRequest)`.
-    pub async fn get_password_hashing_parameters_for_pwd_reg(&self, args: impl Into<Value>) -> Result<Value> {
-        self.call("getPasswordHashingParametersForPwdReg", args).await
+    pub async fn get_password_hashing_parameters_for_pwd_reg(
+        &self,
+        args: impl Into<Value>,
+    ) -> Result<Value> {
+        self.call("getPasswordHashingParametersForPwdReg", args)
+            .await
     }
 
     /// `getPasswordHashingParametersForPwdVerif(request: GetPasswordHashingParametersForPwdVerifRequest)`.
-    pub async fn get_password_hashing_parameters_for_pwd_verif(&self, args: impl Into<Value>) -> Result<Value> {
-        self.call("getPasswordHashingParametersForPwdVerif", args).await
+    pub async fn get_password_hashing_parameters_for_pwd_verif(
+        &self,
+        args: impl Into<Value>,
+    ) -> Result<Value> {
+        self.call("getPasswordHashingParametersForPwdVerif", args)
+            .await
     }
 
     /// `getPhoneVerifMethodV2(request: GetPhoneVerifMethodV2Request)`.
@@ -49,8 +61,12 @@ impl PrimaryAccountSmartSwitchRestoreService<'_> {
     }
 
     /// `requestToSendPasswordSetVerificationEmail` (args struct `requestToSendPasswordSetVerificationEmail_args`).
-    pub async fn request_to_send_password_set_verification_email(&self, args: impl Into<Value>) -> Result<Value> {
-        self.call("requestToSendPasswordSetVerificationEmail", args).await
+    pub async fn request_to_send_password_set_verification_email(
+        &self,
+        args: impl Into<Value>,
+    ) -> Result<Value> {
+        self.call("requestToSendPasswordSetVerificationEmail", args)
+            .await
     }
 
     /// `requestToSendPhonePinCode(request: ReqToSendPhonePinCodeRequest)`.
