@@ -13,7 +13,10 @@ pub struct ReportRow<'a> {
 
 /// Make text safe inside one markdown table cell.
 pub fn cell(s: &str) -> String {
-    let flat = s.replace("\r\n", " ").replace(['\n', '\r'], " ").replace('|', "\\|");
+    let flat = s
+        .replace("\r\n", " ")
+        .replace(['\n', '\r'], " ")
+        .replace('|', "\\|");
     let flat = flat.trim();
     if flat.chars().count() > 300 {
         let cut: String = flat.chars().take(300).collect();
@@ -37,7 +40,11 @@ pub fn utc_datetime(secs: i64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
-    format!("{y:04}-{m:02}-{d:02} {:02}:{:02} UTC", rem / 3600, (rem % 3600) / 60)
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02} UTC",
+        rem / 3600,
+        (rem % 3600) / 60
+    )
 }
 
 /// Short git commit of the working tree, if available.
@@ -53,14 +60,23 @@ pub fn git_commit() -> String {
 }
 
 pub fn now_secs() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 pub fn render(date: &str, commit: &str, device: &str, rows: &[ReportRow<'_>]) -> String {
     let mut out = String::new();
     out.push_str("# line-rs live test results\n\n");
-    out.push_str(&format!("Date: {date}  \nCommit: {}  \nDevice: {}\n\n", cell(commit), cell(device)));
-    out.push_str("| test | auto result | manual verdict | notes | error |\n|---|---|---|---|---|\n");
+    out.push_str(&format!(
+        "Date: {date}  \nCommit: {}  \nDevice: {}\n\n",
+        cell(commit),
+        cell(device)
+    ));
+    out.push_str(
+        "| test | auto result | manual verdict | notes | error |\n|---|---|---|---|---|\n",
+    );
     for r in rows {
         let auto = match r.duration_ms {
             Some(ms) => format!("{} ({:.1}s)", r.auto, ms as f64 / 1000.0),
@@ -119,14 +135,25 @@ mod tests {
                 notes: "",
                 error: Some("HTTP 404 | not found"),
             },
-            ReportRow { id: "events::unsend", auto: "idle", duration_ms: None, verdict: None, notes: "", error: None },
+            ReportRow {
+                id: "events::unsend",
+                auto: "idle",
+                duration_ms: None,
+                verdict: None,
+                notes: "",
+                error: None,
+            },
         ];
         let md = render("2026-10-21 01:01 UTC", "abc1234", "DESKTOPWIN", &rows);
         assert!(md.contains("Commit: abc1234"));
         assert!(md.contains("Device: DESKTOPWIN"));
         assert!(md.contains("| test | auto result | manual verdict | notes | error |"));
-        assert!(md.contains("| `write::send_text` | pass (5.2s) | ถูกต้อง (ok) | seen in Keep Memo |  |"));
-        assert!(md.contains("| `read_only::keep_size` | fail (0.1s) |  |  | HTTP 404 \\| not found |"));
+        assert!(
+            md.contains("| `write::send_text` | pass (5.2s) | ถูกต้อง (ok) | seen in Keep Memo |  |")
+        );
+        assert!(
+            md.contains("| `read_only::keep_size` | fail (0.1s) |  |  | HTTP 404 \\| not found |")
+        );
         assert!(md.contains("| `events::unsend` | idle |  |  |  |"));
     }
 }

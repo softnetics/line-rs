@@ -41,10 +41,18 @@ pub struct SendLiffOptions {
 }
 
 /// Raw `issueLiffView` args (linejs sends a hand-built `NestedArray`).
-pub(crate) fn issue_liff_view_args(liff_id: &str, chat_mid: Option<&str>, lang: &str) -> Vec<(i16, TValue)> {
+pub(crate) fn issue_liff_view_args(
+    liff_id: &str,
+    chat_mid: Option<&str>,
+    lang: &str,
+) -> Vec<(i16, TValue)> {
     let context = match chat_mid {
         Some(mid) => {
-            let id = if mid.starts_with(['u', 'c', 'r']) { 2 } else { 3 };
+            let id = if mid.starts_with(['u', 'c', 'r']) {
+                2
+            } else {
+                3
+            };
             (id, TValue::Struct(vec![(1, TValue::string(mid))]))
         }
         None => (1, TValue::Struct(Vec::new())),
@@ -85,17 +93,30 @@ pub(crate) fn consent_form(html: &str, channel_id: &str) -> Option<(String, Stri
     let mut form = url::form_urlencoded::Serializer::new(String::new());
     if let Some(data) = consent_app_data(html) {
         for field in data["slots"]["serverside_field"].as_array()? {
-            form.append_pair(field["name"].as_str()?, field["value"].as_str().unwrap_or(""));
+            form.append_pair(
+                field["name"].as_str()?,
+                field["value"].as_str().unwrap_or(""),
+            );
         }
-        for permission in data["props"]["authz-allow-newly"].as_array().into_iter().flatten() {
+        for permission in data["props"]["authz-allow-newly"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
             if let Some(code) = permission["code"].as_str() {
                 form.append_pair("allPermission", code);
                 form.append_pair("approvedPermission", code);
             }
         }
         form.append_pair("allow", "true");
-        let post = data["props"]["post-url"].as_str().unwrap_or("/oauth2/v2.1/authorize/consent");
-        let url = if post.starts_with("https://") { post.to_string() } else { format!("https://access.line.me{post}") };
+        let post = data["props"]["post-url"]
+            .as_str()
+            .unwrap_or("/oauth2/v2.1/authorize/consent");
+        let url = if post.starts_with("https://") {
+            post.to_string()
+        } else {
+            format!("https://access.line.me{post}")
+        };
         return Some((url, form.finish()));
     }
     const PREFIX: &str = r#"<input type="hidden" name="__csrf" id="__csrf" value=""#;
@@ -108,7 +129,9 @@ pub(crate) fn consent_form(html: &str, channel_id: &str) -> Option<(String, Stri
     for p in permissions {
         form.append_pair("approvedPermission", p);
     }
-    form.append_pair("__WLS", "").append_pair("channelId", channel_id).append_pair("__csrf", csrf);
+    form.append_pair("__WLS", "")
+        .append_pair("channelId", channel_id)
+        .append_pair("__csrf", csrf);
     form.append_pair("allow", "true");
     Some((AUTH_CONSENT_URL.to_string(), form.finish()))
 }
@@ -130,23 +153,34 @@ impl LiffService<'_> {
         let mut try_consent = options.try_consent.unwrap_or(true);
         loop {
             let err = match self.issue_liff_view(options).await {
-                Ok(view) => return Ok(view["accessToken"].as_str().unwrap_or_default().to_string()),
+                Ok(view) => {
+                    return Ok(view["accessToken"].as_str().unwrap_or_default().to_string());
+                }
                 Err(e) => e,
             };
             if let Error::Request { data, .. } = &err {
                 self.client.log("liff-error", data.to_json());
-                let exc = if data["liffException"].is_null() { data } else { &data["liffException"] };
+                let exc = if data["liffException"].is_null() {
+                    data
+                } else {
+                    &data["liffException"]
+                };
                 if try_consent && exc["code"].as_str() == Some("CONSENT_REQUIRED") {
                     let consent = &exc["payload"]["consentRequired"];
-                    if let (Some(channel_id), Some(consent_url)) =
-                        (consent["channelId"].as_str(), consent["consentUrl"].as_str())
-                    {
+                    if let (Some(channel_id), Some(consent_url)) = (
+                        consent["channelId"].as_str(),
+                        consent["consentUrl"].as_str(),
+                    ) {
                         // The consent page works for every device. The mobile
                         // permissions API answers 200 without granting
                         // permissions it does not list (such as `OC`), so it
                         // is only the fallback.
-                        let to_type = options.chat_mid.as_deref().and_then(BaseClient::get_to_type);
-                        let mobile = to_type != Some(4) && !self.client.device.as_str().starts_with("DESKTOP");
+                        let to_type = options
+                            .chat_mid
+                            .as_deref()
+                            .and_then(BaseClient::get_to_type);
+                        let mobile = to_type != Some(4)
+                            && !self.client.device.as_str().starts_with("DESKTOP");
                         let granted = self.try_consent_authorize(consent_url, channel_id).await?
                             || (mobile && self.try_consent_liff(channel_id, None).await?);
                         if granted {
@@ -156,8 +190,15 @@ impl LiffService<'_> {
                     }
                 }
             }
-            let at = options.chat_mid.as_deref().map(|m| format!("@{m}")).unwrap_or_default();
-            return Err(Error::internal(ERROR_NAME, format!("Failed to get LiffToken: {}{at}", options.liff_id)));
+            let at = options
+                .chat_mid
+                .as_deref()
+                .map(|m| format!("@{m}"))
+                .unwrap_or_default();
+            return Err(Error::internal(
+                ERROR_NAME,
+                format!("Failed to get LiffToken: {}{at}", options.liff_id),
+            ));
         }
     }
 
@@ -194,7 +235,10 @@ impl LiffService<'_> {
         if !status.is_success() {
             return Err(Error::internal(
                 ERROR_NAME,
-                format!("Failed to send Liff message: {} {body}", status.canonical_reason().unwrap_or("")),
+                format!(
+                    "Failed to send Liff message: {} {body}",
+                    status.canonical_reason().unwrap_or("")
+                ),
             ));
         }
         Ok(body.into())
@@ -247,7 +291,9 @@ impl LiffService<'_> {
             .map(|v| v.split(';').next().unwrap_or_default().to_string())
             .collect();
         let html = res.text().await?;
-        let Some((post_url, body)) = consent_form(&html, channel_id) else { return Ok(false) };
+        let Some((post_url, body)) = consent_form(&html, channel_id) else {
+            return Ok(false);
+        };
         let res = self
             .client
             .http
@@ -268,7 +314,10 @@ impl LiffService<'_> {
 // <generated pass-through>
 impl LiffService<'_> {
     /// `getLiffViewWithoutUserContext(request: LiffViewWithoutUserContextRequest)`.
-    pub async fn get_liff_view_without_user_context(&self, args: impl Into<Value>) -> Result<Value> {
+    pub async fn get_liff_view_without_user_context(
+        &self,
+        args: impl Into<Value>,
+    ) -> Result<Value> {
         self.call("getLiffViewWithoutUserContext", args).await
     }
 
@@ -306,15 +355,23 @@ mod tests {
         );
         let (url, body) = consent_form(html, "123").unwrap();
         assert_eq!(url, AUTH_CONSENT_URL);
-        assert_eq!(body, "channelId=123&__csrf=tok&allPermission=OC&approvedPermission=OC&allow=true");
+        assert_eq!(
+            body,
+            "channelId=123&__csrf=tok&allPermission=OC&approvedPermission=OC&allow=true"
+        );
     }
 
     #[test]
     fn consent_form_from_csrf_input() {
-        let html = r#"<form><input type="hidden" name="__csrf" id="__csrf" value="tok-123"></form>"#;
+        let html =
+            r#"<form><input type="hidden" name="__csrf" id="__csrf" value="tok-123"></form>"#;
         let (url, body) = consent_form(html, "42").unwrap();
         assert_eq!(url, AUTH_CONSENT_URL);
-        assert!(body.starts_with("allPermission=P&allPermission=CM&allPermission=OC&approvedPermission=P"));
+        assert!(
+            body.starts_with(
+                "allPermission=P&allPermission=CM&allPermission=OC&approvedPermission=P"
+            )
+        );
         assert!(body.ends_with("&__WLS=&channelId=42&__csrf=tok-123&allow=true"));
         assert_eq!(consent_form("<form></form>", "42"), None);
     }

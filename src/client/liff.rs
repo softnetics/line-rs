@@ -36,34 +36,61 @@ pub enum LiffMessage {
         sent_by: Option<SentBy>,
     },
     #[serde(rename = "sticker", rename_all = "camelCase")]
-    Sticker { package_id: String, sticker_id: String },
+    Sticker {
+        package_id: String,
+        sticker_id: String,
+    },
     #[serde(rename = "image", rename_all = "camelCase")]
-    Image { original_content_url: String, preview_image_url: String },
+    Image {
+        original_content_url: String,
+        preview_image_url: String,
+    },
     #[serde(rename = "flex", rename_all = "camelCase")]
-    Flex { alt_text: String, contents: serde_json::Value },
+    Flex {
+        alt_text: String,
+        contents: serde_json::Value,
+    },
     #[serde(rename = "template", rename_all = "camelCase")]
-    Template { alt_text: String, template: serde_json::Value },
+    Template {
+        alt_text: String,
+        template: serde_json::Value,
+    },
     /// Any other message object, sent verbatim.
     #[serde(untagged)]
     Raw(serde_json::Value),
 }
 
 pub fn text(body: impl Into<String>, sent_by: Option<SentBy>) -> LiffMessage {
-    LiffMessage::Text { text: body.into(), sent_by }
+    LiffMessage::Text {
+        text: body.into(),
+        sent_by,
+    }
 }
 
 pub fn sticker(package_id: impl Into<String>, sticker_id: impl Into<String>) -> LiffMessage {
-    LiffMessage::Sticker { package_id: package_id.into(), sticker_id: sticker_id.into() }
+    LiffMessage::Sticker {
+        package_id: package_id.into(),
+        sticker_id: sticker_id.into(),
+    }
 }
 
 /// An image; `preview` defaults to the original URL.
-pub fn image(original_content_url: impl Into<String>, preview_image_url: Option<String>) -> LiffMessage {
+pub fn image(
+    original_content_url: impl Into<String>,
+    preview_image_url: Option<String>,
+) -> LiffMessage {
     let original = original_content_url.into();
-    LiffMessage::Image { preview_image_url: preview_image_url.unwrap_or_else(|| original.clone()), original_content_url: original }
+    LiffMessage::Image {
+        preview_image_url: preview_image_url.unwrap_or_else(|| original.clone()),
+        original_content_url: original,
+    }
 }
 
 pub fn flex(alt_text: impl Into<String>, contents: serde_json::Value) -> LiffMessage {
-    LiffMessage::Flex { alt_text: alt_text.into(), contents }
+    LiffMessage::Flex {
+        alt_text: alt_text.into(),
+        contents,
+    }
 }
 
 /// Options for [`Liff::issue_view`] / [`Liff::get_token`].
@@ -78,10 +105,18 @@ pub struct LiffViewOptions {
 
 /// `issueLiffView` args, encoded by hand like linejs: the "no context"
 /// variant is an empty struct in field 1, which the schema encoder would drop.
-pub(crate) fn issue_liff_view_args(liff_id: &str, chat_mid: Option<&str>, lang: &str) -> Vec<(i16, TValue)> {
+pub(crate) fn issue_liff_view_args(
+    liff_id: &str,
+    chat_mid: Option<&str>,
+    lang: &str,
+) -> Vec<(i16, TValue)> {
     let context = match chat_mid {
         Some(mid) => {
-            let id = if mid.starts_with(['u', 'c', 'r']) { 2 } else { 3 };
+            let id = if mid.starts_with(['u', 'c', 'r']) {
+                2
+            } else {
+                3
+            };
             (id, TValue::Struct(vec![(1, TValue::string(mid))]))
         }
         None => (1, TValue::Struct(Vec::new())),
@@ -120,9 +155,23 @@ impl Liff<'_> {
 
     /// `issueLiffView`; returns the `LiffViewResponse`.
     pub async fn issue_view(&self, opts: &LiffViewOptions) -> Result<Value> {
-        let liff_id = opts.liff_id.clone().unwrap_or_else(|| self.default_liff_id());
-        let args = issue_liff_view_args(&liff_id, opts.chat_mid.as_deref(), opts.lang.as_deref().unwrap_or("ja_JP"));
-        self.client.base.request(args, "issueLiffView", RequestOptions::new("/LIFF1", Protocol::Compact)).await
+        let liff_id = opts
+            .liff_id
+            .clone()
+            .unwrap_or_else(|| self.default_liff_id());
+        let args = issue_liff_view_args(
+            &liff_id,
+            opts.chat_mid.as_deref(),
+            opts.lang.as_deref().unwrap_or("ja_JP"),
+        );
+        self.client
+            .base
+            .request(
+                args,
+                "issueLiffView",
+                RequestOptions::new("/LIFF1", Protocol::Compact),
+            )
+            .await
     }
 
     /// `issueSubLiffView` with raw `issueSubLiffView_args` fields.
@@ -132,10 +181,16 @@ impl Liff<'_> {
 
     /// A LIFF access token, granting consent once if the server asks for it.
     pub async fn get_token(&self, opts: &LiffViewOptions) -> Result<String> {
-        let liff_id = opts.liff_id.clone().unwrap_or_else(|| self.default_liff_id());
+        let liff_id = opts
+            .liff_id
+            .clone()
+            .unwrap_or_else(|| self.default_liff_id());
         let mut try_consent = true;
         loop {
-            let view = LiffViewOptions { liff_id: Some(liff_id.clone()), ..opts.clone() };
+            let view = LiffViewOptions {
+                liff_id: Some(liff_id.clone()),
+                ..opts.clone()
+            };
             let err = match self.issue_view(&view).await {
                 Ok(v) => {
                     if let Some(t) = v["accessToken"].as_str() {
@@ -147,18 +202,28 @@ impl Liff<'_> {
             };
             if let Some(Error::Request { data, .. }) = &err {
                 self.client.base.log("liff-error", data.to_json());
-                let exc = if data.get("liffException").is_some() { &data["liffException"] } else { data };
+                let exc = if data.get("liffException").is_some() {
+                    &data["liffException"]
+                } else {
+                    data
+                };
                 let consent = &exc["payload"]["consentRequired"];
                 if try_consent
                     && exc["code"].as_str() == Some("CONSENT_REQUIRED")
-                    && let (Some(channel_id), Some(consent_url)) =
-                        (consent["channelId"].as_str(), consent["consentUrl"].as_str())
+                    && let (Some(channel_id), Some(consent_url)) = (
+                        consent["channelId"].as_str(),
+                        consent["consentUrl"].as_str(),
+                    )
                 {
                     // The consent page works for every device; the mobile
                     // permissions API answers 200 without granting permissions
                     // it does not list (such as `OC`), so it is the fallback.
-                    let to_type = opts.chat_mid.as_deref().and_then(crate::base::BaseClient::get_to_type);
-                    let mobile = to_type != Some(4) && !self.client.base.device.as_str().starts_with("DESKTOP");
+                    let to_type = opts
+                        .chat_mid
+                        .as_deref()
+                        .and_then(crate::base::BaseClient::get_to_type);
+                    let mobile = to_type != Some(4)
+                        && !self.client.base.device.as_str().starts_with("DESKTOP");
                     let ok = self.try_consent_authorize(consent_url, channel_id).await?
                         || (mobile && self.try_consent_liff(channel_id).await?);
                     if ok {
@@ -167,8 +232,15 @@ impl Liff<'_> {
                     }
                 }
             }
-            let at = opts.chat_mid.as_deref().map(|m| format!("@{m}")).unwrap_or_default();
-            return Err(Error::internal(ERROR_NAME, format!("Failed to get LiffToken: {liff_id}{at}")));
+            let at = opts
+                .chat_mid
+                .as_deref()
+                .map(|m| format!("@{m}"))
+                .unwrap_or_default();
+            return Err(Error::internal(
+                ERROR_NAME,
+                format!("Failed to get LiffToken: {liff_id}{at}"),
+            ));
         }
     }
 
@@ -217,7 +289,9 @@ impl Liff<'_> {
             .map(|v| v.split(';').next().unwrap_or("").to_string())
             .collect();
         let html = res.text().await?;
-        let Some((post_url, body)) = crate::service::liff::consent_form(&html, channel_id) else { return Ok(false) };
+        let Some((post_url, body)) = crate::service::liff::consent_form(&html, channel_id) else {
+            return Ok(false);
+        };
         let mut req = base
             .http
             .post(post_url)
@@ -234,17 +308,37 @@ impl Liff<'_> {
     /// per chat; `force_issue` mints a new one). linejs issues a token for
     /// every share, so a cached token that the API rejects (4xx) is dropped
     /// and the share retried once with a fresh one.
-    pub async fn share_messages(&self, to: &str, messages: &[LiffMessage], force_issue: bool) -> Result<serde_json::Value> {
+    pub async fn share_messages(
+        &self,
+        to: &str,
+        messages: &[LiffMessage],
+        force_issue: bool,
+    ) -> Result<serde_json::Value> {
         let mut force_issue = force_issue;
         loop {
-            let cached = self.client.inner.liff_tokens.lock().unwrap().get(to).cloned();
+            let cached = self
+                .client
+                .inner
+                .liff_tokens
+                .lock()
+                .unwrap()
+                .get(to)
+                .cloned();
             let (token, from_cache) = match cached.filter(|_| !force_issue) {
                 Some(t) => (t, true),
                 None => {
                     // linejs' sendLiff always uses the service default id here.
-                    let opts = LiffViewOptions { chat_mid: Some(to.to_string()), ..Default::default() };
+                    let opts = LiffViewOptions {
+                        chat_mid: Some(to.to_string()),
+                        ..Default::default()
+                    };
                     let t = self.get_token(&opts).await?;
-                    self.client.inner.liff_tokens.lock().unwrap().insert(to.to_string(), t.clone());
+                    self.client
+                        .inner
+                        .liff_tokens
+                        .lock()
+                        .unwrap()
+                        .insert(to.to_string(), t.clone());
                     (t, false)
                 }
             };
@@ -273,13 +367,21 @@ impl Liff<'_> {
                 continue;
             }
             if !status.is_success() {
-                return Err(Error::internal(ERROR_NAME, format!("Failed to send Liff message: {status} {body}")));
+                return Err(Error::internal(
+                    ERROR_NAME,
+                    format!("Failed to send Liff message: {status} {body}"),
+                ));
             }
             return Ok(body);
         }
     }
 
-    pub async fn share_message(&self, to: &str, message: LiffMessage, force_issue: bool) -> Result<serde_json::Value> {
+    pub async fn share_message(
+        &self,
+        to: &str,
+        message: LiffMessage,
+        force_issue: bool,
+    ) -> Result<serde_json::Value> {
         self.share_messages(to, &[message], force_issue).await
     }
 }
@@ -319,23 +421,41 @@ mod tests {
             json!({"type": "image", "originalContentUrl": "https://example.test/a.jpg",
                    "previewImageUrl": "https://example.test/a.jpg"})
         );
-        let m = image("https://example.test/orig.jpg", Some("https://example.test/thumb.jpg".into()));
+        let m = image(
+            "https://example.test/orig.jpg",
+            Some("https://example.test/thumb.jpg".into()),
+        );
         assert_eq!(j(&m)["previewImageUrl"], "https://example.test/thumb.jpg");
         let contents = json!({"type": "bubble", "body": {"type": "box", "layout": "vertical"}});
-        assert_eq!(j(&flex("alt", contents.clone())), json!({"type": "flex", "altText": "alt", "contents": contents}));
-        assert_eq!(j(&LiffMessage::Raw(json!({"type": "x"}))), json!({"type": "x"}));
+        assert_eq!(
+            j(&flex("alt", contents.clone())),
+            json!({"type": "flex", "altText": "alt", "contents": contents})
+        );
+        assert_eq!(
+            j(&LiffMessage::Raw(json!({"type": "x"}))),
+            json!({"type": "x"})
+        );
     }
 
     #[test]
     fn view_args_and_csrf() {
         let args = issue_liff_view_args("id", Some("c123"), "ja_JP");
-        let TValue::Struct(req) = &args[0].1 else { panic!() };
-        assert_eq!(req[1].1, TValue::Struct(vec![(2, TValue::Struct(vec![(1, TValue::string("c123"))]))]));
+        let TValue::Struct(req) = &args[0].1 else {
+            panic!()
+        };
+        assert_eq!(
+            req[1].1,
+            TValue::Struct(vec![(2, TValue::Struct(vec![(1, TValue::string("c123"))]))])
+        );
         let args = issue_liff_view_args("id", Some("s123"), "ja_JP");
-        let TValue::Struct(req) = &args[0].1 else { panic!() };
+        let TValue::Struct(req) = &args[0].1 else {
+            panic!()
+        };
         assert!(matches!(&req[1].1, TValue::Struct(c) if c[0].0 == 3));
         let args = issue_liff_view_args("id", None, "ja_JP");
-        let TValue::Struct(req) = &args[0].1 else { panic!() };
+        let TValue::Struct(req) = &args[0].1 else {
+            panic!()
+        };
         assert_eq!(req[1].1, TValue::Struct(vec![(1, TValue::Struct(vec![]))]));
     }
 }

@@ -36,7 +36,11 @@ impl Device {
     pub fn is_v3_supported(self) -> bool {
         matches!(
             self,
-            Device::DesktopWin | Device::DesktopMac | Device::Ios | Device::Android | Device::AndroidSecondary
+            Device::DesktopWin
+                | Device::DesktopMac
+                | Device::Ios
+                | Device::Android
+                | Device::AndroidSecondary
         )
     }
 
@@ -80,7 +84,12 @@ impl FromStr for Device {
             "IOSIPAD" => Device::IosIpad,
             "WATCHOS" => Device::WatchOs,
             "WEAROS" => Device::WearOs,
-            _ => return Err(Error::internal("UnsupportedDevice", format!("Unsupported device: {s}."))),
+            _ => {
+                return Err(Error::internal(
+                    "UnsupportedDevice",
+                    format!("Unsupported device: {s}."),
+                ));
+            }
         })
     }
 }
@@ -96,7 +105,10 @@ pub struct DeviceDetails {
 impl DeviceDetails {
     /// `x-line-application` header value.
     pub fn application(&self) -> String {
-        format!("{}\t{}\t{}\t{}", self.device, self.app_version, self.system_name, self.system_version)
+        format!(
+            "{}\t{}\t{}\t{}",
+            self.device, self.app_version, self.system_name, self.system_version
+        )
     }
 
     pub fn user_agent(&self) -> String {
@@ -111,8 +123,14 @@ mod tests {
     #[test]
     fn application_header() {
         let d = Device::DesktopWin.details(None);
-        assert_eq!(d.application(), "DESKTOPWIN\t9.7.0.3556\tWINDOWS\t10.0.0-NT-x64");
+        assert_eq!(
+            d.application(),
+            "DESKTOPWIN\t9.7.0.3556\tWINDOWS\t10.0.0-NT-x64"
+        );
         assert_eq!("ios".parse::<Device>().unwrap(), Device::Ios);
-        assert_eq!(Device::DesktopMac.details(None).application(), "DESKTOPMAC\t26.5.0\tMAC\t13.0.0");
+        assert_eq!(
+            Device::DesktopMac.details(None).application(),
+            "DESKTOPMAC\t26.5.0\tMAC\t13.0.0"
+        );
     }
 }

@@ -12,7 +12,11 @@ use crate::error::{Error, Result};
 
 /// Encode `value` as the struct `struct_name`. Unknown keys are ignored (the
 /// same as linejs' generated writers); `Null` fields are skipped.
-pub fn encode_struct(schema: &Schema, struct_name: &str, value: &Value) -> Result<Vec<(i16, TValue)>> {
+pub fn encode_struct(
+    schema: &Schema,
+    struct_name: &str,
+    value: &Value,
+) -> Result<Vec<(i16, TValue)>> {
     let def = schema
         .get_struct(struct_name)
         .ok_or_else(|| Error::Thrift(format!("unknown struct `{struct_name}`")))?;
@@ -25,7 +29,9 @@ fn encode_with_def(schema: &Schema, def: &StructDef, value: &Value) -> Result<Ve
         Value::Null => {}
         Value::Struct(map) => {
             for field in &def.fields {
-                let v = map.get(&field.name).or_else(|| map.get(&field.id.to_string()));
+                let v = map
+                    .get(&field.name)
+                    .or_else(|| map.get(&field.id.to_string()));
                 let Some(v) = v else { continue };
                 if let Some(tv) = encode_field(schema, &field.ty, v)
                     .map_err(|e| Error::Thrift(format!("{}.{}: {e}", def.name, field.name)))?
@@ -34,14 +40,20 @@ fn encode_with_def(schema: &Schema, def: &StructDef, value: &Value) -> Result<Ve
                 }
             }
             for key in map.keys() {
-                if def.field_by_name(key).is_none() && key.parse::<i16>().map_or(true, |id| def.field_by_id(id).is_none())
+                if def.field_by_name(key).is_none()
+                    && key
+                        .parse::<i16>()
+                        .map_or(true, |id| def.field_by_id(id).is_none())
                 {
                     tracing::debug!(struct_name = %def.name, field = %key, "ignoring unknown field");
                 }
             }
         }
         other => {
-            return Err(Error::Thrift(format!("{}: expected struct, got {other}", def.name)));
+            return Err(Error::Thrift(format!(
+                "{}: expected struct, got {other}",
+                def.name
+            )));
         }
     }
     Ok(out)
@@ -80,7 +92,11 @@ pub fn encode_value(schema: &Schema, ty: &TypeRef, v: &Value) -> Result<TValue> 
                 .filter(|x| !x.is_null())
                 .map(|x| encode_value(schema, inner, x))
                 .collect::<Result<Vec<_>>>()?;
-            Ok(if matches!(ty, TypeRef::List(_)) { TValue::List(et, enc) } else { TValue::Set(et, enc) })
+            Ok(if matches!(ty, TypeRef::List(_)) {
+                TValue::List(et, enc)
+            } else {
+                TValue::Set(et, enc)
+            })
         }
         TypeRef::Map(kt, vt) => {
             let mut entries = Vec::new();
@@ -98,14 +114,19 @@ pub fn encode_value(schema: &Schema, ty: &TypeRef, v: &Value) -> Result<TValue> 
                         if val.is_null() {
                             continue;
                         }
-                        entries.push((encode_value(schema, kt, k)?, encode_value(schema, vt, val)?));
+                        entries
+                            .push((encode_value(schema, kt, k)?, encode_value(schema, vt, val)?));
                     }
                 }
                 other => return Err(Error::Thrift(format!("expected map, got {other}"))),
             }
             let first = entries.first();
-            let ktt = first.map(|(k, _)| k.ttype()).unwrap_or_else(|| wire_type(schema, kt, None));
-            let vtt = first.map(|(_, v)| v.ttype()).unwrap_or_else(|| wire_type(schema, vt, None));
+            let ktt = first
+                .map(|(k, _)| k.ttype())
+                .unwrap_or_else(|| wire_type(schema, kt, None));
+            let vtt = first
+                .map(|(_, v)| v.ttype())
+                .unwrap_or_else(|| wire_type(schema, vt, None));
             Ok(TValue::Map(ktt, vtt, entries))
         }
         TypeRef::Named(name) => match schema.resolve(name) {
@@ -119,7 +140,9 @@ pub fn encode_value(schema: &Schema, ty: &TypeRef, v: &Value) -> Result<TValue> 
                 other => other
                     .as_i64()
                     .map(|i| TValue::I32(i as i32))
-                    .ok_or_else(|| Error::Thrift(format!("expected {} enum, got {other}", def.name))),
+                    .ok_or_else(|| {
+                        Error::Thrift(format!("expected {} enum, got {other}", def.name))
+                    }),
             },
             None => encode_base(BaseType::Any, v),
         },
@@ -130,25 +153,38 @@ pub fn encode_value(schema: &Schema, ty: &TypeRef, v: &Value) -> Result<TValue> 
 fn encode_key(schema: &Schema, kt: &TypeRef, k: &str) -> Result<TValue> {
     let v = match kt {
         TypeRef::Base(BaseType::I16 | BaseType::I32 | BaseType::I64 | BaseType::Byte) => {
-            Value::Int(k.parse().map_err(|_| Error::Thrift(format!("map key `{k}` is not an integer")))?)
+            Value::Int(
+                k.parse()
+                    .map_err(|_| Error::Thrift(format!("map key `{k}` is not an integer")))?,
+            )
         }
-        TypeRef::Base(BaseType::Double) => {
-            Value::Double(k.parse().map_err(|_| Error::Thrift(format!("map key `{k}` is not a number")))?)
-        }
+        TypeRef::Base(BaseType::Double) => Value::Double(
+            k.parse()
+                .map_err(|_| Error::Thrift(format!("map key `{k}` is not a number")))?,
+        ),
         _ => Value::String(k.to_string()),
     };
     encode_value(schema, kt, &v)
 }
 
 fn encode_base(b: BaseType, v: &Value) -> Result<TValue> {
-    let int = |v: &Value| v.as_i64().ok_or_else(|| Error::Thrift(format!("expected integer, got {v}")));
+    let int = |v: &Value| {
+        v.as_i64()
+            .ok_or_else(|| Error::Thrift(format!("expected integer, got {v}")))
+    };
     Ok(match b {
-        BaseType::Bool => TValue::Bool(v.as_bool().ok_or_else(|| Error::Thrift(format!("expected bool, got {v}")))?),
+        BaseType::Bool => TValue::Bool(
+            v.as_bool()
+                .ok_or_else(|| Error::Thrift(format!("expected bool, got {v}")))?,
+        ),
         BaseType::Byte => TValue::Byte(int(v)? as i8),
         BaseType::I16 => TValue::I16(int(v)? as i16),
         BaseType::I32 => TValue::I32(int(v)? as i32),
         BaseType::I64 => TValue::I64(int(v)?),
-        BaseType::Double => TValue::Double(v.as_f64().ok_or_else(|| Error::Thrift(format!("expected double, got {v}")))?),
+        BaseType::Double => TValue::Double(
+            v.as_f64()
+                .ok_or_else(|| Error::Thrift(format!("expected double, got {v}")))?,
+        ),
         BaseType::String | BaseType::Binary => match v {
             Value::String(s) => TValue::Binary(s.as_bytes().to_vec()),
             Value::Binary(b) => TValue::Binary(b.clone()),
@@ -169,21 +205,31 @@ fn infer(v: &Value) -> Result<TValue> {
         Value::String(s) => TValue::Binary(s.as_bytes().to_vec()),
         Value::Binary(b) => TValue::Binary(b.clone()),
         Value::List(items) => {
-            let enc = items.iter().filter(|x| !x.is_null()).map(infer).collect::<Result<Vec<_>>>()?;
+            let enc = items
+                .iter()
+                .filter(|x| !x.is_null())
+                .map(infer)
+                .collect::<Result<Vec<_>>>()?;
             let et = enc.first().map(TValue::ttype).unwrap_or(TType::String);
             TValue::List(et, enc)
         }
         Value::Map(m) => {
-            let enc = m.iter().map(|(k, v)| Ok((infer(k)?, infer(v)?))).collect::<Result<Vec<_>>>()?;
-            let (kt, vt) = enc.first().map(|(k, v)| (k.ttype(), v.ttype())).unwrap_or((TType::String, TType::String));
+            let enc = m
+                .iter()
+                .map(|(k, v)| Ok((infer(k)?, infer(v)?)))
+                .collect::<Result<Vec<_>>>()?;
+            let (kt, vt) = enc
+                .first()
+                .map(|(k, v)| (k.ttype(), v.ttype()))
+                .unwrap_or((TType::String, TType::String));
             TValue::Map(kt, vt, enc)
         }
         Value::Struct(m) => {
             let mut fields = Vec::new();
             for (k, v) in m {
-                let id: i16 = k
-                    .parse()
-                    .map_err(|_| Error::Thrift(format!("cannot infer field id for `{k}` without a schema")))?;
+                let id: i16 = k.parse().map_err(|_| {
+                    Error::Thrift(format!("cannot infer field id for `{k}` without a schema"))
+                })?;
                 if !v.is_null() {
                     fields.push((id, infer(v)?));
                 }
@@ -204,9 +250,10 @@ fn wire_type(schema: &Schema, ty: &TypeRef, sample: Option<&Value>) -> TType {
             BaseType::I64 => TType::I64,
             BaseType::Double => TType::Double,
             BaseType::String | BaseType::Binary => TType::String,
-            BaseType::Any | BaseType::Void => {
-                sample.and_then(|s| infer(s).ok()).map(|t| t.ttype()).unwrap_or(TType::String)
-            }
+            BaseType::Any | BaseType::Void => sample
+                .and_then(|s| infer(s).ok())
+                .map(|t| t.ttype())
+                .unwrap_or(TType::String),
         },
         TypeRef::List(_) => TType::List,
         TypeRef::Set(_) => TType::Set,
@@ -233,7 +280,9 @@ pub fn decode_struct(schema: &Schema, struct_name: Option<&str>, tv: &TValue) ->
 }
 
 fn decode_with_def(schema: &Schema, def: &StructDef, tv: &TValue) -> Value {
-    let TValue::Struct(fields) = tv else { return decode_raw(tv) };
+    let TValue::Struct(fields) = tv else {
+        return decode_raw(tv);
+    };
     let mut out = Map::new();
     for (fid, v) in fields {
         match def.field_by_id(*fid) {
@@ -253,16 +302,28 @@ pub fn decode_value(schema: &Schema, ty: &TypeRef, tv: &TValue) -> Value {
         (TypeRef::Named(name), _) => match schema.resolve(name) {
             Some(Named::Struct(def)) => decode_with_def(schema, def, tv),
             Some(Named::Enum(def)) => match tv.as_i64() {
-                Some(i) => def.name_of(i as i32).map(|n| Value::String(n.to_string())).unwrap_or(Value::Int(i)),
+                Some(i) => def
+                    .name_of(i as i32)
+                    .map(|n| Value::String(n.to_string()))
+                    .unwrap_or(Value::Int(i)),
                 None => decode_raw(tv),
             },
             None => decode_raw(tv),
         },
-        (TypeRef::List(inner) | TypeRef::Set(inner), TValue::List(_, items) | TValue::Set(_, items)) => {
-            Value::List(items.iter().map(|x| decode_value(schema, inner, x)).collect())
-        }
+        (
+            TypeRef::List(inner) | TypeRef::Set(inner),
+            TValue::List(_, items) | TValue::Set(_, items),
+        ) => Value::List(
+            items
+                .iter()
+                .map(|x| decode_value(schema, inner, x))
+                .collect(),
+        ),
         (TypeRef::Map(kt, vt), TValue::Map(_, _, entries)) => Value::Map(
-            entries.iter().map(|(k, v)| (decode_value(schema, kt, k), decode_value(schema, vt, v))).collect(),
+            entries
+                .iter()
+                .map(|(k, v)| (decode_value(schema, kt, k), decode_value(schema, vt, v)))
+                .collect(),
         ),
         (TypeRef::Base(BaseType::Binary), TValue::Binary(b)) => Value::Binary(b.clone()),
         _ => decode_raw(tv),
@@ -282,16 +343,28 @@ pub fn decode_raw(tv: &TValue) -> Value {
             Ok(s) => Value::String(s.to_string()),
             Err(_) => Value::Binary(b.clone()),
         },
-        TValue::Struct(fields) => Value::Struct(fields.iter().map(|(id, v)| (id.to_string(), decode_raw(v))).collect()),
-        TValue::List(_, items) | TValue::Set(_, items) => Value::List(items.iter().map(decode_raw).collect()),
-        TValue::Map(_, _, entries) => Value::Map(entries.iter().map(|(k, v)| (decode_raw(k), decode_raw(v))).collect()),
+        TValue::Struct(fields) => Value::Struct(
+            fields
+                .iter()
+                .map(|(id, v)| (id.to_string(), decode_raw(v)))
+                .collect(),
+        ),
+        TValue::List(_, items) | TValue::Set(_, items) => {
+            Value::List(items.iter().map(decode_raw).collect())
+        }
+        TValue::Map(_, _, entries) => Value::Map(
+            entries
+                .iter()
+                .map(|(k, v)| (decode_raw(k), decode_raw(v)))
+                .collect(),
+        ),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::thrift::wire::{read_struct, write_struct, Protocol};
+    use crate::thrift::wire::{Protocol, read_struct, write_struct};
     use crate::tv;
 
     #[test]
@@ -311,7 +384,10 @@ mod tests {
         let fields = encode_struct(schema, "sendMessage_args", &args).unwrap();
         assert_eq!(fields[0], (1, TValue::I32(3)));
         let msg = fields[1].1.clone();
-        assert_eq!(msg.field(2).and_then(TValue::as_str), Some("u0123456789abcdef0123456789abcdef"));
+        assert_eq!(
+            msg.field(2).and_then(TValue::as_str),
+            Some("u0123456789abcdef0123456789abcdef")
+        );
         assert_eq!(msg.field(15), Some(&TValue::I32(0)));
 
         let bytes = write_struct(&fields, Protocol::Compact).unwrap();
@@ -319,7 +395,10 @@ mod tests {
         let decoded = decode_struct(schema, Some("sendMessage_args"), &back);
         assert_eq!(decoded["message"]["text"].as_str(), Some("hello"));
         assert_eq!(decoded["message"]["contentType"].as_str(), Some("NONE"));
-        assert_eq!(decoded["message"]["contentMetadata"]["e2eeVersion"].as_str(), Some("2"));
+        assert_eq!(
+            decoded["message"]["contentMetadata"]["e2eeVersion"].as_str(),
+            Some("2")
+        );
     }
 
     #[test]

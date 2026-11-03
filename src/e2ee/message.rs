@@ -8,9 +8,9 @@
 //! for 1:1 chats, or the group shared key and the sender's public key for
 //! groups and rooms.
 
+use super::E2eeContent;
 use super::crypto;
 use super::keys::{E2ee, key_data_of, no_e2ee_key};
-use super::E2eeContent;
 use crate::error::{Error, Result};
 use crate::thrift::{Schema, Value};
 
@@ -65,7 +65,14 @@ pub fn encrypt_payload(
 ) -> Result<Vec<Vec<u8>>> {
     let salt = crypto::random_bytes(16);
     let gcm_key = crypto::sha256_sum(&[shared_secret, &salt, b"Key"]);
-    let aad = crypto::generate_aad(to, from, sender_key_id, receiver_key_id, spec_version, content_type);
+    let aad = crypto::generate_aad(
+        to,
+        from,
+        sender_key_id,
+        receiver_key_id,
+        spec_version,
+        content_type,
+    );
     let nonce = crypto::random_bytes(12);
     let data = serde_json::to_vec(payload)?;
     let enc = crypto::encrypt_aes_gcm(&gcm_key, &nonce, &data, &aad)?;
@@ -79,7 +86,11 @@ pub fn encrypt_payload(
 }
 
 /// Spec v1: AES-256-CBC keyed by `sha256(secret ‖ salt ‖ "Key")`.
-pub fn decrypt_message_v1(chunks: &[Vec<u8>], private_key: &[u8], public_key: &[u8]) -> Result<serde_json::Value> {
+pub fn decrypt_message_v1(
+    chunks: &[Vec<u8>],
+    private_key: &[u8],
+    public_key: &[u8],
+) -> Result<serde_json::Value> {
     let secret = crypto::generate_shared_secret(private_key, public_key);
     let (key, iv) = crypto::derive_key_iv(&secret, &chunks[0]);
     let plain = crypto::decrypt_aes_cbc(&key, &iv, &chunks[1], true)
@@ -125,7 +136,10 @@ impl E2ee<'_> {
         content_type: i32,
         spec_version: i32,
     ) -> Result<Vec<Vec<u8>>> {
-        let from = self.host.self_mid().ok_or_else(|| Error::internal("NotAuthorized", "profile is not loaded"))?;
+        let from = self
+            .host
+            .self_mid()
+            .ok_or_else(|| Error::internal("NotAuthorized", "profile is not loaded"))?;
         let self_key = self.get_self_key(&from).await?;
         let to_type = crate::base::BaseClient::get_to_type(to);
         if !matches!(to_type, Some(0..=2)) {
@@ -140,11 +154,18 @@ impl E2ee<'_> {
                 return Err(Error::internal("Not support E2EE", to));
             }
             let pk = &res["publicKey"];
-            let secret = crypto::generate_shared_secret(&self_key.private_key(), key_data_of(pk, to)?);
-            (super::keys::key_id_of(&pk["keyId"]).unwrap_or_default(), secret)
+            let secret =
+                crypto::generate_shared_secret(&self_key.private_key(), key_data_of(pk, to)?);
+            (
+                super::keys::key_id_of(&pk["keyId"]).unwrap_or_default(),
+                secret,
+            )
         } else {
             let group = self.get_group_key(to, None).await?;
-            (group.key_id, crypto::generate_shared_secret(&group.private_key(), &self_key.public_key()))
+            (
+                group.key_id,
+                crypto::generate_shared_secret(&group.private_key(), &self_key.public_key()),
+            )
         };
         let content_type = content_type as i64;
         let (payload, aad_type) = match content {
@@ -156,14 +177,122 @@ impl E2ee<'_> {
             E2eeContent::Text(text) => (serde_json::json!({"text": text}), 0),
             E2eeContent::Json(data) => (data, content_type),
         };
-        encrypt_payload(sender_key_id, receiver_key_id, &secret, spec_version, &payload, to, &from, aad_type)
+        let chunks = encrypt_payload(
+            sender_key_id,
+            receiver_key_id,
+            &secret,
+            spec_version,
+            &payload,
+            to,
+            &from,
+            aad_type,
+        )?;
+        self.check_sealed(
+            to,
+            &from,
+            &self_key,
+            &chunks,
+            &payload,
+            aad_type,
+            to_type != Some(0),
+        )
+        .await?;
+        Ok(chunks)
+    }
+
+    /// Open `chunks` the way their recipients will before they are sent, so
+    /// a message nobody can read never leaves: recipients derive the secret
+    /// from the public key LINE has registered for our key id, and from the
+    /// group key of the generation named in the envelope, not from what this
+    /// device has stored.
+    #[allow(clippy::too_many_arguments)]
+    async fn check_sealed(
+        &self,
+        to: &str,
+        from: &str,
+        self_key: &super::keys::E2eeKey,
+        chunks: &[Vec<u8>],
+        payload: &serde_json::Value,
+        content_type: i64,
+        group: bool,
+    ) -> Result<()> {
+        let fail =
+            |why: String| Error::Crypto(format!("E2EE self-check failed, message not sent: {why}"));
+        let sender_key_id = crypto::byte2int(&chunks[3]);
+        let receiver_key_id = crypto::byte2int(&chunks[4]);
+        let private_key = self_key.private_key();
+        let confirmed = self
+            .state
+            .confirmed_keys
+            .lock()
+            .unwrap()
+            .contains(&sender_key_id);
+        if !confirmed {
+            match self
+                .check_stored_key_against_server(&sender_key_id.to_string(), &private_key)
+                .await
+            {
+                Some(true) => {
+                    self.state
+                        .confirmed_keys
+                        .lock()
+                        .unwrap()
+                        .insert(sender_key_id);
+                }
+                Some(false) => {
+                    return Err(fail(format!(
+                        "our key {sender_key_id} does not match the one LINE has"
+                    )));
+                }
+                None => {
+                    return Err(fail(format!(
+                        "LINE did not confirm our key {sender_key_id}"
+                    )));
+                }
+            }
+        }
+        let (ecdh_private, ecdh_public) = if group {
+            let key = self
+                .get_group_key(to, Some(receiver_key_id))
+                .await
+                .map_err(|e| fail(e.to_string()))?;
+            (
+                key.private_key(),
+                crypto::public_key_of(&private_key).to_vec(),
+            )
+        } else {
+            let peer = self
+                .get_user_public_key(to, Some(receiver_key_id))
+                .await
+                .map_err(|e| fail(e.to_string()))?;
+            (private_key, peer)
+        };
+        let spec = 2;
+        let opened = decrypt_message_v2(
+            to,
+            from,
+            chunks,
+            &ecdh_private,
+            &ecdh_public,
+            spec,
+            content_type,
+        )
+        .map_err(|e| fail(e.to_string()))?;
+        if &opened != payload {
+            return Err(fail("the payload came back different".into()));
+        }
+        Ok(())
     }
 
     /// Pick our private key and the peer public key for a received or sent
     /// message. For 1:1 chats our generation is pinned by the envelope key id
     /// (falling back to the current key); groups use the shared key of the
     /// generation named by `receiverKeyId`.
-    pub(crate) async fn message_keys(&self, message: &Value, chunks: &[Vec<u8>]) -> Result<MessageKeys> {
+    pub(crate) async fn message_keys(
+        &self,
+        message: &Value,
+        chunks: &[Vec<u8>],
+    ) -> Result<MessageKeys> {
         let mid = self.host.self_mid().unwrap_or_default();
         let from = message["from"].as_str().unwrap_or_default();
         let to = message["to"].as_str().unwrap_or_default();
@@ -172,7 +301,11 @@ impl E2ee<'_> {
         let receiver_key_id = crypto::byte2int(&chunks[4]);
 
         if is_user_to_type(&message["toType"]) {
-            let self_key_id = if is_self { sender_key_id } else { receiver_key_id };
+            let self_key_id = if is_self {
+                sender_key_id
+            } else {
+                receiver_key_id
+            };
             let self_key = match self.get_self_key_by_key_id(self_key_id).await {
                 Some(k) => k,
                 None => self.get_self_key(&mid).await?,
@@ -182,7 +315,10 @@ impl E2ee<'_> {
             } else {
                 self.get_user_public_key(from, Some(sender_key_id)).await?
             };
-            Ok(MessageKeys { private_key: self_key.private_key(), public_key })
+            Ok(MessageKeys {
+                private_key: self_key.private_key(),
+                public_key,
+            })
         } else {
             let self_key = self.get_self_key(&mid).await?;
             let group = self.get_group_key(to, Some(receiver_key_id)).await?;
@@ -191,7 +327,10 @@ impl E2ee<'_> {
             } else {
                 self.get_user_public_key(from, Some(sender_key_id)).await?
             };
-            Ok(MessageKeys { private_key: group.private_key(), public_key })
+            Ok(MessageKeys {
+                private_key: group.private_key(),
+                public_key,
+            })
         }
     }
 
@@ -199,7 +338,10 @@ impl E2ee<'_> {
     pub async fn decrypt_payload(&self, message: &Value) -> Result<serde_json::Value> {
         let chunks = chunks_of(message)?;
         let keys = self.message_keys(message, &chunks).await?;
-        let spec = message["contentMetadata"]["e2eeVersion"].as_str().filter(|s| !s.is_empty()).unwrap_or("2");
+        let spec = message["contentMetadata"]["e2eeVersion"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("2");
         if spec == "2" {
             decrypt_message_v2(
                 message["to"].as_str().unwrap_or_default(),
@@ -225,7 +367,14 @@ impl E2ee<'_> {
             .into_iter()
             .flatten()
             .filter(|(k, _)| k.as_str() != "text")
-            .map(|(k, v)| (k.clone(), v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string())))
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    v.as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| v.to_string()),
+                )
+            })
             .collect();
         Ok((text, meta))
     }
@@ -250,7 +399,10 @@ impl E2ee<'_> {
                     .filter(|(k, _)| !meta.iter().any(|(m, _)| m == k))
                     .map(|(k, v)| (Value::String(k), v.clone()))
                     .collect();
-                entries.extend(meta.into_iter().map(|(k, v)| (Value::String(k), Value::String(v))));
+                entries.extend(
+                    meta.into_iter()
+                        .map(|(k, v)| (Value::String(k), Value::String(v))),
+                );
                 message.insert("text", text);
                 message.insert("contentMetadata", Value::Map(entries));
             }
@@ -281,7 +433,10 @@ mod tests {
 
     fn message(from: &str, to: &str, content_type: &str, sender: i64, receiver: i64) -> Value {
         let mut m = tv!({"from": from, "to": to, "toType": "USER", "contentType": content_type});
-        m.insert("contentMetadata", Value::Map(vec![("e2eeVersion".into(), "2".into())]));
+        m.insert(
+            "contentMetadata",
+            Value::Map(vec![("e2eeVersion".into(), "2".into())]),
+        );
         let chunks = vec![
             Value::Binary(vec![0; 16]),
             Value::Binary(vec![0; 64]),
@@ -294,18 +449,21 @@ mod tests {
     }
 
     fn key_json(private: &[u8]) -> String {
-        serde_json::json!({"privKey": b64(private), "pubKey": b64(&crypto::public_key_of(private))}).to_string()
+        serde_json::json!({"privKey": b64(private), "pubKey": b64(&crypto::public_key_of(private))})
+            .to_string()
     }
 
     /// Storage with self keys 9/11 (or 7/11), the latest alias, and peer keys.
     async fn fixture(by_id: &[(i64, u8)], latest: u8) -> FakeHost {
         let host = FakeHost::new();
         for &(id, fill) in by_id {
-            host.set(&format!("e2eeKeys:{id}"), key_json(&[fill; 32])).await;
+            host.set(&format!("e2eeKeys:{id}"), key_json(&[fill; 32]))
+                .await;
         }
         host.set("e2eeKeys:u-self", key_json(&[latest; 32])).await;
         for (id, fill) in [(7, 0x70u8), (11, 0x71)] {
-            host.set(&format!("e2eePublicKeys:u-them:{id}"), b64(&[fill; 32])).await;
+            host.set(&format!("e2eePublicKeys:u-them:{id}"), b64(&[fill; 32]))
+                .await;
         }
         host
     }
@@ -313,7 +471,10 @@ mod tests {
     async fn keys_for(host: &FakeHost, m: &Value) -> MessageKeys {
         let state = E2eeState::default();
         let chunks = chunks_of(m).unwrap();
-        E2ee::new(host, &state).message_keys(m, &chunks).await.unwrap()
+        E2ee::new(host, &state)
+            .message_keys(m, &chunks)
+            .await
+            .unwrap()
     }
 
     // --- key_selection.test.ts / location_decrypt.test.ts -------------------
@@ -359,11 +520,66 @@ mod tests {
         let mut host = FakeHost::new();
         let (self_priv, self_pub) = crypto::generate_key_pair();
         let (peer_priv, peer_pub) = crypto::generate_key_pair();
-        let key = serde_json::json!({"keyId": 1, "privKey": b64(&self_priv), "pubKey": b64(&self_pub)}).to_string();
+        let key =
+            serde_json::json!({"keyId": 1, "privKey": b64(&self_priv), "pubKey": b64(&self_pub)})
+                .to_string();
         host.set("e2eeKeys:1", key.clone()).await;
         host.set("e2eeKeys:u-self", key).await;
         host.negotiate.insert("u-them".into(), (2, peer_pub));
+        host.public_keys = Some(vec![registered(1, &self_pub)]);
         (host, peer_priv)
+    }
+
+    /// A `getE2EEPublicKeys` entry: what LINE has registered for our key id.
+    fn registered(key_id: i64, public_key: &[u8]) -> Value {
+        let mut raw = tv!({"2": key_id});
+        raw.insert("4", Value::Binary(public_key.to_vec()));
+        raw
+    }
+
+    #[tokio::test]
+    async fn send_refuses_a_key_line_does_not_have() {
+        let (mut host, _) = pair().await;
+        // LINE has another public key for our key id 1, so recipients would
+        // derive a different secret and could not open the message.
+        let (_, other_pub) = crypto::generate_key_pair();
+        host.public_keys = Some(vec![registered(1, &other_pub)]);
+        let state = E2eeState::default();
+        let err = E2ee::new(&host, &state)
+            .encrypt_message("u-them", E2eeContent::Text("hi".into()), 0, 2)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("does not match"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn send_refuses_when_line_does_not_list_our_key() {
+        let (mut host, _) = pair().await;
+        host.public_keys = Some(vec![]);
+        let state = E2eeState::default();
+        let err = E2ee::new(&host, &state)
+            .encrypt_message("u-them", E2eeContent::Text("hi".into()), 0, 2)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("did not confirm"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn confirmed_key_is_checked_with_line_once() {
+        let (host, _) = pair().await;
+        let state = E2eeState::default();
+        let e2ee = E2ee::new(&host, &state);
+        for _ in 0..3 {
+            e2ee.encrypt_message("u-them", E2eeContent::Text("hi".into()), 0, 2)
+                .await
+                .unwrap();
+        }
+        let asked = host
+            .calls()
+            .iter()
+            .filter(|(name, _)| name.contains("ublicKeys"))
+            .count();
+        assert_eq!(asked, 1);
     }
 
     #[tokio::test]
@@ -371,13 +587,19 @@ mod tests {
         let (host, _) = pair().await;
         let state = E2eeState::default();
         let e2ee = E2ee::new(&host, &state);
-        let chunks = e2ee.encrypt_message("u-them", E2eeContent::Text("hello".into()), 0, 2).await.unwrap();
+        let chunks = e2ee
+            .encrypt_message("u-them", E2eeContent::Text("hello".into()), 0, 2)
+            .await
+            .unwrap();
         assert_eq!(chunks.len(), 5);
         assert_eq!(crypto::byte2int(&chunks[3]), 1);
         assert_eq!(crypto::byte2int(&chunks[4]), 2);
 
         let mut m = message("u-self", "u-them", "NONE", 1, 2);
-        m.insert("chunks", Value::List(chunks.into_iter().map(Value::Binary).collect()));
+        m.insert(
+            "chunks",
+            Value::List(chunks.into_iter().map(Value::Binary).collect()),
+        );
         let out = e2ee.decrypt_message(m).await.unwrap();
         assert_eq!(out["text"].as_str(), Some("hello"));
         assert_eq!(out["contentMetadata"]["e2eeVersion"].as_str(), Some("2"));
@@ -386,16 +608,25 @@ mod tests {
     #[tokio::test]
     async fn location_round_trip_from_peer() {
         let (host, peer_priv) = pair().await;
-        let self_key = host.storage.get_string("e2eeKeys:1").await.unwrap().unwrap();
+        let self_key = host
+            .storage
+            .get_string("e2eeKeys:1")
+            .await
+            .unwrap()
+            .unwrap();
         let self_key: serde_json::Value = serde_json::from_str(&self_key).unwrap();
         let self_pub = crypto::decode_base64(self_key["pubKey"].as_str().unwrap());
         // The peer encrypts to us with its key 2 → our key 1.
         let secret = crypto::generate_shared_secret(&peer_priv, &self_pub);
-        let loc = serde_json::json!({"location": {"title": "here", "latitude": 1.5, "longitude": 2.0}});
+        let loc =
+            serde_json::json!({"location": {"title": "here", "latitude": 1.5, "longitude": 2.0}});
         let chunks = encrypt_payload(2, 1, &secret, 2, &loc, "u-self", "u-them", LOCATION).unwrap();
 
         let mut m = message("u-them", "u-self", "LOCATION", 2, 1);
-        m.insert("chunks", Value::List(chunks.into_iter().map(Value::Binary).collect()));
+        m.insert(
+            "chunks",
+            Value::List(chunks.into_iter().map(Value::Binary).collect()),
+        );
         let state = E2eeState::default();
         let out = E2ee::new(&host, &state).decrypt_message(m).await.unwrap();
         assert_eq!(out["location"]["title"].as_str(), Some("here"));
@@ -418,6 +649,12 @@ mod tests {
         let host = FakeHost::new();
         let state = E2eeState::default();
         let m = tv!({"from": "u-them", "to": "u-self", "text": "plain", "contentType": "NONE"});
-        assert_eq!(E2ee::new(&host, &state).decrypt_message(m.clone()).await.unwrap(), m);
+        assert_eq!(
+            E2ee::new(&host, &state)
+                .decrypt_message(m.clone())
+                .await
+                .unwrap(),
+            m
+        );
     }
 }

@@ -40,7 +40,10 @@ pub enum Error {
 
 impl Error {
     pub fn internal(kind: impl Into<String>, message: impl Into<String>) -> Self {
-        Error::Internal { kind: kind.into(), message: message.into() }
+        Error::Internal {
+            kind: kind.into(),
+            message: message.into(),
+        }
     }
 
     /// The `code` field of a server exception, if this is one.

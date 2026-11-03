@@ -37,7 +37,11 @@ pub struct TranslateText {
 
 impl TranslateText {
     pub fn new(text: impl Into<String>, target_lang: impl Into<String>) -> Self {
-        Self { text: text.into(), source_lang: None, target_lang: target_lang.into() }
+        Self {
+            text: text.into(),
+            source_lang: None,
+            target_lang: target_lang.into(),
+        }
     }
 
     fn fields(&self) -> Map<String, Json> {
@@ -54,7 +58,14 @@ impl TranslateText {
 fn request_id() -> String {
     let b: [u8; 16] = rand::random();
     let h = hex::encode_upper(b);
-    format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
+    format!(
+        "{}-{}-{}-{}-{}",
+        &h[0..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..32]
+    )
 }
 
 fn finish(mut m: Map<String, Json>, id: String) -> Json {
@@ -72,7 +83,10 @@ pub fn translate_body(t: &TranslateText, id: String) -> Json {
 /// Body of `legyTransListAPI.nhn`: `{input: [...], xMode, id, service}`.
 pub fn translate_list_body(items: &[TranslateText], id: String) -> Json {
     let mut m = Map::new();
-    m.insert("input".into(), Json::Array(items.iter().map(|t| Json::Object(t.fields())).collect()));
+    m.insert(
+        "input".into(),
+        Json::Array(items.iter().map(|t| Json::Object(t.fields())).collect()),
+    );
     finish(m, id)
 }
 
@@ -88,13 +102,31 @@ fn request(path: &str, body: Json, client_channel: Option<&str>) -> RestRequest 
 
 impl RestClient {
     /// Translate one text; the result's `translatedText` holds the output.
-    pub async fn translate(&self, text: &TranslateText, client_channel: Option<&str>) -> Result<Json> {
-        self.send(request(TRANSLATE, translate_body(text, request_id()), client_channel)).await
+    pub async fn translate(
+        &self,
+        text: &TranslateText,
+        client_channel: Option<&str>,
+    ) -> Result<Json> {
+        self.send(request(
+            TRANSLATE,
+            translate_body(text, request_id()),
+            client_channel,
+        ))
+        .await
     }
 
     /// Translate several texts in one request.
-    pub async fn translate_list(&self, items: &[TranslateText], client_channel: Option<&str>) -> Result<Json> {
-        self.send(request(TRANSLATE_LIST, translate_list_body(items, request_id()), client_channel)).await
+    pub async fn translate_list(
+        &self,
+        items: &[TranslateText],
+        client_channel: Option<&str>,
+    ) -> Result<Json> {
+        self.send(request(
+            TRANSLATE_LIST,
+            translate_list_body(items, request_id()),
+            client_channel,
+        ))
+        .await
     }
 }
 
@@ -111,7 +143,10 @@ mod tests {
         );
         t.source_lang = Some("en".into());
         let b = translate_list_body(&[t.clone(), TranslateText::new("x", "th")], "ID".into());
-        assert_eq!(b["input"][0], serde_json::json!({"originalText": "hello", "sLang": "en", "tLang": "ja"}));
+        assert_eq!(
+            b["input"][0],
+            serde_json::json!({"originalText": "hello", "sLang": "en", "tLang": "ja"})
+        );
         assert_eq!(b["input"][1]["tLang"], "th");
         assert_eq!(b["service"], "talk");
         let id = request_id();

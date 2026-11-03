@@ -40,7 +40,9 @@ pub fn host_ok(host: Option<&str>, port: u16) -> bool {
 /// When present, `Origin` must be this server.
 pub fn origin_ok(origin: Option<&str>, port: u16) -> bool {
     let Some(origin) = origin else { return true };
-    let Some(rest) = origin.strip_prefix("http://") else { return false };
+    let Some(rest) = origin.strip_prefix("http://") else {
+        return false;
+    };
     host_ok(Some(rest), port)
 }
 
@@ -108,8 +110,22 @@ mod tests {
         assert!(!authorized(S, 7878, h, None, Some("abc124"), None));
         assert!(!authorized(S, 7878, h, None, None, Some("k=abc12")));
         // right secret, wrong host (DNS rebinding)
-        assert!(!authorized(S, 7878, Some("rebind.example:7878"), None, Some(S), None));
+        assert!(!authorized(
+            S,
+            7878,
+            Some("rebind.example:7878"),
+            None,
+            Some(S),
+            None
+        ));
         // right secret, foreign origin
-        assert!(!authorized(S, 7878, h, Some("http://evil.example"), Some(S), None));
+        assert!(!authorized(
+            S,
+            7878,
+            h,
+            Some("http://evil.example"),
+            Some(S),
+            None
+        ));
     }
 }

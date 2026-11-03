@@ -42,7 +42,13 @@ pub struct RequestOptions<'a> {
 
 impl<'a> RequestOptions<'a> {
     pub fn new(path: &'a str, protocol: Protocol) -> Self {
-        Self { path, protocol, parse: Parse::Result, headers: Vec::new(), timeout: None }
+        Self {
+            path,
+            protocol,
+            parse: Parse::Result,
+            headers: Vec::new(),
+            timeout: None,
+        }
     }
     pub fn parse(mut self, p: Parse<'a>) -> Self {
         self.parse = p;
@@ -71,7 +77,18 @@ pub fn exception_type(path: &str) -> &'static str {
 fn is_legy_talk_path(path: &str) -> bool {
     matches!(
         path,
-        "/S3" | "/S4" | "/V4" | "/SYNC3" | "/SYNC4" | "/P4" | "/P5" | "/NP4" | "/NP5" | "/C5" | "/CA5" | "/ECA5"
+        "/S3"
+            | "/S4"
+            | "/V4"
+            | "/SYNC3"
+            | "/SYNC4"
+            | "/P4"
+            | "/P5"
+            | "/NP4"
+            | "/NP5"
+            | "/C5"
+            | "/CA5"
+            | "/ECA5"
     )
 }
 
@@ -85,7 +102,10 @@ pub struct RawResponse {
 
 impl RawResponse {
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
     }
 }
 
@@ -95,8 +115,14 @@ impl BaseClient {
         let mut h = vec![
             ("accept".to_string(), "application/x-thrift".to_string()),
             ("user-agent".to_string(), self.device_details.user_agent()),
-            ("x-line-application".to_string(), self.device_details.application()),
-            ("content-type".to_string(), "application/x-thrift".to_string()),
+            (
+                "x-line-application".to_string(),
+                self.device_details.application(),
+            ),
+            (
+                "content-type".to_string(),
+                "application/x-thrift".to_string(),
+            ),
             ("x-lal".to_string(), "ja_JP".to_string()),
             ("x-lpv".to_string(), "1".to_string()),
             ("x-lhm".to_string(), method.to_string()),
@@ -111,22 +137,43 @@ impl BaseClient {
     /// Call a method with schema-encoded args: `args` is encoded as the IDL
     /// struct `<method>_args` and the reply decoded as `<method>_result`.
     /// Returns the `success` value (or `Null` for void methods).
-    pub async fn call(&self, method: &str, args: impl Into<Value>, path: &str, protocol: Protocol) -> Result<Value> {
-        self.call_with(method, args, RequestOptions::new(path, protocol)).await
+    pub async fn call(
+        &self,
+        method: &str,
+        args: impl Into<Value>,
+        path: &str,
+        protocol: Protocol,
+    ) -> Result<Value> {
+        self.call_with(method, args, RequestOptions::new(path, protocol))
+            .await
     }
 
-    pub async fn call_with(&self, method: &str, args: impl Into<Value>, opts: RequestOptions<'_>) -> Result<Value> {
+    pub async fn call_with(
+        &self,
+        method: &str,
+        args: impl Into<Value>,
+        opts: RequestOptions<'_>,
+    ) -> Result<Value> {
         let schema = Schema::line();
         let square = SQUARE_PATHS.contains(&opts.path);
         let prefixed = format!("SquareService_{method}_args");
         let plain = format!("{method}_args");
-        let name = if square && schema.get_struct(&prefixed).is_some() { prefixed } else { plain };
+        let name = if square && schema.get_struct(&prefixed).is_some() {
+            prefixed
+        } else {
+            plain
+        };
         let fields = thrift::encode_struct(schema, &name, &args.into())?;
         self.request(fields, method, opts).await
     }
 
     /// Send pre-encoded args (the `NestedArray` style API).
-    pub async fn request(&self, args: Vec<(i16, TValue)>, method: &str, opts: RequestOptions<'_>) -> Result<Value> {
+    pub async fn request(
+        &self,
+        args: Vec<(i16, TValue)>,
+        method: &str,
+        opts: RequestOptions<'_>,
+    ) -> Result<Value> {
         self.ensure_enabled()?;
         if opts.path != TOKEN_REFRESH_PATH {
             self.refresh_token_if_due().await;
@@ -138,7 +185,11 @@ impl BaseClient {
         loop {
             let sent_token = self.auth_token();
             match self.request_once(&args, method, &opts).await {
-                Err(e) if !refreshed && !is_refresh_call && e.code() == Some("MUST_REFRESH_V3_TOKEN") => {
+                Err(e)
+                    if !refreshed
+                        && !is_refresh_call
+                        && e.code() == Some("MUST_REFRESH_V3_TOKEN") =>
+                {
                     if self.storage.get_string("refreshToken").await?.is_none() {
                         return Err(e);
                     }
@@ -166,8 +217,14 @@ impl BaseClient {
             return Ok(());
         }
         Err(match self.kicked_out() {
-            Some(reason) => Error::internal("LoggedOut", format!("Request aborted: session ended by server ({reason})")),
-            None => Error::internal("ClientClosed", "Request aborted: client has been disabled (logged out)"),
+            Some(reason) => Error::internal(
+                "LoggedOut",
+                format!("Request aborted: session ended by server ({reason})"),
+            ),
+            None => Error::internal(
+                "ClientClosed",
+                "Request aborted: client has been disabled (logged out)",
+            ),
         })
     }
 
@@ -179,7 +236,8 @@ impl BaseClient {
             return;
         }
         let margin = self.config.refresh_margin.as_secs() as i64;
-        let due = |exp: Option<i64>| exp.is_some_and(|exp| crate::base::session_now() + margin >= exp);
+        let due =
+            |exp: Option<i64>| exp.is_some_and(|exp| crate::base::session_now() + margin >= exp);
         if !due(self.token_expire().await.ok().flatten()) {
             return;
         }
@@ -206,7 +264,12 @@ impl BaseClient {
         self.try_refresh_token_unlocked().await
     }
 
-    async fn request_once(&self, args: &[(i16, TValue)], method: &str, opts: &RequestOptions<'_>) -> Result<Value> {
+    async fn request_once(
+        &self,
+        args: &[(i16, TValue)],
+        method: &str,
+        opts: &RequestOptions<'_>,
+    ) -> Result<Value> {
         let body = thrift::write_message(method, args, opts.protocol)?;
         let mut headers = self.line_headers("POST");
         for (k, v) in &opts.headers {
@@ -215,9 +278,13 @@ impl BaseClient {
         }
         let timeout = opts.timeout.unwrap_or(self.config.timeout);
         tracing::trace!(method, path = opts.path, "request");
-        let sent_access =
-            headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("x-line-access")).map(|(_, v)| v.clone());
-        let res = self.send_http(opts.path, "POST", headers, body, timeout).await?;
+        let sent_access = headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("x-line-access"))
+            .map(|(_, v)| v.clone());
+        let res = self
+            .send_http(opts.path, "POST", headers, body, timeout)
+            .await?;
         if let Some(next) = res.header("x-line-next-access") {
             self.apply_next_access(sent_access.as_deref(), next);
         }
@@ -235,33 +302,60 @@ impl BaseClient {
         self.interpret_result(method, opts, &msg)
     }
 
-    fn interpret_result(&self, method: &str, opts: &RequestOptions<'_>, msg: &thrift::TMessage) -> Result<Value> {
+    fn interpret_result(
+        &self,
+        method: &str,
+        opts: &RequestOptions<'_>,
+        msg: &thrift::TMessage,
+    ) -> Result<Value> {
         let schema = Schema::line();
-        let TValue::Struct(fields) = &msg.body else { unreachable!("read_message returns a struct") };
+        let TValue::Struct(fields) = &msg.body else {
+            unreachable!("read_message returns a struct")
+        };
         let success = msg.body.field(0);
         let exception = fields.iter().find(|(id, _)| *id != 0);
 
         let result_def = {
-            let name = if msg.name.is_empty() { method } else { &msg.name };
+            let name = if msg.name.is_empty() {
+                method
+            } else {
+                &msg.name
+            };
             let square = SQUARE_PATHS.contains(&opts.path);
             let pre = format!("SquareService_{name}_result");
-            if square && schema.get_struct(&pre).is_some() { pre } else { format!("{name}_result") }
+            if square && schema.get_struct(&pre).is_some() {
+                pre
+            } else {
+                format!("{name}_result")
+            }
         };
 
         if let Some((fid, exc)) = exception {
             let data = match opts.parse {
-                Parse::Result => match schema.get_struct(&result_def).and_then(|d| d.field_by_id(*fid)) {
+                Parse::Result => match schema
+                    .get_struct(&result_def)
+                    .and_then(|d| d.field_by_id(*fid))
+                {
                     Some(f) => thrift::decode_value(schema, &f.ty, exc),
                     None => thrift::decode_struct(schema, Some(exception_type(opts.path)), exc),
                 },
                 _ => thrift::decode_struct(schema, Some(exception_type(opts.path)), exc),
             };
-            return Err(Error::Request { method: method.to_string(), path: opts.path.to_string(), data });
+            return Err(Error::Request {
+                method: method.to_string(),
+                path: opts.path.to_string(),
+                data,
+            });
         }
 
-        let Some(success) = success else { return Ok(Value::Null) };
+        let Some(success) = success else {
+            return Ok(Value::Null);
+        };
         Ok(match opts.parse {
-            Parse::Result => match schema.get_struct(&result_def).and_then(|d| d.field_by_id(0)) {
+            Parse::Result => match schema
+                .get_struct(&result_def)
+                .and_then(|d| d.field_by_id(0))
+            {
                 Some(f) => thrift::decode_value(schema, &f.ty, success),
                 None => thrift::decode_raw(success),
             },
@@ -280,7 +374,8 @@ impl BaseClient {
         body: Vec<u8>,
         timeout: Duration,
     ) -> Result<RawResponse> {
-        self.send_http_inner(path, method, headers, body, timeout, true).await
+        self.send_http_inner(path, method, headers, body, timeout, true)
+            .await
     }
 
     /// Like [`send_http`](Self::send_http) but never uses the LEGY encrypted
@@ -294,7 +389,8 @@ impl BaseClient {
         body: Vec<u8>,
         timeout: Duration,
     ) -> Result<RawResponse> {
-        self.send_http_inner(path, method, headers, body, timeout, false).await
+        self.send_http_inner(path, method, headers, body, timeout, false)
+            .await
     }
 
     async fn send_http_inner(
@@ -306,20 +402,37 @@ impl BaseClient {
         timeout: Duration,
         allow_legy: bool,
     ) -> Result<RawResponse> {
-        let access = headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("x-line-access")).map(|(_, v)| v.clone());
+        let access = headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("x-line-access"))
+            .map(|(_, v)| v.clone());
         let use_legy = match self.legy_mode {
             _ if !allow_legy => false,
             LegyMode::Never => false,
             _ if access.is_none() => false,
             LegyMode::Always => true,
-            LegyMode::Auto => is_legy_talk_path(path) && auth_token::should_use_legy_encrypted_access(access.as_deref()),
+            LegyMode::Auto => {
+                is_legy_talk_path(path)
+                    && auth_token::should_use_legy_encrypted_access(access.as_deref())
+            }
         };
         if use_legy {
             let transport = self.legy_transport();
-            let enc = transport.encrypt_request(&legy::LegyRequest { path, access_token: access.as_deref(), body: &body });
-            let mut req = self.http.post(&transport.endpoint).timeout(timeout).body(enc);
-            for (k, v) in transport.outer_headers(&self.device_details.application(), &self.device_details.user_agent(), method)
-            {
+            let enc = transport.encrypt_request(&legy::LegyRequest {
+                path,
+                access_token: access.as_deref(),
+                body: &body,
+            });
+            let mut req = self
+                .http
+                .post(&transport.endpoint)
+                .timeout(timeout)
+                .body(enc);
+            for (k, v) in transport.outer_headers(
+                &self.device_details.application(),
+                &self.device_details.user_agent(),
+                method,
+            ) {
                 req = req.header(k, v);
             }
             let res = req.send().await?;
@@ -331,7 +444,11 @@ impl BaseClient {
                 out_headers.retain(|(hk, _)| !hk.eq_ignore_ascii_case(&k));
                 out_headers.push((k, v));
             }
-            return Ok(RawResponse { status: dec.status, headers: out_headers, body: dec.body });
+            return Ok(RawResponse {
+                status: dec.status,
+                headers: out_headers,
+                body: dec.body,
+            });
         }
         let m = reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::POST);
         // Fail over to the next host only when the connection could not be
@@ -356,11 +473,19 @@ impl BaseClient {
         let status = res.status().as_u16();
         let headers = collect_headers(res.headers());
         let body = res.bytes().await?.to_vec();
-        Ok(RawResponse { status, headers, body })
+        Ok(RawResponse {
+            status,
+            headers,
+            body,
+        })
     }
 
     /// `GET https://{endpoint}{path}` with LINE headers, parsed as JSON.
-    pub(crate) async fn get_json(&self, path: &str, headers: Vec<(String, String)>) -> Result<serde_json::Value> {
+    pub(crate) async fn get_json(
+        &self,
+        path: &str,
+        headers: Vec<(String, String)>,
+    ) -> Result<serde_json::Value> {
         let url = endpoint_url(self.current_endpoint(), path);
         let mut req = self.http.get(url).timeout(self.config.long_timeout);
         for (k, v) in headers {
@@ -401,7 +526,10 @@ impl BaseClient {
             if let Some(rt) = res["refreshToken"].as_str() {
                 self.storage.set("refreshToken", rt.into()).await?;
             }
-            if let (Some(a), Some(b)) = (res["tokenIssueTimeEpochSec"].as_i64(), res["durationUntilRefreshInSec"].as_i64()) {
+            if let (Some(a), Some(b)) = (
+                res["tokenIssueTimeEpochSec"].as_i64(),
+                res["durationUntilRefreshInSec"].as_i64(),
+            ) {
                 self.set_token_expire(a + b).await?;
             }
             if self.config.report_refreshed_token {
@@ -418,7 +546,10 @@ impl BaseClient {
                     )
                     .await;
                 if let Err(e) = report {
-                    self.log("ReportRefreshedAccessTokenError", serde_json::json!({"error": e.to_string()}));
+                    self.log(
+                        "ReportRefreshedAccessTokenError",
+                        serde_json::json!({"error": e.to_string()}),
+                    );
                 }
             }
             Ok(())
@@ -448,13 +579,24 @@ impl BaseClient {
 }
 
 fn collect_headers(h: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
-    h.iter().map(|(k, v)| (k.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).into_owned())).collect()
+    h.iter()
+        .map(|(k, v)| {
+            (
+                k.as_str().to_string(),
+                String::from_utf8_lossy(v.as_bytes()).into_owned(),
+            )
+        })
+        .collect()
 }
 
 /// `https://{host}{path}`; a host given with a scheme
 /// (`http://127.0.0.1:8080`) is used as is.
 pub(crate) fn endpoint_url(host: &str, path: &str) -> String {
-    if host.contains("://") { format!("{}{path}", host.trim_end_matches('/')) } else { format!("https://{host}{path}") }
+    if host.contains("://") {
+        format!("{}{path}", host.trim_end_matches('/'))
+    } else {
+        format!("https://{host}{path}")
+    }
 }
 
 #[cfg(test)]

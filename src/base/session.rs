@@ -45,7 +45,9 @@ impl LogoutReason {
     pub fn as_str(&self) -> &str {
         match self {
             LogoutReason::NotAuthorizedDevice => "NOT_AUTHORIZED_DEVICE",
-            LogoutReason::AuthenticationDivestedByOtherDevice => "AUTHENTICATION_DIVESTED_BY_OTHER_DEVICE",
+            LogoutReason::AuthenticationDivestedByOtherDevice => {
+                "AUTHENTICATION_DIVESTED_BY_OTHER_DEVICE"
+            }
             LogoutReason::Expired => "EXPIRED",
             LogoutReason::LogOut => "LOG_OUT",
             LogoutReason::Revoke => "REVOKE",
@@ -61,7 +63,9 @@ impl LogoutReason {
     pub fn from_name(name: &str) -> Option<Self> {
         Some(match name {
             "NOT_AUTHORIZED_DEVICE" => LogoutReason::NotAuthorizedDevice,
-            "AUTHENTICATION_DIVESTED_BY_OTHER_DEVICE" => LogoutReason::AuthenticationDivestedByOtherDevice,
+            "AUTHENTICATION_DIVESTED_BY_OTHER_DEVICE" => {
+                LogoutReason::AuthenticationDivestedByOtherDevice
+            }
             "EXPIRED" => LogoutReason::Expired,
             "LOG_OUT" => LogoutReason::LogOut,
             "REVOKE" => LogoutReason::Revoke,
@@ -79,20 +83,25 @@ impl LogoutReason {
     /// matched (`EXPIRED`, `LOG_OUT` and `REVOKE` are too generic: an
     /// expired invitation ticket must not end the session).
     pub fn from_error(e: &Error) -> Option<Self> {
-        let Error::Request { data, .. } = e else { return None };
-        [data["code"].as_str(), data["reason"].as_str()].into_iter().flatten().find_map(|name| {
-            Self::from_name(name).filter(|r| {
-                matches!(
-                    r,
-                    LogoutReason::NotAuthorizedDevice
-                        | LogoutReason::AuthenticationDivestedByOtherDevice
-                        | LogoutReason::V3TokenClientLoggedOut
-                        | LogoutReason::DeviceLose
-                        | LogoutReason::IdentifyModified
-                        | LogoutReason::DeletedAccount
-                )
+        let Error::Request { data, .. } = e else {
+            return None;
+        };
+        [data["code"].as_str(), data["reason"].as_str()]
+            .into_iter()
+            .flatten()
+            .find_map(|name| {
+                Self::from_name(name).filter(|r| {
+                    matches!(
+                        r,
+                        LogoutReason::NotAuthorizedDevice
+                            | LogoutReason::AuthenticationDivestedByOtherDevice
+                            | LogoutReason::V3TokenClientLoggedOut
+                            | LogoutReason::DeviceLose
+                            | LogoutReason::IdentifyModified
+                            | LogoutReason::DeletedAccount
+                    )
+                })
             })
-        })
     }
 }
 
@@ -118,7 +127,11 @@ pub struct ProxyConfig {
 
 impl ProxyConfig {
     pub fn new(url: impl Into<String>) -> Self {
-        Self { url: url.into(), username: None, password: None }
+        Self {
+            url: url.into(),
+            username: None,
+            password: None,
+        }
     }
 
     /// `socks5h://host:port` (hostnames resolved by the proxy).
@@ -144,9 +157,11 @@ impl ProxyConfig {
     /// The proxy URL with credentials embedded (how reqwest takes SOCKS
     /// credentials).
     fn url_with_credentials(&self) -> Result<String> {
-        let mut u = url::Url::parse(&self.url).map_err(|e| Error::internal("ProxyConfig", e.to_string()))?;
+        let mut u = url::Url::parse(&self.url)
+            .map_err(|e| Error::internal("ProxyConfig", e.to_string()))?;
         if let Some(user) = &self.username {
-            u.set_username(user).map_err(|_| Error::internal("ProxyConfig", "cannot set proxy username"))?;
+            u.set_username(user)
+                .map_err(|_| Error::internal("ProxyConfig", "cannot set proxy username"))?;
             u.set_password(self.password.as_deref())
                 .map_err(|_| Error::internal("ProxyConfig", "cannot set proxy password"))?;
         }
@@ -168,7 +183,10 @@ impl ProxyConfig {
 
 /// Current Unix time in seconds.
 pub(crate) fn now_epoch_sec() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -190,7 +208,10 @@ mod tests {
             Some(LogoutReason::NotAuthorizedDevice)
         );
         assert_eq!(
-            LogoutReason::from_error(&talk_err("AUTHENTICATION_FAILED", "V3_TOKEN_CLIENT_LOGGED_OUT")),
+            LogoutReason::from_error(&talk_err(
+                "AUTHENTICATION_FAILED",
+                "V3_TOKEN_CLIENT_LOGGED_OUT"
+            )),
             Some(LogoutReason::V3TokenClientLoggedOut)
         );
         assert_eq!(
@@ -198,20 +219,41 @@ mod tests {
             Some(LogoutReason::AuthenticationDivestedByOtherDevice)
         );
         // Generic names are not treated as a kick-out.
-        assert_eq!(LogoutReason::from_error(&talk_err("NOT_FOUND", "EXPIRED")), None);
-        assert_eq!(LogoutReason::from_error(&talk_err("MUST_REFRESH_V3_TOKEN", "")), None);
+        assert_eq!(
+            LogoutReason::from_error(&talk_err("NOT_FOUND", "EXPIRED")),
+            None
+        );
+        assert_eq!(
+            LogoutReason::from_error(&talk_err("MUST_REFRESH_V3_TOKEN", "")),
+            None
+        );
         assert_eq!(LogoutReason::from_error(&Error::internal("x", "y")), None);
-        let numeric = Error::Request { method: "m".into(), path: "/S4".into(), data: crate::tv!({"code": 8}) };
+        let numeric = Error::Request {
+            method: "m".into(),
+            path: "/S4".into(),
+            data: crate::tv!({"code": 8}),
+        };
         assert_eq!(LogoutReason::from_error(&numeric), None);
-        assert_eq!(LogoutReason::from_name("DEVICE_LOSE").unwrap().to_string(), "DEVICE_LOSE");
+        assert_eq!(
+            LogoutReason::from_name("DEVICE_LOSE").unwrap().to_string(),
+            "DEVICE_LOSE"
+        );
     }
 
     #[test]
     fn proxy_config() {
         let p = ProxyConfig::socks5("127.0.0.1:1080").auth("user", "p@ss");
-        assert_eq!(p.url_with_credentials().unwrap(), "socks5h://user:p%40ss@127.0.0.1:1080");
+        assert_eq!(
+            p.url_with_credentials().unwrap(),
+            "socks5h://user:p%40ss@127.0.0.1:1080"
+        );
         assert!(p.to_reqwest().is_ok());
-        assert!(ProxyConfig::http("proxy.local:3128").auth("a", "b").to_reqwest().is_ok());
+        assert!(
+            ProxyConfig::http("proxy.local:3128")
+                .auth("a", "b")
+                .to_reqwest()
+                .is_ok()
+        );
         assert!(ProxyConfig::new("not a url").to_reqwest().is_err());
     }
 }

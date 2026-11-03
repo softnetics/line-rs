@@ -7,8 +7,9 @@ use std::time::Duration;
 use indexmap::IndexMap;
 
 use self::compact::{
-    COMPACT_E2EE_MESSAGE_ENDPOINT, COMPACT_PLAIN_MESSAGE_ENDPOINT, CompactMessageProtocolError, CompactMessageResponse,
-    MSG_TYPE_E2EE, decode_compact_message_response, pack_compact_e2ee_message, pack_compact_plain_message,
+    COMPACT_E2EE_MESSAGE_ENDPOINT, COMPACT_PLAIN_MESSAGE_ENDPOINT, CompactMessageProtocolError,
+    CompactMessageResponse, MSG_TYPE_E2EE, decode_compact_message_response,
+    pack_compact_e2ee_message, pack_compact_plain_message,
 };
 use super::{TalkService, rename_raw};
 use crate::base::ClientEvent;
@@ -50,7 +51,11 @@ pub struct SendMessageOptions {
 impl SendMessageOptions {
     /// A plain text message.
     pub fn text(to: impl Into<String>, text: impl Into<String>) -> Self {
-        Self { to: to.into(), text: Some(text.into()), ..Default::default() }
+        Self {
+            to: to.into(),
+            text: Some(text.into()),
+            ..Default::default()
+        }
     }
 }
 
@@ -88,15 +93,20 @@ pub struct GetChatsOptions {
 /// Number of a `ContentType` given as a variant name or number.
 fn content_type_number(v: &Value) -> i32 {
     match v {
-        Value::String(s) => {
-            Schema::line().get_enum("ContentType").and_then(|e| e.value_of(s)).or_else(|| s.parse().ok()).unwrap_or(0)
-        }
+        Value::String(s) => Schema::line()
+            .get_enum("ContentType")
+            .and_then(|e| e.value_of(s))
+            .or_else(|| s.parse().ok())
+            .unwrap_or(0),
         other => other.as_i64().unwrap_or(0) as i32,
     }
 }
 
 fn string_list(items: &[String]) -> TValue {
-    TValue::List(TType::String, items.iter().map(|s| TValue::string(s.as_str())).collect())
+    TValue::List(
+        TType::String,
+        items.iter().map(|s| TValue::string(s.as_str())).collect(),
+    )
 }
 
 pub(crate) fn sync_args(o: &SyncOptions) -> Value {
@@ -116,14 +126,27 @@ pub(crate) fn send_message_args(seq: i64, o: &SendMessageOptions) -> Value {
         "hasContent": false,
         "sessionId": 0,
     });
-    message.insert("contentType", o.content_type.clone().unwrap_or_else(|| "NONE".into()));
+    message.insert(
+        "contentType",
+        o.content_type.clone().unwrap_or_else(|| "NONE".into()),
+    );
     message.insert(
         "contentMetadata",
-        Value::Struct(o.content_metadata.iter().map(|(k, v)| (k.clone(), Value::from(v))).collect()),
+        Value::Struct(
+            o.content_metadata
+                .iter()
+                .map(|(k, v)| (k.clone(), Value::from(v)))
+                .collect(),
+        ),
     );
     message.insert("text", o.text.clone());
     message.insert("location", o.location.clone());
-    message.insert("chunks", o.chunks.clone().map(|c| Value::List(c.into_iter().map(Value::Binary).collect())));
+    message.insert(
+        "chunks",
+        o.chunks
+            .clone()
+            .map(|c| Value::List(c.into_iter().map(Value::Binary).collect())),
+    );
     if let Some(id) = &o.related_message_id {
         message.insert("relatedMessageId", id);
         message.insert("messageRelationType", "REPLY");
@@ -144,7 +167,12 @@ pub(crate) fn react_args(req_seq: i64, o: &ReactOptions) -> Value {
     args
 }
 
-pub(crate) fn postback_args(message_id: &str, url: &str, chat_mid: &str, origin_mid: &str) -> Value {
+pub(crate) fn postback_args(
+    message_id: &str,
+    url: &str,
+    chat_mid: &str,
+    origin_mid: &str,
+) -> Value {
     crate::tv!({"request": {"messageId": message_id, "url": url, "chatMID": chat_mid, "originMID": origin_mid}})
 }
 
@@ -185,7 +213,14 @@ impl TalkService<'_> {
     /// `sync` on `/SYNC4` (long poll): fetch operations since the given revisions.
     pub async fn sync(&self, options: SyncOptions) -> Result<Value> {
         let timeout = options.timeout.unwrap_or(self.client.config.long_timeout);
-        self.call_with("sync", sync_args(&options), |o| RequestOptions { path: "/SYNC4", ..o }.timeout(timeout)).await
+        self.call_with("sync", sync_args(&options), |o| {
+            RequestOptions {
+                path: "/SYNC4",
+                ..o
+            }
+            .timeout(timeout)
+        })
+        .await
     }
 
     /// Send a message. With `e2ee: Some(true)` the text/location is
@@ -196,10 +231,11 @@ impl TalkService<'_> {
     /// keys, recreate the group key, or (only when `e2ee` was unset) fall back
     /// to plain, for at most [`crate::e2ee::MAX_E2EE_SEND_ATTEMPTS`] attempts.
     pub async fn send_message(&self, options: SendMessageOptions) -> Result<Value> {
-        use crate::e2ee::{send_recovery, E2eeSendRecovery, MAX_E2EE_SEND_ATTEMPTS};
+        use crate::e2ee::{E2eeSendRecovery, MAX_E2EE_SEND_ATTEMPTS, send_recovery};
         let requested = options.e2ee;
         // Only plaintext we hold can be re-encrypted or resent in the clear.
-        let reencryptable = options.chunks.is_none() && (options.text.is_some() || options.location.is_some());
+        let reencryptable =
+            options.chunks.is_none() && (options.text.is_some() || options.location.is_some());
         let mut options = options;
         let mut attempts = 0;
         loop {
@@ -209,19 +245,29 @@ impl TalkService<'_> {
                 && send.chunks.is_none()
                 && (send.text.as_deref().is_some_and(|t| !t.is_empty()) || send.location.is_some())
             {
-                let content_type = content_type_number(send.content_type.as_ref().unwrap_or(&Value::Int(0)));
+                let content_type =
+                    content_type_number(send.content_type.as_ref().unwrap_or(&Value::Int(0)));
                 let content = match (send.text.take(), send.location.take()) {
                     (Some(text), _) if !text.is_empty() => E2eeContent::Text(text),
                     (_, Some(location)) => E2eeContent::Location(location),
                     _ => E2eeContent::Text("invalid".into()),
                 };
-                send.chunks = Some(self.client.encrypt_e2ee_message(&send.to, content, content_type, 2).await?);
-                send.content_metadata.insert("e2eeVersion".into(), "2".into());
-                send.content_metadata.insert("contentType".into(), content_type.to_string());
+                send.chunks = Some(
+                    self.client
+                        .encrypt_e2ee_message(&send.to, content, content_type, 2)
+                        .await?,
+                );
+                send.content_metadata
+                    .insert("e2eeVersion".into(), "2".into());
+                send.content_metadata
+                    .insert("contentType".into(), content_type.to_string());
                 send.content_metadata.insert("e2eeMark".into(), "2".into());
             }
             let seq = self.client.get_reqseq("talk").await?;
-            let err = match self.call("sendMessage", send_message_args(seq, &send)).await {
+            let err = match self
+                .call("sendMessage", send_message_args(seq, &send))
+                .await
+            {
                 Err(e) if attempts < MAX_E2EE_SEND_ATTEMPTS => e,
                 res => return res,
             };
@@ -241,12 +287,16 @@ impl TalkService<'_> {
                     options.e2ee = Some(false);
                 }
                 Some(r @ (E2eeSendRecovery::Reencrypt | E2eeSendRecovery::RecreateGroupKey))
-                    if requested != Some(false) && options.e2ee != Some(false) && (reencryptable || options.e2ee.is_none()) =>
+                    if requested != Some(false)
+                        && options.e2ee != Some(false)
+                        && (reencryptable || options.e2ee.is_none()) =>
                 {
                     self.client.prepare_e2ee_resend(&options.to, r).await?;
                     options.e2ee = Some(true);
                 }
-                None if options.e2ee.is_none() && code.contains("E2EE") => options.e2ee = Some(true),
+                None if options.e2ee.is_none() && code.contains("E2EE") => {
+                    options.e2ee = Some(true)
+                }
                 _ => return Err(err),
             }
         }
@@ -254,23 +304,38 @@ impl TalkService<'_> {
 
     /// Send a text via the compact protocol (`/CA5`), falling back to
     /// `/ECA5` when the server requires E2EE (codes 82/99) and `e2ee` is unset.
-    pub async fn send_compact_message(&self, options: SendCompactMessageOptions) -> Result<CompactMessageResponse> {
+    pub async fn send_compact_message(
+        &self,
+        options: SendCompactMessageOptions,
+    ) -> Result<CompactMessageResponse> {
         if options.chunks.is_some() || options.e2ee == Some(true) {
-            return self.send_compact_e2ee_message(&options.to, options.text.as_deref(), options.chunks).await;
+            return self
+                .send_compact_e2ee_message(&options.to, options.text.as_deref(), options.chunks)
+                .await;
         }
         let Some(text) = options.text.as_deref() else {
-            return Err(Error::internal("TypeError", "sendCompactMessage requires text or chunks"));
+            return Err(Error::internal(
+                "TypeError",
+                "sendCompactMessage requires text or chunks",
+            ));
         };
         match self.compact_plain(&options.to, text).await {
-            Err(CompactFailure::Protocol(e)) if options.e2ee.is_none() && matches!(e.code, Some(82 | 99)) => {
-                self.send_compact_e2ee_message(&options.to, Some(text), None).await
+            Err(CompactFailure::Protocol(e))
+                if options.e2ee.is_none() && matches!(e.code, Some(82 | 99)) =>
+            {
+                self.send_compact_e2ee_message(&options.to, Some(text), None)
+                    .await
             }
             res => Ok(res?),
         }
     }
 
     /// Send plain text via `/CA5`.
-    pub async fn send_compact_plain_message(&self, to: &str, text: &str) -> Result<CompactMessageResponse> {
+    pub async fn send_compact_plain_message(
+        &self,
+        to: &str,
+        text: &str,
+    ) -> Result<CompactMessageResponse> {
         Ok(self.compact_plain(to, text).await?)
     }
 
@@ -283,20 +348,34 @@ impl TalkService<'_> {
     ) -> Result<CompactMessageResponse> {
         let chunks = match (chunks, text) {
             (Some(c), _) => c,
-            (None, Some(text)) => self.client.encrypt_e2ee_message(to, E2eeContent::Text(text.into()), 0, 2).await?,
+            (None, Some(text)) => {
+                self.client
+                    .encrypt_e2ee_message(to, E2eeContent::Text(text.into()), 0, 2)
+                    .await?
+            }
             (None, None) => {
-                return Err(Error::internal("TypeError", "sendCompactE2EEMessage requires text or chunks"));
+                return Err(Error::internal(
+                    "TypeError",
+                    "sendCompactE2EEMessage requires text or chunks",
+                ));
             }
         };
         let seq = self.client.get_reqseq("talk").await? as i32;
         let body = pack_compact_e2ee_message(seq, to, &chunks, MSG_TYPE_E2EE)?;
-        Ok(self.request_compact_message(COMPACT_E2EE_MESSAGE_ENDPOINT, seq, body).await?)
+        Ok(self
+            .request_compact_message(COMPACT_E2EE_MESSAGE_ENDPOINT, seq, body)
+            .await?)
     }
 
-    async fn compact_plain(&self, to: &str, text: &str) -> std::result::Result<CompactMessageResponse, CompactFailure> {
+    async fn compact_plain(
+        &self,
+        to: &str,
+        text: &str,
+    ) -> std::result::Result<CompactMessageResponse, CompactFailure> {
         let seq = self.client.get_reqseq("talk").await? as i32;
         let body = pack_compact_plain_message(seq, to, text).map_err(CompactFailure::Protocol)?;
-        self.request_compact_message(COMPACT_PLAIN_MESSAGE_ENDPOINT, seq, body).await
+        self.request_compact_message(COMPACT_PLAIN_MESSAGE_ENDPOINT, seq, body)
+            .await
     }
 
     async fn request_compact_message(
@@ -309,14 +388,21 @@ impl TalkService<'_> {
         let mut retried = false;
         loop {
             if client.is_disabled() {
-                return Err(
-                    Error::internal("ClientClosed", "Request aborted: client has been disabled (logged out)").into()
-                );
+                return Err(Error::internal(
+                    "ClientClosed",
+                    "Request aborted: client has been disabled (logged out)",
+                )
+                .into());
             }
             let mut headers = client.line_headers("POST");
             headers.push(("x-lai".into(), seq.to_string()));
-            client.log("compactMessageRequest", serde_json::json!({"path": path, "body": hex::encode(&body)}));
-            let res = client.send_http_plain(path, "POST", headers, body.clone(), client.config.timeout).await?;
+            client.log(
+                "compactMessageRequest",
+                serde_json::json!({"path": path, "body": hex::encode(&body)}),
+            );
+            let res = client
+                .send_http_plain(path, "POST", headers, body.clone(), client.config.timeout)
+                .await?;
             if let Some(next) = res.header("x-line-next-access") {
                 client.emit(ClientEvent::UpdateAuthToken(next.to_string()));
             }
@@ -332,7 +418,11 @@ impl TalkService<'_> {
                 .into());
             }
             match decode_compact_message_response(&res.body) {
-                Err(e) if e.code == Some(119) && !retried && client.storage.get("refreshToken").await?.is_some() => {
+                Err(e)
+                    if e.code == Some(119)
+                        && !retried
+                        && client.storage.get("refreshToken").await?.is_some() =>
+                {
                     retried = true;
                     client.try_refresh_token().await?;
                 }
@@ -342,20 +432,38 @@ impl TalkService<'_> {
     }
 
     /// Invite users into a group chat.
-    pub async fn invite_into_chat(&self, chat_mid: &str, target_user_mids: &[String]) -> Result<Value> {
-        self.call("inviteIntoChat", crate::tv!({"request": {"targetUserMids": target_user_mids, "chatMid": chat_mid}}))
-            .await
+    pub async fn invite_into_chat(
+        &self,
+        chat_mid: &str,
+        target_user_mids: &[String],
+    ) -> Result<Value> {
+        self.call(
+            "inviteIntoChat",
+            crate::tv!({"request": {"targetUserMids": target_user_mids, "chatMid": chat_mid}}),
+        )
+        .await
     }
 
     /// Report a Flex message postback action (`sendPostback`): `url` is the
     /// action's postback URL, `origin_mid` the sender of the Flex message.
-    pub async fn send_flex_postback(&self, message_id: &str, url: &str, chat_mid: &str, origin_mid: &str) -> Result<Value> {
-        self.call("sendPostback", postback_args(message_id, url, chat_mid, origin_mid)).await
+    pub async fn send_flex_postback(
+        &self,
+        message_id: &str,
+        url: &str,
+        chat_mid: &str,
+        origin_mid: &str,
+    ) -> Result<Value> {
+        self.call(
+            "sendPostback",
+            postback_args(message_id, url, chat_mid, origin_mid),
+        )
+        .await
     }
 
     /// All of the user's registered E2EE public keys.
     pub async fn get_e2ee_public_keys(&self) -> Result<Value> {
-        self.request("getE2EEPublicKeys", Vec::new(), Parse::Result).await
+        self.request("getE2EEPublicKeys", Vec::new(), Parse::Result)
+            .await
     }
 
     /// React to a message.
@@ -380,37 +488,66 @@ impl TalkService<'_> {
         with_members: Option<bool>,
     ) -> Result<Value> {
         let res = self
-            .get_chats(GetChatsOptions { chat_mids: vec![chat_mid.to_string()], with_invitees, with_members })
+            .get_chats(GetChatsOptions {
+                chat_mids: vec![chat_mid.to_string()],
+                with_invitees,
+                with_members,
+            })
             .await?;
         Ok(res["chats"][0].clone())
     }
 
     /// The N most recent messages in a message box (no IDL args struct; sent raw).
-    pub async fn get_recent_messages_v2(&self, message_box_id: &str, messages_count: i32) -> Result<Value> {
-        let args = vec![(2, TValue::string(message_box_id)), (3, TValue::I32(messages_count))];
-        let raw = self.request("getRecentMessagesV2", args, Parse::Raw).await?;
-        Ok(rename_raw(Schema::line(), &TypeRef::List(Box::new(TypeRef::Named("Message".into()))), raw))
+    pub async fn get_recent_messages_v2(
+        &self,
+        message_box_id: &str,
+        messages_count: i32,
+    ) -> Result<Value> {
+        let args = vec![
+            (2, TValue::string(message_box_id)),
+            (3, TValue::I32(messages_count)),
+        ];
+        let raw = self
+            .request("getRecentMessagesV2", args, Parse::Raw)
+            .await?;
+        Ok(rename_raw(
+            Schema::line(),
+            &TypeRef::List(Box::new(TypeRef::Named("Message".into()))),
+            raw,
+        ))
     }
 
     /// Server time (epoch milliseconds).
     pub async fn get_server_time(&self) -> Result<Value> {
-        self.request("getServerTime", Vec::new(), Parse::Result).await
+        self.request("getServerTime", Vec::new(), Parse::Result)
+            .await
     }
 
     /// A contact by mid.
     pub async fn get_contact(&self, mid: &str) -> Result<Value> {
-        self.request("getContact", vec![(2, TValue::string(mid))], Parse::Struct("Contact")).await
+        self.request(
+            "getContact",
+            vec![(2, TValue::string(mid))],
+            Parse::Struct("Contact"),
+        )
+        .await
     }
 
     /// Contacts by mids (`list<Contact>`).
     pub async fn get_contacts(&self, mids: &[String]) -> Result<Value> {
-        self.request("getContacts", vec![(2, string_list(mids))], Parse::Result).await
+        self.request("getContacts", vec![(2, string_list(mids))], Parse::Result)
+            .await
     }
 
     /// `getContactsV2` (`GetContactsV2Response`).
     pub async fn get_contacts_v2(&self, mids: &[String]) -> Result<Value> {
         let args = vec![(1, TValue::Struct(vec![(1, string_list(mids))]))];
-        self.request("getContactsV2", args, Parse::Struct("GetContactsV2Response")).await
+        self.request(
+            "getContactsV2",
+            args,
+            Parse::Struct("GetContactsV2Response"),
+        )
+        .await
     }
 
     /// `noop` (keep-alive).
@@ -441,7 +578,8 @@ impl TalkService<'_> {
             1,
             TValue::Struct(vec![(1, TValue::I32(seq)), (2, TValue::string(message_id))]),
         )];
-        self.request("silentlyUnsendMessage", args, Parse::Result).await
+        self.request("silentlyUnsendMessage", args, Parse::Result)
+            .await
     }
 
     /// Pin (`pin = true`) or unpin a chat. `reqSeq` is filled automatically.
@@ -472,7 +610,8 @@ impl TalkService<'_> {
     /// Message-edit eligibility notice for a chat (`mid`).
     pub async fn get_message_edit_notice(&self, mid: &str) -> Result<Value> {
         let args = vec![(1, TValue::Struct(vec![(1, TValue::string(mid))]))];
-        self.request("getMessageEditNotice", args, Parse::Result).await
+        self.request("getMessageEditNotice", args, Parse::Result)
+            .await
     }
 
     /// Fetch messages by ids. `args` is `getMessagesByIds_args`, e.g.
@@ -484,7 +623,8 @@ impl TalkService<'_> {
 
     /// The caller's own invite ticket.
     pub async fn get_user_ticket(&self) -> Result<Value> {
-        self.request("getUserTicket", Vec::new(), Parse::Result).await
+        self.request("getUserTicket", Vec::new(), Parse::Result)
+            .await
     }
 
     /// Reissue the caller's user ticket. Returns the new ticket id (string).
@@ -493,13 +633,17 @@ impl TalkService<'_> {
         expiration_time: i64,
         max_use_count: i32,
     ) -> Result<Value> {
-        let args = vec![(3, TValue::I64(expiration_time)), (4, TValue::I32(max_use_count))];
+        let args = vec![
+            (3, TValue::I64(expiration_time)),
+            (4, TValue::I32(max_use_count)),
+        ];
         self.request("reissueUserTicket", args, Parse::Result).await
     }
 
     /// Unregister the current user and device. Returns the success string.
     pub async fn unregister_user_and_device(&self) -> Result<Value> {
-        self.request("unregisterUserAndDevice", Vec::new(), Parse::Result).await
+        self.request("unregisterUserAndDevice", Vec::new(), Parse::Result)
+            .await
     }
 }
 
@@ -756,13 +900,17 @@ impl TalkService<'_> {
     }
 
     /// `getPreviousMessagesV2WithRequest(request: GetPreviousMessagesV2Request, syncReason: Pb1_V7)`.
-    pub async fn get_previous_messages_v2_with_request(&self, args: impl Into<Value>) -> Result<Value> {
+    pub async fn get_previous_messages_v2_with_request(
+        &self,
+        args: impl Into<Value>,
+    ) -> Result<Value> {
         self.call("getPreviousMessagesV2WithRequest", args).await
     }
 
     /// `getProfile(syncReason: Pb1_V7)`.
     pub async fn get_profile(&self, args: impl Into<Value>) -> Result<Value> {
-        self.call_with("getProfile", args, |o| o.parse(Parse::Struct("Profile"))).await
+        self.call_with("getProfile", args, |o| o.parse(Parse::Struct("Profile")))
+            .await
     }
 
     /// `getRecentFriendRequests(syncReason: Pb1_V7)`.
@@ -1029,7 +1177,13 @@ mod tests {
 
     #[test]
     fn sync_args_defaults() {
-        let f = encode("sync_args", &sync_args(&SyncOptions { revision: Some(5), ..Default::default() }));
+        let f = encode(
+            "sync_args",
+            &sync_args(&SyncOptions {
+                revision: Some(5),
+                ..Default::default()
+            }),
+        );
         assert_eq!(path(&f, &[1, 1]), Some(&TValue::I64(5)));
         assert_eq!(path(&f, &[1, 2]), Some(&TValue::I32(100)));
         assert_eq!(path(&f, &[1, 3]), Some(&TValue::I64(0)));
@@ -1037,7 +1191,10 @@ mod tests {
 
     #[test]
     fn postback_args_encoding() {
-        let f = encode("sendPostback_args", &postback_args("1", "https://p", "c1", "u1"));
+        let f = encode(
+            "sendPostback_args",
+            &postback_args("1", "https://p", "c1", "u1"),
+        );
         assert_eq!(path(&f, &[2, 1]), Some(&s("1")));
         assert_eq!(path(&f, &[2, 2]), Some(&s("https://p")));
         assert_eq!(path(&f, &[2, 3]), Some(&s("c1")));
@@ -1046,7 +1203,11 @@ mod tests {
 
     #[test]
     fn react_args_encoding() {
-        let o = ReactOptions { id: 42, reaction: "NICE".into(), req_seq: None };
+        let o = ReactOptions {
+            id: 42,
+            reaction: "NICE".into(),
+            req_seq: None,
+        };
         let f = encode("react_args", &react_args(7, &o));
         assert_eq!(
             f,
@@ -1060,7 +1221,11 @@ mod tests {
             )]
         );
         // explicit zero sequence and a message id beyond f64 precision
-        let o = ReactOptions { id: 9_007_199_254_740_993, reaction: "NICE".into(), req_seq: Some(0) };
+        let o = ReactOptions {
+            id: 9_007_199_254_740_993,
+            reaction: "NICE".into(),
+            req_seq: Some(0),
+        };
         let f = encode("react_args", &react_args(0, &o));
         assert_eq!(path(&f, &[1, 1]), Some(&TValue::I32(0)));
         assert_eq!(path(&f, &[1, 2]), Some(&TValue::I64(9_007_199_254_740_993)));
@@ -1096,29 +1261,53 @@ mod tests {
         assert_eq!(path(&f, &[2, 21]), Some(&s("123")));
         assert_eq!(path(&f, &[2, 22]), Some(&TValue::I32(3)));
         assert!(path(&f, &[2, 24]).is_some());
-        let Some(TValue::Map(_, _, entries)) = path(&f, &[2, 18]) else { panic!("metadata") };
+        let Some(TValue::Map(_, _, entries)) = path(&f, &[2, 18]) else {
+            panic!("metadata")
+        };
         assert_eq!(entries, &vec![(s("k"), s("v"))]);
     }
 
     #[test]
     fn send_message_args_chunks() {
-        let o = SendMessageOptions { to: "u0".into(), chunks: Some(vec![vec![1, 2, 3]]), ..Default::default() };
+        let o = SendMessageOptions {
+            to: "u0".into(),
+            chunks: Some(vec![vec![1, 2, 3]]),
+            ..Default::default()
+        };
         let f = encode("sendMessage_args", &send_message_args(0, &o));
-        assert_eq!(path(&f, &[2, 20]), Some(&TValue::List(TType::String, vec![TValue::Binary(vec![1, 2, 3])])));
+        assert_eq!(
+            path(&f, &[2, 20]),
+            Some(&TValue::List(
+                TType::String,
+                vec![TValue::Binary(vec![1, 2, 3])]
+            ))
+        );
     }
 
     #[test]
     fn get_chats_args_defaults() {
         let f = encode(
             "getChats_args",
-            &get_chats_args(&GetChatsOptions { chat_mids: vec!["c1".into()], ..Default::default() }),
+            &get_chats_args(&GetChatsOptions {
+                chat_mids: vec!["c1".into()],
+                ..Default::default()
+            }),
         );
-        assert_eq!(path(&f, &[1, 1]), Some(&TValue::List(TType::String, vec![s("c1")])));
+        assert_eq!(
+            path(&f, &[1, 1]),
+            Some(&TValue::List(TType::String, vec![s("c1")]))
+        );
         assert_eq!(path(&f, &[1, 2]), Some(&TValue::Bool(true)));
         assert_eq!(path(&f, &[1, 3]), Some(&TValue::Bool(true)));
         assert_eq!(
             field(&f, 2),
-            Some(&TValue::I32(Schema::line().get_enum("Pb1_V7").unwrap().value_of("INTERNAL").unwrap()))
+            Some(&TValue::I32(
+                Schema::line()
+                    .get_enum("Pb1_V7")
+                    .unwrap()
+                    .value_of("INTERNAL")
+                    .unwrap()
+            ))
         );
     }
 
@@ -1133,9 +1322,17 @@ mod tests {
     async fn send_message_rethrows_without_retry_when_disabled() {
         let c = client();
         c.disable();
-        let err = c.talk().send_message(SendMessageOptions::text("u0", "hi")).await.unwrap_err();
+        let err = c
+            .talk()
+            .send_message(SendMessageOptions::text("u0", "hi"))
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("ClientClosed"), "{err}");
-        let err = c.talk().send_compact_plain_message(&format!("u{}", "0".repeat(32)), "hi").await.unwrap_err();
+        let err = c
+            .talk()
+            .send_compact_plain_message(&format!("u{}", "0".repeat(32)), "hi")
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("ClientClosed"), "{err}");
     }
 
@@ -1161,16 +1358,23 @@ mod tests {
                 {"chatMid": "c1", "messageIds": [{"deliveredTime": 1, "messageId": 9_007_199_254_740_993i64}]}
             ]}),
         );
-        let Some(TValue::List(TType::Struct, parts)) = field(&f, 2) else { panic!("field 2 list") };
+        let Some(TValue::List(TType::Struct, parts)) = field(&f, 2) else {
+            panic!("field 2 list")
+        };
         assert_eq!(parts[0].field(1), Some(&s("c1")));
-        let Some(TValue::List(TType::Struct, ids)) = parts[0].field(2) else { panic!("messageIds") };
+        let Some(TValue::List(TType::Struct, ids)) = parts[0].field(2) else {
+            panic!("messageIds")
+        };
         assert_eq!(ids[0].field(1), Some(&TValue::I64(1)));
         assert_eq!(ids[0].field(2), Some(&TValue::I64(9_007_199_254_740_993)));
     }
 
     #[test]
     fn reissue_user_ticket_args_ids_3_and_4() {
-        let f = encode("reissueUserTicket_args", &crate::tv!({"expirationTime": 100i64, "maxUseCount": 5}));
+        let f = encode(
+            "reissueUserTicket_args",
+            &crate::tv!({"expirationTime": 100i64, "maxUseCount": 5}),
+        );
         assert_eq!(field(&f, 3), Some(&TValue::I64(100)));
         assert_eq!(field(&f, 4), Some(&TValue::I32(5)));
         assert_eq!(field(&f, 1), None);
@@ -1180,11 +1384,15 @@ mod tests {
     fn get_pinned_chats_result_decodes_map_and_token() {
         // 0: GetPinnedChatsResponse { 1: map<string,i64>, 2: string }
         let success = TValue::Struct(vec![
-            (1, TValue::Map(TType::String, TType::I64, vec![(s("c1"), TValue::I64(42))])),
+            (
+                1,
+                TValue::Map(TType::String, TType::I64, vec![(s("c1"), TValue::I64(42))]),
+            ),
             (2, s("next")),
         ]);
         let result = TValue::Struct(vec![(0, success)]);
-        let v = crate::thrift::decode_struct(Schema::line(), Some("getPinnedChats_result"), &result);
+        let v =
+            crate::thrift::decode_struct(Schema::line(), Some("getPinnedChats_result"), &result);
         assert_eq!(v["success"]["pinnedChats"]["c1"].as_i64(), Some(42));
         assert_eq!(v["success"]["nextPageToken"].as_str(), Some("next"));
     }

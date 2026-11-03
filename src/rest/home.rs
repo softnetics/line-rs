@@ -52,11 +52,20 @@ impl UpdateHomeCover {
         m.insert("homeId".into(), self.home_id.clone().into());
         let opt = [
             ("profileId", self.profile_id.clone().map(Json::from)),
-            ("coverObjectId", self.cover_object_id.clone().map(Json::from)),
-            ("videoCoverObjectId", self.video_cover_object_id.clone().map(Json::from)),
+            (
+                "coverObjectId",
+                self.cover_object_id.clone().map(Json::from),
+            ),
+            (
+                "videoCoverObjectId",
+                self.video_cover_object_id.clone().map(Json::from),
+            ),
             ("storyShare", self.story_share.map(Json::from)),
         ];
-        m.extend(opt.into_iter().filter_map(|(k, v)| v.map(|v| (k.to_string(), v))));
+        m.extend(
+            opt.into_iter()
+                .filter_map(|(k, v)| v.map(|v| (k.to_string(), v))),
+        );
         Json::Object(m)
     }
 }
@@ -86,7 +95,11 @@ impl Home<'_> {
     /// `GET /hm/api/v1/home/profile` (or `home/groupprofile` for `c...`
     /// homes, as the path builder at `0x10275d1cc` does).
     pub async fn profile(&self, q: HomeProfileQuery) -> Result<Json> {
-        let path = if q.home_id.starts_with('c') { GROUP_PROFILE } else { HOME_PROFILE };
+        let path = if q.home_id.starts_with('c') {
+            GROUP_PROFILE
+        } else {
+            HOME_PROFILE
+        };
         let req = RestRequest::get(RestPrefix::Home, path, AUTH)
             .query("homeId", &q.home_id)
             .query_opt("profileId", q.profile_id)
@@ -97,7 +110,9 @@ impl Home<'_> {
 
     /// `POST /hm/api/v1/home/cover`.
     pub async fn update_cover(&self, opts: UpdateHomeCover) -> Result<Json> {
-        self.rest.send(RestRequest::post(RestPrefix::Home, HOME_COVER, AUTH).body(opts.body())).await
+        self.rest
+            .send(RestRequest::post(RestPrefix::Home, HOME_COVER, AUTH).body(opts.body()))
+            .await
     }
 
     /// `DELETE /hm/api/v1/home/cover` `{homeId, profileId}`.
@@ -107,19 +122,25 @@ impl Home<'_> {
         if let Some(p) = profile_id {
             body.insert("profileId".into(), p.into());
         }
-        let req = RestRequest::new(Method::DELETE, RestPrefix::Home, HOME_COVER, AUTH).body(Json::Object(body));
+        let req = RestRequest::new(Method::DELETE, RestPrefix::Home, HOME_COVER, AUTH)
+            .body(Json::Object(body));
         self.rest.send(req).await
     }
 
     /// `DELETE /hm/api/v1/home/groupprofile?homeId` (group cover).
     pub async fn delete_group_cover(&self, home_id: &str) -> Result<Json> {
-        let req = RestRequest::new(Method::DELETE, RestPrefix::Home, GROUP_PROFILE, AUTH).query("homeId", home_id);
+        let req = RestRequest::new(Method::DELETE, RestPrefix::Home, GROUP_PROFILE, AUTH)
+            .query("homeId", home_id);
         self.rest.send(req).await
     }
 
     /// `GET /ma/api/v1/userpopup/getDetail.json?userMid`.
     pub async fn user_detail(&self, user_mid: &str) -> Result<Json> {
-        self.rest.send(RestRequest::get(RestPrefix::HomeApi, USER_DETAIL, AUTH).query("userMid", user_mid)).await
+        self.rest
+            .send(
+                RestRequest::get(RestPrefix::HomeApi, USER_DETAIL, AUTH).query("userMid", user_mid),
+            )
+            .await
     }
 
     /// `GET /PAGEPOKER/api/v2/pageinfo/get.json?url&caller&lang&phishingCheck`

@@ -44,7 +44,14 @@ fn huffman_tree() -> [u8; 512] {
 /// Decode a TMoreCompact message into its result struct (field `0` success
 /// or `1` exception).
 pub fn read_result(data: &[u8]) -> Result<TValue> {
-    let mut r = Reader { data, pos: 3, types: Vec::new(), next_type: 0, strings: Vec::new(), last_string_id: 0 };
+    let mut r = Reader {
+        data,
+        pos: 3,
+        types: Vec::new(),
+        next_type: 0,
+        strings: Vec::new(),
+        last_string_id: 0,
+    };
     r.parse()
 }
 
@@ -60,7 +67,10 @@ struct Reader<'a> {
 impl Reader<'_> {
     fn parse(&mut self) -> Result<TValue> {
         if self.data.len() == 4 {
-            return Err(err(format!("Invalid data: {} (code: 20)", hex::encode(self.data))));
+            return Err(err(format!(
+                "Invalid data: {} (code: 20)",
+                hex::encode(self.data)
+            )));
         }
         self.read_type_sequence()?;
         let table = self.varint()? as usize;
@@ -108,13 +118,21 @@ impl Reader<'_> {
     }
 
     fn next_type(&mut self) -> Result<u8> {
-        let t = self.types.get(self.next_type).copied().ok_or_else(|| err("type sequence exhausted"))?;
+        let t = self
+            .types
+            .get(self.next_type)
+            .copied()
+            .ok_or_else(|| err("type sequence exhausted"))?;
         self.next_type += 1;
         Ok(t)
     }
 
     fn take(&mut self, n: usize) -> Result<&[u8]> {
-        let end = self.pos.checked_add(n).filter(|&e| e <= self.data.len()).ok_or_else(|| err("unexpected end"))?;
+        let end = self
+            .pos
+            .checked_add(n)
+            .filter(|&e| e <= self.data.len())
+            .ok_or_else(|| err("unexpected end"))?;
         let s = &self.data[self.pos..end];
         self.pos = end;
         Ok(s)
@@ -170,7 +188,10 @@ impl Reader<'_> {
                     return Ok(TValue::Map(TType::Stop, TType::Stop, Vec::new()));
                 }
                 let types = self.byte()?;
-                let (kt, vt) = (compact_to_ttype(types >> 4)?, compact_to_ttype(types & 0x0f)?);
+                let (kt, vt) = (
+                    compact_to_ttype(types >> 4)?,
+                    compact_to_ttype(types & 0x0f)?,
+                );
                 let mut entries = Vec::new();
                 for _ in 0..size {
                     let k = self.read_value(kt as u8)?;
@@ -190,7 +211,11 @@ impl Reader<'_> {
                 for _ in 0..count {
                     items.push(self.read_value(et as u8)?);
                 }
-                if ty == 14 { TValue::Set(et, items) } else { TValue::List(et, items) }
+                if ty == 14 {
+                    TValue::Set(et, items)
+                } else {
+                    TValue::List(et, items)
+                }
             }
             // String given as a zigzag delta of the previous numeric string id.
             16 => {
@@ -201,7 +226,10 @@ impl Reader<'_> {
             // String from the mid table.
             17 => {
                 let idx = self.varint()? as usize;
-                let s = self.strings.get(idx).ok_or_else(|| err(format!("mid not found: {idx}")))?;
+                let s = self
+                    .strings
+                    .get(idx)
+                    .ok_or_else(|| err(format!("mid not found: {idx}")))?;
                 TValue::string(s.clone())
             }
             other => return Err(err(format!("can't read type: {other}"))),
@@ -211,7 +239,10 @@ impl Reader<'_> {
 
 /// Field ids set in a bitmap (bit `n` → field `n`).
 fn field_ids(bits: u64) -> Vec<i16> {
-    (0..64).filter(|i| bits & (1u64 << i) != 0).map(|i| i as i16).collect()
+    (0..64)
+        .filter(|i| bits & (1u64 << i) != 0)
+        .map(|i| i as i16)
+        .collect()
 }
 
 fn compact_to_ttype(c: u8) -> Result<TType> {
@@ -235,19 +266,27 @@ fn compact_to_ttype(c: u8) -> Result<TType> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::thrift::{decode_struct, Schema};
+    use crate::thrift::{Schema, decode_struct};
 
     #[test]
     fn decodes_full_sync_response() {
         // types: struct(1101) struct(1101) i64(00) + padding
-        let data = [0x82, 0x21, 0x01, 0x02, 0xdd, 0x00, 0x00, 0x01, 0x04, 0x04, 0x0a];
+        let data = [
+            0x82, 0x21, 0x01, 0x02, 0xdd, 0x00, 0x00, 0x01, 0x04, 0x04, 0x0a,
+        ];
         let tv = read_result(&data).unwrap();
         assert_eq!(
             tv,
-            TValue::Struct(vec![(0, TValue::Struct(vec![(2, TValue::Struct(vec![(2, TValue::I64(5))]))]))])
+            TValue::Struct(vec![(
+                0,
+                TValue::Struct(vec![(2, TValue::Struct(vec![(2, TValue::I64(5))]))])
+            )])
         );
         let v = decode_struct(Schema::line(), Some("sync_result"), &tv);
-        assert_eq!(v["success"]["fullSyncResponse"]["nextRevision"].as_i64(), Some(5));
+        assert_eq!(
+            v["success"]["fullSyncResponse"]["nextRevision"].as_i64(),
+            Some(5)
+        );
     }
 
     #[test]
@@ -260,7 +299,10 @@ mod tests {
         data.extend([0x01, 0x1e, 0x00, 0x14, 0x03, 0x07]);
         let tv = read_result(&data).unwrap();
         let s = tv.field(0).unwrap();
-        assert_eq!(s.field(1).and_then(TValue::as_str), Some(format!("u{}", "ab".repeat(16)).as_str()));
+        assert_eq!(
+            s.field(1).and_then(TValue::as_str),
+            Some(format!("u{}", "ab".repeat(16)).as_str())
+        );
         assert_eq!(s.field(2).and_then(TValue::as_str), Some("10"));
         assert_eq!(s.field(3).and_then(TValue::as_str), Some("8"));
         assert_eq!(s.field(4), Some(&TValue::I32(-4)));
@@ -277,10 +319,20 @@ mod tests {
         ];
         let tv = read_result(&data).unwrap();
         let s = tv.field(0).unwrap();
-        assert_eq!(s.field(1), Some(&TValue::List(TType::I32, vec![TValue::I32(1), TValue::I32(2)])));
+        assert_eq!(
+            s.field(1),
+            Some(&TValue::List(
+                TType::I32,
+                vec![TValue::I32(1), TValue::I32(2)]
+            ))
+        );
         assert_eq!(
             s.field(2),
-            Some(&TValue::Map(TType::I64, TType::String, vec![(TValue::I64(1), TValue::string("x"))]))
+            Some(&TValue::Map(
+                TType::I64,
+                TType::String,
+                vec![(TValue::I64(1), TValue::string("x"))]
+            ))
         );
     }
 

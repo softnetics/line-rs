@@ -5,10 +5,10 @@ use std::ops::Deref;
 use std::sync::{Arc, OnceLock};
 
 use super::types::{
-    AppLinkInfo, CallInfo, ChatEventInfo, ContactMeta, Decoration, FileInfo, FlexMeta, GiftInfo, MentionTarget, Mid,
-    PostNotificationInfo, ReactionType,
+    AppLinkInfo, CallInfo, ChatEventInfo, ContactMeta, Decoration, FileInfo, FlexMeta, GiftInfo,
+    MentionTarget, Mid, PostNotificationInfo, ReactionType,
 };
-use super::utils::{fetch_bytes, metadata_value, reply_target, type_error, Content, MessageInput};
+use super::utils::{Content, MessageInput, fetch_bytes, metadata_value, reply_target, type_error};
 use crate::client::Client;
 use crate::error::{Error, Result};
 use crate::thrift::Value;
@@ -25,18 +25,27 @@ pub struct SquareMessage {
 
 impl std::fmt::Debug for SquareMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SquareMessage").field("raw", &self.raw).finish()
+        f.debug_struct("SquareMessage")
+            .field("raw", &self.raw)
+            .finish()
     }
 }
 
 impl SquareMessage {
     pub fn new(client: Client, raw: Value) -> Self {
-        Self { client, raw, author_is_me: Arc::default() }
+        Self {
+            client,
+            raw,
+            author_is_me: Arc::default(),
+        }
     }
 
     /// From a `NOTIFICATION_MESSAGE` square event.
     pub fn from_event(client: Client, event: &Value) -> Self {
-        Self::new(client, event["payload"]["notificationMessage"]["squareMessage"].clone())
+        Self::new(
+            client,
+            event["payload"]["notificationMessage"]["squareMessage"].clone(),
+        )
     }
 
     pub fn client(&self) -> &Client {
@@ -68,7 +77,8 @@ impl SquareMessage {
     pub fn to(&self) -> Mid {
         Mid {
             id: self.message()["to"].as_str().unwrap_or("").to_string(),
-            kind: super::types::enum_name(&self.message()["toType"], "MIDType").unwrap_or_else(|| "SQUARE_CHAT".into()),
+            kind: super::types::enum_name(&self.message()["toType"], "MIDType")
+                .unwrap_or_else(|| "SQUARE_CHAT".into()),
         }
     }
 
@@ -76,7 +86,8 @@ impl SquareMessage {
     pub fn from(&self) -> Mid {
         Mid {
             id: self.message()["from"].as_str().unwrap_or("").to_string(),
-            kind: super::types::enum_name(&self.raw["fromType"], "MIDType").unwrap_or_else(|| "SQUARE_MEMBER".into()),
+            kind: super::types::enum_name(&self.raw["fromType"], "MIDType")
+                .unwrap_or_else(|| "SQUARE_MEMBER".into()),
         }
     }
 
@@ -132,7 +143,10 @@ impl SquareMessage {
         self.client
             .base
             .square()
-            .call("markAsRead", tv!({"request": {"messageId": self.id(), "squareChatMid": self.to().id}}))
+            .call(
+                "markAsRead",
+                tv!({"request": {"messageId": self.id(), "squareChatMid": self.to().id}}),
+            )
             .await?;
         Ok(())
     }
@@ -174,7 +188,10 @@ impl SquareMessage {
         self.client
             .base
             .square()
-            .call("unsendMessage", tv!({"request": {"messageId": self.id(), "squareChatMid": self.to().id}}))
+            .call(
+                "unsendMessage",
+                tv!({"request": {"messageId": self.id(), "squareChatMid": self.to().id}}),
+            )
             .await?;
         Ok(())
     }
@@ -184,7 +201,10 @@ impl SquareMessage {
         self.client
             .base
             .square()
-            .call("destroyMessage", tv!({"request": {"messageId": self.id(), "squareChatMid": self.to().id}}))
+            .call(
+                "destroyMessage",
+                tv!({"request": {"messageId": self.id(), "squareChatMid": self.to().id}}),
+            )
             .await?;
         Ok(())
     }
@@ -247,7 +267,10 @@ impl SquareMessage {
     /// Whether `mid` is mentioned (by mid) in this message.
     pub fn mentions_mid(&self, mid: &str) -> bool {
         self.text_decorations()
-            .map(|d| d.iter().any(|d| d.mention == Some(MentionTarget::User(mid.to_string()))))
+            .map(|d| {
+                d.iter()
+                    .any(|d| d.mention == Some(MentionTarget::User(mid.to_string())))
+            })
             .unwrap_or(false)
     }
 
@@ -257,11 +280,20 @@ impl SquareMessage {
             return Err(type_error("message have no contents"));
         }
         if content.metadata.contains_key("DOWNLOAD_URL") {
-            let key = if preview { "PREVIEW_URL" } else { "DOWNLOAD_URL" };
+            let key = if preview {
+                "PREVIEW_URL"
+            } else {
+                "DOWNLOAD_URL"
+            };
             let url = content.metadata.get(key).cloned().unwrap_or_default();
             return fetch_bytes(&self.client.base.http, &url).await;
         }
-        let file = self.client.base.obs().download_message_data(self.id(), preview, true).await?;
+        let file = self
+            .client
+            .base
+            .obs()
+            .download_message_data(self.id(), preview, true)
+            .await?;
         Ok(file.data.to_vec())
     }
 
@@ -271,8 +303,17 @@ impl SquareMessage {
         if let Some(v) = self.author_is_me.get() {
             return Ok(*v);
         }
-        let chat = self.client.base.square().call("getSquareChat", tv!({"request": {"squareChatMid": self.to().id}})).await?;
-        let mine = chat["squareChatMember"]["squareMemberMid"].as_str() == Some(self.from().id.as_str());
+        let chat = self
+            .client
+            .base
+            .square()
+            .call(
+                "getSquareChat",
+                tv!({"request": {"squareChatMid": self.to().id}}),
+            )
+            .await?;
+        let mine =
+            chat["squareChatMember"]["squareMemberMid"].as_str() == Some(self.from().id.as_str());
         Ok(*self.author_is_me.get_or_init(|| mine))
     }
 }
@@ -296,7 +337,10 @@ impl SquareThreadMessage {
 
     /// From a `NOTIFICATION_THREAD_MESSAGE` square event.
     pub fn from_event(client: Client, event: &Value) -> Self {
-        Self::new(client, event["payload"]["notificationThreadMessage"]["squareMessage"].clone())
+        Self::new(
+            client,
+            event["payload"]["notificationThreadMessage"]["squareMessage"].clone(),
+        )
     }
 
     fn thread(&self) -> String {
@@ -318,7 +362,8 @@ impl SquareThreadMessage {
     async fn send_thread_message(&self, input: MessageInput) -> Result<Value> {
         let base = &self.client.base;
         let to = self.to().id;
-        let mut message = tv!({"to": to, "text": input.text, "contentType": "NONE", "toType": "SQUARE_THREAD"});
+        let mut message =
+            tv!({"to": to, "text": input.text, "contentType": "NONE", "toType": "SQUARE_THREAD"});
         if !input.content_metadata.is_empty() {
             message.insert("contentMetadata", metadata_value(&input.content_metadata));
         }
@@ -368,7 +413,10 @@ impl SquareThreadMessage {
 
     /// Not supported for thread messages (as in linejs).
     pub async fn announce(&self) -> Result<()> {
-        Err(Error::internal("Unimplemented", "announce is not implemented for thread messages"))
+        Err(Error::internal(
+            "Unimplemented",
+            "announce is not implemented for thread messages",
+        ))
     }
 
     pub async fn unsend(&self) -> Result<()> {
@@ -426,7 +474,10 @@ mod tests {
         let msg = message();
         msg.author_is_me.set(false).unwrap();
         let err = msg.unsend().await.unwrap_err();
-        assert!(err.to_string().contains("Cannot unsend the message which is not yours."));
+        assert!(
+            err.to_string()
+                .contains("Cannot unsend the message which is not yours.")
+        );
         // Thread messages share the guard.
         let thread = SquareThreadMessage(msg);
         assert!(thread.unsend().await.is_err());
@@ -435,14 +486,33 @@ mod tests {
     #[test]
     fn accessors() {
         let msg = message();
-        assert_eq!(msg.to(), Mid { id: "sq-chat".into(), kind: "SQUARE_CHAT".into() });
+        assert_eq!(
+            msg.to(),
+            Mid {
+                id: "sq-chat".into(),
+                kind: "SQUARE_CHAT".into()
+            }
+        );
         assert_eq!(msg.from().id, "u-other");
         assert_eq!(msg.text(), "hi");
         assert_eq!(msg.content_type(), "NONE");
         assert!(msg.thread_mid().is_none());
-        assert_eq!(msg.send_args(MessageInput::text("x"), true).related_message_id.as_deref(), Some("sq-1"));
+        assert_eq!(
+            msg.send_args(MessageInput::text("x"), true)
+                .related_message_id
+                .as_deref(),
+            Some("sq-1")
+        );
         let explicit = MessageInput::text("x").reply_to("other");
-        assert_eq!(msg.send_args(explicit.clone(), false).related_message_id.as_deref(), Some("other"));
-        assert_eq!(msg.send_args(explicit, true).related_message_id.as_deref(), Some("sq-1"));
+        assert_eq!(
+            msg.send_args(explicit.clone(), false)
+                .related_message_id
+                .as_deref(),
+            Some("other")
+        );
+        assert_eq!(
+            msg.send_args(explicit, true).related_message_id.as_deref(),
+            Some("sq-1")
+        );
     }
 }

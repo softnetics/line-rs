@@ -17,12 +17,14 @@ impl PremiumProductDefinitionService<'_> {
     /// `getProductTiers(req: GetProductTiersRequest)`. Pass e.g.
     /// `tv!({"req": {"region": "JP"}})`. Returns the raw success value.
     pub async fn get_product_tiers(&self, args: impl Into<Value>) -> Result<Value> {
-        self.call_with("getProductTiers", args, |o| o.parse(Parse::Raw)).await
+        self.call_with("getProductTiers", args, |o| o.parse(Parse::Raw))
+            .await
     }
 
     /// `getProductTiersForClient(req: GetProductTiersRequest)`. Returns the raw
     /// success value.
     pub async fn get_product_tiers_for_client(&self, args: impl Into<Value>) -> Result<Value> {
-        self.call_with("getProductTiersForClient", args, |o| o.parse(Parse::Raw)).await
+        self.call_with("getProductTiersForClient", args, |o| o.parse(Parse::Raw))
+            .await
     }
 }

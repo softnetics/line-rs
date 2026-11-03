@@ -26,12 +26,26 @@ struct Fake {
 
 #[async_trait]
 impl E2eeMediaBackend for Fake {
-    async fn upload(&self, data: Bytes, obs_path: String, _params: Vec<(String, String)>) -> Result<String> {
+    async fn upload(
+        &self,
+        data: Bytes,
+        obs_path: String,
+        _params: Vec<(String, String)>,
+    ) -> Result<String> {
         self.records.lock().unwrap().push((data.len(), obs_path));
         Ok("OBJ-1".into())
     }
-    async fn encrypt_message(&self, _to: &str, key_material: &str, _name: &str, _ct: i32) -> Result<Vec<Vec<u8>>> {
-        self.key_materials.lock().unwrap().push(key_material.to_string());
+    async fn encrypt_message(
+        &self,
+        _to: &str,
+        key_material: &str,
+        _name: &str,
+        _ct: i32,
+    ) -> Result<Vec<Vec<u8>>> {
+        self.key_materials
+            .lock()
+            .unwrap()
+            .push(key_material.to_string());
         Ok(vec![Vec::new()])
     }
     async fn send(
@@ -41,7 +55,10 @@ impl E2eeMediaBackend for Fake {
         content_type: i32,
         metadata: IndexMap<String, String>,
     ) -> Result<Value> {
-        self.sent.lock().unwrap().push((to.to_string(), content_type, chunks, metadata));
+        self.sent
+            .lock()
+            .unwrap()
+            .push((to.to_string(), content_type, chunks, metadata));
         Ok(crate::tv!({"id": "m-1"}))
     }
 }
@@ -61,7 +78,12 @@ impl Fake {
 }
 
 fn upload(data: &[u8], o_type: ObjType) -> E2eeMediaUpload {
-    E2eeMediaUpload { file: ObsFile::new(data.to_vec()), o_type, to: "u-recipient".into(), ..Default::default() }
+    E2eeMediaUpload {
+        file: ObsFile::new(data.to_vec()),
+        o_type,
+        to: "u-recipient".into(),
+        ..Default::default()
+    }
 }
 
 async fn run(opts: E2eeMediaUpload) -> Fake {
@@ -100,10 +122,22 @@ async fn preview_is_encrypted_with_the_message_key_material() {
             self.1.lock().unwrap().push(data.clone());
             self.0.upload(data, p, q).await
         }
-        async fn encrypt_message(&self, to: &str, k: &str, n: &str, ct: i32) -> Result<Vec<Vec<u8>>> {
+        async fn encrypt_message(
+            &self,
+            to: &str,
+            k: &str,
+            n: &str,
+            ct: i32,
+        ) -> Result<Vec<Vec<u8>>> {
             self.0.encrypt_message(to, k, n, ct).await
         }
-        async fn send(&self, to: &str, c: Vec<Vec<u8>>, ct: i32, m: IndexMap<String, String>) -> Result<Value> {
+        async fn send(
+            &self,
+            to: &str,
+            c: Vec<Vec<u8>>,
+            ct: i32,
+            m: IndexMap<String, String>,
+        ) -> Result<Value> {
             self.0.send(to, c, ct, m).await
         }
     }
@@ -113,8 +147,14 @@ async fn preview_is_encrypted_with_the_message_key_material() {
     upload_media_by_e2ee(&cap, opts).await.unwrap();
     let key = cap.0.key_materials.lock().unwrap()[0].clone();
     let blobs = cap.1.lock().unwrap();
-    assert_eq!(crypto::decrypt_by_key_material_b64(&blobs[0], &key).unwrap(), b"full image");
-    assert_eq!(crypto::decrypt_by_key_material_b64(&blobs[1], &key).unwrap(), preview);
+    assert_eq!(
+        crypto::decrypt_by_key_material_b64(&blobs[0], &key).unwrap(),
+        b"full image"
+    );
+    assert_eq!(
+        crypto::decrypt_by_key_material_b64(&blobs[1], &key).unwrap(),
+        preview
+    );
 }
 
 #[tokio::test]
@@ -134,7 +174,12 @@ async fn video_carries_duration() {
 
 #[tokio::test]
 async fn no_duration_when_omitted_or_on_image() {
-    assert!(!run(upload(&[0; 1_000], ObjType::Video)).await.metadata().contains_key("DURATION"));
+    assert!(
+        !run(upload(&[0; 1_000], ObjType::Video))
+            .await
+            .metadata()
+            .contains_key("DURATION")
+    );
     let mut opts = upload(&[0; 1_000], ObjType::Image);
     opts.duration_ms = Some(4200.0);
     assert!(!run(opts).await.metadata().contains_key("DURATION"));
@@ -156,14 +201,26 @@ fn invalid_durations_are_dropped() {
         1e21,
         f64::MAX,
     ] {
-        assert_eq!(e2ee_duration(ObjType::Video, Some(d)), None, "durationMs={d}");
+        assert_eq!(
+            e2ee_duration(ObjType::Video, Some(d)),
+            None,
+            "durationMs={d}"
+        );
     }
 }
 
 #[test]
 fn valid_durations_round_like_math_round() {
-    for (d, expected) in [(0.5, "1"), (1.0, "1"), (4200.5, "4201"), (9_007_199_254_740_991.0, "9007199254740991")] {
-        assert_eq!(e2ee_duration(ObjType::Video, Some(d)).as_deref(), Some(expected));
+    for (d, expected) in [
+        (0.5, "1"),
+        (1.0, "1"),
+        (4200.5, "4201"),
+        (9_007_199_254_740_991.0, "9007199254740991"),
+    ] {
+        assert_eq!(
+            e2ee_duration(ObjType::Video, Some(d)).as_deref(),
+            Some(expected)
+        );
     }
 }
 
@@ -172,14 +229,19 @@ async fn duration_does_not_change_non_video_metadata() {
     for o_type in [ObjType::Audio, ObjType::File, ObjType::Image, ObjType::Gif] {
         let mut with = upload(b"media", o_type);
         with.duration_ms = Some(4200.0);
-        assert_eq!(run(with).await.metadata(), run(upload(b"media", o_type)).await.metadata());
+        assert_eq!(
+            run(with).await.metadata(),
+            run(upload(b"media", o_type)).await.metadata()
+        );
     }
 }
 
 #[tokio::test]
 async fn video_metadata_and_preview() {
     let fake = run(E2eeMediaUpload {
-        file: ObsFile::new(vec![0u8; 1000]).mime("video/mp4").name("clip.mp4"),
+        file: ObsFile::new(vec![0u8; 1000])
+            .mime("video/mp4")
+            .name("clip.mp4"),
         o_type: ObjType::Video,
         to: "c-group".into(),
         preview: Some(Bytes::from(vec![0u8; 20])),
@@ -191,7 +253,10 @@ async fn video_metadata_and_preview() {
         ("OID", "OBJ-1"),
         ("FILE_SIZE", "1032"),
         ("e2eeVersion", "2"),
-        ("MEDIA_CONTENT_INFO", r#"{"category":"original","fileSize":1032,"extension":"mp4","animated":false}"#),
+        (
+            "MEDIA_CONTENT_INFO",
+            r#"{"category":"original","fileSize":1032,"extension":"mp4","animated":false}"#,
+        ),
         ("DURATION", "4200"),
     ]
     .into_iter()
@@ -211,7 +276,9 @@ async fn video_metadata_and_preview() {
 async fn invalid_mid_is_rejected() {
     let mut opts = upload(b"x", ObjType::Image);
     opts.to = "s-square".into();
-    let err = upload_media_by_e2ee(&Fake::default(), opts).await.unwrap_err();
+    let err = upload_media_by_e2ee(&Fake::default(), opts)
+        .await
+        .unwrap_err();
     assert_eq!(err.to_string(), "ObsError: Invalid mid");
 }
 
@@ -219,18 +286,30 @@ async fn invalid_mid_is_rejected() {
 fn talk_meta_header() {
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD;
-    let json: serde_json::Value = serde_json::from_slice(&b64.decode(super::e2ee::talk_meta("1").unwrap()).unwrap()).unwrap();
+    let json: serde_json::Value =
+        serde_json::from_slice(&b64.decode(super::e2ee::talk_meta("1").unwrap()).unwrap()).unwrap();
     let thrift = b64.decode(json["message"].as_str().unwrap()).unwrap();
     // field 4 (string "1"), field 27 (empty list<struct>), stop.
-    assert_eq!(thrift, [11, 0, 4, 0, 0, 0, 1, b'1', 15, 0, 27, 12, 0, 0, 0, 0, 0]);
+    assert_eq!(
+        thrift,
+        [11, 0, 4, 0, 0, 0, 1, b'1', 15, 0, 27, 12, 0, 0, 0, 0, 0]
+    );
 }
 
 #[test]
 fn obs_params_are_base64_json() {
     use base64::Engine;
-    let p = vec![("type".to_string(), "image".to_string()), ("name".to_string(), "a\"b".to_string())];
-    let raw = base64::engine::general_purpose::STANDARD.decode(obs_params_header(&p)).unwrap();
-    assert_eq!(String::from_utf8(raw).unwrap(), r#"{"type":"image","name":"a\"b"}"#);
+    let p = vec![
+        ("type".to_string(), "image".to_string()),
+        ("name".to_string(), "a\"b".to_string()),
+    ];
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(obs_params_header(&p))
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(raw).unwrap(),
+        r#"{"type":"image","name":"a\"b"}"#
+    );
 }
 
 // --- download status -------------------------------------------------------
@@ -242,7 +321,11 @@ struct Canned {
 }
 
 fn canned(status: u16, content_type: Option<&'static str>, body: &'static [u8]) -> Canned {
-    Canned { status, content_type, body }
+    Canned {
+        status,
+        content_type,
+        body,
+    }
 }
 
 /// Serves `responses` in order over plain HTTP and records request paths.
@@ -263,9 +346,19 @@ async fn serve(responses: Vec<Canned>) -> (String, Arc<Mutex<Vec<String>>>) {
                 }
                 buf.extend_from_slice(&chunk[..n]);
             }
-            let line = String::from_utf8_lossy(&buf).lines().next().unwrap_or_default().to_string();
-            seen.lock().unwrap().push(line.split(' ').nth(1).unwrap_or_default().to_string());
-            let mut head = format!("HTTP/1.1 {} X\r\nconnection: close\r\ncontent-length: {}\r\n", r.status, r.body.len());
+            let line = String::from_utf8_lossy(&buf)
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            seen.lock()
+                .unwrap()
+                .push(line.split(' ').nth(1).unwrap_or_default().to_string());
+            let mut head = format!(
+                "HTTP/1.1 {} X\r\nconnection: close\r\ncontent-length: {}\r\n",
+                r.status,
+                r.body.len()
+            );
             if let Some(ct) = r.content_type {
                 head.push_str(&format!("content-type: {ct}\r\n"));
             }
@@ -288,8 +381,16 @@ fn client() -> BaseClient {
 async fn download_object_404_is_obs_error() {
     let (prefix, urls) = serve(vec![canned(404, None, b"")]).await;
     let c = client();
-    let err = c.obs().with_prefix(prefix).download_object_for_service("talk/emi", "OBJ-1", vec![]).await.unwrap_err();
-    assert_eq!(err.to_string(), "ObsError: Object download failed: HTTP 404");
+    let err = c
+        .obs()
+        .with_prefix(prefix)
+        .download_object_for_service("talk/emi", "OBJ-1", vec![])
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "ObsError: Object download failed: HTTP 404"
+    );
     assert_eq!(*urls.lock().unwrap(), ["/r/talk/emi/OBJ-1"]);
 }
 
@@ -302,18 +403,38 @@ async fn expired_e2ee_object_fails_before_decryptor() {
     let err = c
         .obs()
         .with_prefix(prefix)
-        .download_media_by_e2ee(&message, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "photo.jpg")
+        .download_media_by_e2ee(
+            &message,
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "photo.jpg",
+        )
         .await
         .unwrap_err();
-    assert_eq!(err.to_string(), "ObsError: Object download failed: HTTP 404");
+    assert_eq!(
+        err.to_string(),
+        "ObsError: Object download failed: HTTP 404"
+    );
 }
 
 #[tokio::test]
 async fn message_data_410_stops_before_metadata() {
-    let (prefix, urls) = serve(vec![canned(410, Some("text/html"), b"<html><body>expired</body></html>")]).await;
+    let (prefix, urls) = serve(vec![canned(
+        410,
+        Some("text/html"),
+        b"<html><body>expired</body></html>",
+    )])
+    .await;
     let c = client();
-    let err = c.obs().with_prefix(prefix).download_message_data("1", false, false).await.unwrap_err();
-    assert_eq!(err.to_string(), "ObsError: Message data download failed: HTTP 410");
+    let err = c
+        .obs()
+        .with_prefix(prefix)
+        .download_message_data("1", false, false)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "ObsError: Message data download failed: HTTP 410"
+    );
     assert_eq!(urls.lock().unwrap().len(), 1);
 }
 
@@ -321,8 +442,16 @@ async fn message_data_410_stops_before_metadata() {
 async fn metadata_empty_403_is_obs_error() {
     let (prefix, _) = serve(vec![canned(403, None, b"")]).await;
     let c = client();
-    let err = c.obs().with_prefix(prefix).message_obs_metadata("1", false).await.unwrap_err();
-    assert_eq!(err.to_string(), "ObsError: Message metadata request failed: HTTP 403");
+    let err = c
+        .obs()
+        .with_prefix(prefix)
+        .message_obs_metadata("1", false)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "ObsError: Message metadata request failed: HTTP 403"
+    );
 }
 
 #[tokio::test]
@@ -333,18 +462,31 @@ async fn message_data_2xx_yields_file() {
     ])
     .await;
     let c = client();
-    let file = c.obs().with_prefix(prefix).download_message_data("1", false, false).await.unwrap();
+    let file = c
+        .obs()
+        .with_prefix(prefix)
+        .download_message_data("1", false, false)
+        .await
+        .unwrap();
     assert_eq!(file.name.as_deref(), Some("photo.jpg"));
     assert_eq!(file.len(), 3);
     assert_eq!(file.mime.as_deref(), Some("image/jpeg"));
-    assert_eq!(*urls.lock().unwrap(), ["/r/talk/m/1", "/r/talk/m/1/object_info.obs"]);
+    assert_eq!(
+        *urls.lock().unwrap(),
+        ["/r/talk/m/1", "/r/talk/m/1/object_info.obs"]
+    );
 }
 
 #[tokio::test]
 async fn empty_2xx_body_is_returned() {
     let (prefix, _) = serve(vec![canned(204, None, b"")]).await;
     let c = client();
-    let data = c.obs().with_prefix(prefix).download_object_for_service("talk/emi", "OBJ-1", vec![]).await.unwrap();
+    let data = c
+        .obs()
+        .with_prefix(prefix)
+        .download_object_for_service("talk/emi", "OBJ-1", vec![])
+        .await
+        .unwrap();
     assert!(data.is_empty());
 }
 
@@ -352,8 +494,14 @@ async fn empty_2xx_body_is_returned() {
 fn urls() {
     let c = client();
     let obs = c.obs();
-    assert_eq!(obs.message_data_url("9", true, false), "https://obs.line-apps.com/r/talk/m/9/preview");
-    assert_eq!(obs.message_metadata_url("9", true), "https://obs.line-apps.com/r/g2/m/9/object_info.obs");
+    assert_eq!(
+        obs.message_data_url("9", true, false),
+        "https://obs.line-apps.com/r/talk/m/9/preview"
+    );
+    assert_eq!(
+        obs.message_metadata_url("9", true),
+        "https://obs.line-apps.com/r/g2/m/9/object_info.obs"
+    );
 }
 
 #[test]

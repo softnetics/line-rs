@@ -9,7 +9,10 @@ use crate::thrift::Value;
 // <generated pass-through>
 impl PrimaryQrCodeMigrationLongPollingService<'_> {
     /// `checkIfEncryptedE2EEKeyReceived(request: CheckIfEncryptedE2EEKeyReceivedRequest)`.
-    pub async fn check_if_encrypted_e2ee_key_received(&self, args: impl Into<Value>) -> Result<Value> {
+    pub async fn check_if_encrypted_e2ee_key_received(
+        &self,
+        args: impl Into<Value>,
+    ) -> Result<Value> {
         self.call("checkIfEncryptedE2EEKeyReceived", args).await
     }
 }

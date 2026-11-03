@@ -69,13 +69,19 @@ pub struct Service<'a> {
 
 impl<'a> Service<'a> {
     pub const fn new(client: &'a BaseClient, path: &'static str, protocol: Protocol) -> Self {
-        Self { client, path, protocol }
+        Self {
+            client,
+            path,
+            protocol,
+        }
     }
 
     /// Call `method` with args encoded as the IDL struct `<method>_args`;
     /// returns the decoded `success` value.
     pub async fn call(&self, method: &str, args: impl Into<Value>) -> Result<Value> {
-        self.client.call(method, args, self.path, self.protocol).await
+        self.client
+            .call(method, args, self.path, self.protocol)
+            .await
     }
 
     /// [`call`](Self::call) with adjusted [`RequestOptions`] (path, parse mode,
@@ -86,13 +92,30 @@ impl<'a> Service<'a> {
         args: impl Into<Value>,
         opts: impl FnOnce(RequestOptions<'_>) -> RequestOptions<'_>,
     ) -> Result<Value> {
-        self.client.call_with(method, args, opts(RequestOptions::new(self.path, self.protocol))).await
+        self.client
+            .call_with(
+                method,
+                args,
+                opts(RequestOptions::new(self.path, self.protocol)),
+            )
+            .await
     }
 
     /// Send pre-encoded args (linejs `NestedArray` requests) to this
     /// service, decoding the reply with `parse`.
-    pub async fn request(&self, method: &str, args: Vec<(i16, TValue)>, parse: Parse<'_>) -> Result<Value> {
-        self.client.request(args, method, RequestOptions::new(self.path, self.protocol).parse(parse)).await
+    pub async fn request(
+        &self,
+        method: &str,
+        args: Vec<(i16, TValue)>,
+        parse: Parse<'_>,
+    ) -> Result<Value> {
+        self.client
+            .request(
+                args,
+                method,
+                RequestOptions::new(self.path, self.protocol).parse(parse),
+            )
+            .await
     }
 }
 
@@ -161,24 +184,33 @@ services! {
 /// numbers become variant names. Unknown fields keep their id keys.
 pub fn rename_raw(schema: &Schema, ty: &TypeRef, value: Value) -> Value {
     match (ty, value) {
-        (TypeRef::List(inner) | TypeRef::Set(inner), Value::List(items)) => {
-            Value::List(items.into_iter().map(|v| rename_raw(schema, inner, v)).collect())
-        }
+        (TypeRef::List(inner) | TypeRef::Set(inner), Value::List(items)) => Value::List(
+            items
+                .into_iter()
+                .map(|v| rename_raw(schema, inner, v))
+                .collect(),
+        ),
         (TypeRef::Map(kt, vt), Value::Map(entries)) => Value::Map(
-            entries.into_iter().map(|(k, v)| (rename_raw(schema, kt, k), rename_raw(schema, vt, v))).collect(),
+            entries
+                .into_iter()
+                .map(|(k, v)| (rename_raw(schema, kt, k), rename_raw(schema, vt, v)))
+                .collect(),
         ),
         (TypeRef::Named(name), value) => match (schema.resolve(name), value) {
             (Some(Named::Struct(def)), Value::Struct(map)) => Value::Struct(
                 map.into_iter()
-                    .map(|(k, v)| match k.parse::<i16>().ok().and_then(|id| def.field_by_id(id)) {
-                        Some(f) => (f.name.clone(), rename_raw(schema, &f.ty, v)),
-                        None => (k, v),
-                    })
+                    .map(
+                        |(k, v)| match k.parse::<i16>().ok().and_then(|id| def.field_by_id(id)) {
+                            Some(f) => (f.name.clone(), rename_raw(schema, &f.ty, v)),
+                            None => (k, v),
+                        },
+                    )
                     .collect(),
             ),
-            (Some(Named::Enum(def)), Value::Int(i)) => {
-                def.name_of(i as i32).map(|n| Value::String(n.to_string())).unwrap_or(Value::Int(i))
-            }
+            (Some(Named::Enum(def)), Value::Int(i)) => def
+                .name_of(i as i32)
+                .map(|n| Value::String(n.to_string()))
+                .unwrap_or(Value::Int(i)),
             (_, v) => v,
         },
         (_, v) => v,

@@ -22,5 +22,8 @@ pub enum ClientEvent {
     UpdateCert(String),
     UpdateQrCert(String),
     UpdateSyncData(SyncData),
-    Log { kind: String, data: serde_json::Value },
+    Log {
+        kind: String,
+        data: serde_json::Value,
+    },
 }

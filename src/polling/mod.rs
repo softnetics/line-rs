@@ -13,7 +13,7 @@ use serde_json::json;
 
 use crate::base::{BaseClient, ClientEvent};
 use crate::error::{Error, Result};
-use crate::push::manager::{apply_sync_response, talk_sync_args, ConnManager, PushHost};
+use crate::push::manager::{ConnManager, PushHost, apply_sync_response, talk_sync_args};
 use crate::push::{Hub, Kind};
 use crate::request::RequestOptions;
 use crate::thrift::{Protocol, Value};
@@ -63,7 +63,10 @@ pub(crate) async fn run_pusher<H: PushHost>(
         let conn = match manager.initialize_conn(targets) {
             Ok(c) => c,
             Err(e) => {
-                host.log("LegyPusherError_cannot_init", json!({"error": e.to_string()}));
+                host.log(
+                    "LegyPusherError_cannot_init",
+                    json!({"error": e.to_string()}),
+                );
                 hub.finish(generation, Some(&e));
                 host.log("LegyPusherError", json!({"error": e.to_string()}));
                 return;
@@ -80,7 +83,13 @@ pub(crate) async fn run_pusher<H: PushHost>(
             return;
         }
     }
-    hub.finish(generation, Some(&Error::internal("NotAuthorized", "push listener stopped: no auth token")));
+    hub.finish(
+        generation,
+        Some(&Error::internal(
+            "NotAuthorized",
+            "push listener stopped: no auth token",
+        )),
+    );
 }
 
 fn receiver_stream(
@@ -91,26 +100,32 @@ fn receiver_stream(
 
 /// Call `fetch` repeatedly, yielding every value it returns and sleeping
 /// `interval` between calls. Errors are yielded and polling continues.
-fn poll_stream<F, Fut>(interval: Duration, fetch: F) -> impl Stream<Item = Result<Value>> + Send + 'static
+fn poll_stream<F, Fut>(
+    interval: Duration,
+    fetch: F,
+) -> impl Stream<Item = Result<Value>> + Send + 'static
 where
     F: FnMut() -> Fut + Send + 'static,
     Fut: Future<Output = Result<Vec<Value>>> + Send + 'static,
 {
-    futures::stream::unfold((fetch, VecDeque::new(), true), move |(mut fetch, mut buf, mut first)| async move {
-        loop {
-            if let Some(v) = buf.pop_front() {
-                return Some((Ok(v), (fetch, buf, first)));
+    futures::stream::unfold(
+        (fetch, VecDeque::new(), true),
+        move |(mut fetch, mut buf, mut first)| async move {
+            loop {
+                if let Some(v) = buf.pop_front() {
+                    return Some((Ok(v), (fetch, buf, first)));
+                }
+                if !first {
+                    tokio::time::sleep(interval).await;
+                }
+                first = false;
+                match fetch().await {
+                    Ok(items) => buf.extend(items),
+                    Err(e) => return Some((Err(e), (fetch, buf, first))),
+                }
             }
-            if !first {
-                tokio::time::sleep(interval).await;
-            }
-            first = false;
-            match fetch().await {
-                Ok(items) => buf.extend(items),
-                Err(e) => return Some((Err(e), (fetch, buf, first))),
-            }
-        }
-    })
+        },
+    )
 }
 
 impl BaseClient {
@@ -147,7 +162,14 @@ impl BaseClient {
         let client = self.clone();
         let task_hub = hub.clone();
         let rx = hub.subscribe(kind, move |generation| {
-            tokio::spawn(run_pusher(client, task_hub, generation, LISTEN_TARGET, RECONNECT_DELAY)).abort_handle()
+            tokio::spawn(run_pusher(
+                client,
+                task_hub,
+                generation,
+                LISTEN_TARGET,
+                RECONNECT_DELAY,
+            ))
+            .abort_handle()
         });
         receiver_stream(rx)
     }
@@ -165,7 +187,10 @@ impl BaseClient {
     /// Poll talk `sync` every `interval` (linejs `_listenTalkEvents`,
     /// default [`DEFAULT_TALK_POLL_INTERVAL`]). Errors are yielded and polling
     /// continues; drop the stream to stop.
-    pub fn poll_talk_events(&self, interval: Duration) -> impl Stream<Item = Result<Value>> + Send + 'static {
+    pub fn poll_talk_events(
+        &self,
+        interval: Duration,
+    ) -> impl Stream<Item = Result<Value>> + Send + 'static {
         let client = self.clone();
         poll_stream(interval, move || {
             let client = client.clone();
@@ -175,7 +200,10 @@ impl BaseClient {
 
     /// Poll square `fetchMyEvents` every `interval` (linejs
     /// `_listenSquareEvents`, default [`DEFAULT_SQUARE_POLL_INTERVAL`]).
-    pub fn poll_square_events(&self, interval: Duration) -> impl Stream<Item = Result<Value>> + Send + 'static {
+    pub fn poll_square_events(
+        &self,
+        interval: Duration,
+    ) -> impl Stream<Item = Result<Value>> + Send + 'static {
         let client = self.clone();
         let continuation: Arc<Mutex<Option<String>>> = Arc::default();
         poll_stream(interval, move || {
@@ -186,7 +214,8 @@ impl BaseClient {
 
     async fn poll_talk_once(&self) -> Result<Vec<Value>> {
         let args = talk_sync_args(&*self.sync.lock().await);
-        let opts = RequestOptions::new("/SYNC4", Protocol::Compact).timeout(self.config.long_timeout);
+        let opts =
+            RequestOptions::new("/SYNC4", Protocol::Compact).timeout(self.config.long_timeout);
         let res = self.call_with("sync", args, opts).await?;
         let (ops, snapshot) = {
             let mut sync = self.sync.lock().await;
@@ -210,7 +239,10 @@ impl BaseClient {
             sync.clone()
         };
         self.emit(ClientEvent::UpdateSyncData(snapshot));
-        Ok(res["events"].as_list().map(<[Value]>::to_vec).unwrap_or_default())
+        Ok(res["events"]
+            .as_list()
+            .map(<[Value]>::to_vec)
+            .unwrap_or_default())
     }
 }
 
@@ -225,27 +257,47 @@ mod tests {
     use crate::push::conn::{Conn, ConnWriter};
     use crate::push::manager::tests::FakeHost;
 
-    fn spawn_with(host: &FakeHost, hub: &Arc<Hub>, delay: Duration) -> impl FnOnce(u64) -> tokio::task::AbortHandle {
+    fn spawn_with(
+        host: &FakeHost,
+        hub: &Arc<Hub>,
+        delay: Duration,
+    ) -> impl FnOnce(u64) -> tokio::task::AbortHandle {
         let (host, hub) = (host.clone(), hub.clone());
         move |g| tokio::spawn(run_pusher(host, hub, g, LISTEN_TARGET, delay)).abort_handle()
     }
 
     async fn next_err(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Result<Value>>) -> Error {
-        match tokio::time::timeout(Duration::from_millis(500), rx.recv()).await.expect("reader hung") {
+        match tokio::time::timeout(Duration::from_millis(500), rx.recv())
+            .await
+            .expect("reader hung")
+        {
             Some(Err(e)) => e,
             other => panic!("expected an error, got {other:?}"),
         }
     }
 
     fn client_logs(host: &FakeHost) -> Vec<String> {
-        host.log_kinds().into_iter().filter(|k| !k.starts_with("[LEGY/PUSH]")).collect()
+        host.log_kinds()
+            .into_iter()
+            .filter(|k| !k.starts_with("[LEGY/PUSH]"))
+            .collect()
     }
 
     #[test]
     fn sync_data_serializes_like_linejs() {
-        let data = SyncData { square: Some("t".into()), talk: TalkSync { revision: 1, global_rev: 2, individual_rev: 3 } };
+        let data = SyncData {
+            square: Some("t".into()),
+            talk: TalkSync {
+                revision: 1,
+                global_rev: 2,
+                individual_rev: 3,
+            },
+        };
         let j = serde_json::to_value(&data).unwrap();
-        assert_eq!(j, json!({"square": "t", "talk": {"revision": 1, "globalRev": 2, "individualRev": 3}}));
+        assert_eq!(
+            j,
+            json!({"square": "t", "talk": {"revision": 1, "globalRev": 2, "individualRev": 3}})
+        );
         let back: SyncData = serde_json::from_value(json!({"talk": {"revision": 9}})).unwrap();
         assert_eq!(back.talk.revision, 9);
         assert_eq!(back.square, None);
@@ -264,7 +316,10 @@ mod tests {
         let r = tokio::time::timeout(Duration::from_millis(150), stream.boxed().next()).await;
         assert!(r.is_err());
         let n = calls.load(Ordering::SeqCst);
-        assert!((2..=8).contains(&n), "expected a bounded number of polls, got {n}");
+        assert!(
+            (2..=8).contains(&n),
+            "expected a bounded number of polls, got {n}"
+        );
         assert!(start.elapsed() >= Duration::from_millis(100));
     }
 
@@ -293,10 +348,16 @@ mod tests {
     async fn failed_pusher_initialization_resets_listening_state_for_retry() {
         let host = FakeHost::new();
         let hub = Arc::new(Hub::default());
-        let mut rx = hub.subscribe(Kind::Talk, spawn_with(&host, &hub, Duration::from_millis(10)));
+        let mut rx = hub.subscribe(
+            Kind::Talk,
+            spawn_with(&host, &hub, Duration::from_millis(10)),
+        );
         next_err(&mut rx).await;
         assert!(!hub.is_running());
-        let mut rx = hub.subscribe(Kind::Talk, spawn_with(&host, &hub, Duration::from_millis(10)));
+        let mut rx = hub.subscribe(
+            Kind::Talk,
+            spawn_with(&host, &hub, Duration::from_millis(10)),
+        );
         next_err(&mut rx).await;
         assert_eq!(host.opens.load(Ordering::SeqCst), 2);
     }
@@ -305,19 +366,30 @@ mod tests {
     async fn pusher_failure_reaches_the_stream_reader() {
         let host = FakeHost::new();
         let hub = Arc::new(Hub::default());
-        let mut rx = hub.subscribe(Kind::Talk, spawn_with(&host, &hub, Duration::from_millis(10)));
+        let mut rx = hub.subscribe(
+            Kind::Talk,
+            spawn_with(&host, &hub, Duration::from_millis(10)),
+        );
         let e = next_err(&mut rx).await;
-        assert!(matches!(e, Error::Internal { ref kind, ref message } if kind == "TestError" && message == "connection failed"));
+        assert!(
+            matches!(e, Error::Internal { ref kind, ref message } if kind == "TestError" && message == "connection failed")
+        );
         // The stream ends after the error.
         assert!(rx.recv().await.is_none());
-        assert_eq!(client_logs(&host), vec!["LegyPusherError_cannot_init", "LegyPusherError"]);
+        assert_eq!(
+            client_logs(&host),
+            vec!["LegyPusherError_cannot_init", "LegyPusherError"]
+        );
     }
 
     #[tokio::test]
     async fn shared_pusher_failure_rejects_both_streams() {
         let host = FakeHost::new();
         let hub = Arc::new(Hub::default());
-        let mut talk = hub.subscribe(Kind::Talk, spawn_with(&host, &hub, Duration::from_millis(10)));
+        let mut talk = hub.subscribe(
+            Kind::Talk,
+            spawn_with(&host, &hub, Duration::from_millis(10)),
+        );
         let mut square = hub.subscribe(Kind::Square, |_| unreachable!("pusher already running"));
         next_err(&mut talk).await;
         next_err(&mut square).await;
@@ -330,13 +402,16 @@ mod tests {
         let host = FakeHost::new();
         for _ in 0..3 {
             let (w, _rx) = ConnWriter::channel();
-            host.conns
-                .lock()
-                .unwrap()
-                .push(Conn::from_parts(w, async { Err(Error::internal("LegyPusherError", "fetch failed")) }.boxed()));
+            host.conns.lock().unwrap().push(Conn::from_parts(
+                w,
+                async { Err(Error::internal("LegyPusherError", "fetch failed")) }.boxed(),
+            ));
         }
         let hub = Arc::new(Hub::default());
-        let rx = hub.subscribe(Kind::Talk, spawn_with(&host, &hub, Duration::from_millis(20)));
+        let rx = hub.subscribe(
+            Kind::Talk,
+            spawn_with(&host, &hub, Duration::from_millis(20)),
+        );
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert!(host.opens.load(Ordering::SeqCst) >= 2);
         assert!(hub.is_running());
@@ -351,7 +426,10 @@ mod tests {
         let host = FakeHost::new();
         *host.token.lock().unwrap() = None;
         let hub = Arc::new(Hub::default());
-        let mut rx = hub.subscribe(Kind::Square, spawn_with(&host, &hub, Duration::from_millis(10)));
+        let mut rx = hub.subscribe(
+            Kind::Square,
+            spawn_with(&host, &hub, Duration::from_millis(10)),
+        );
         let e = next_err(&mut rx).await;
         assert!(matches!(e, Error::Internal { ref kind, .. } if kind == "NotAuthorized"));
         assert_eq!(host.opens.load(Ordering::SeqCst), 0);
@@ -368,7 +446,9 @@ mod tests {
         // Without an auth token the pusher may already have ended the
         // streams with `NotAuthorized`; either way they finish.
         for stream in [&mut talk, &mut square] {
-            let rest: Vec<_> = tokio::time::timeout(Duration::from_millis(500), stream.collect()).await.unwrap();
+            let rest: Vec<_> = tokio::time::timeout(Duration::from_millis(500), stream.collect())
+                .await
+                .unwrap();
             assert!(rest.iter().all(|r| r.is_err()));
         }
     }

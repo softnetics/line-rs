@@ -5,7 +5,7 @@
 //! ```
 
 use line_rs::login::LoginOption;
-use line_rs::{tv, BaseClient, Device};
+use line_rs::{BaseClient, Device, tv};
 
 #[tokio::main]
 async fn main() -> line_rs::Result<()> {
@@ -14,14 +14,34 @@ async fn main() -> line_rs::Result<()> {
     base.login(LoginOption::token(token)).await?;
 
     // Args are the fields of the IDL struct `getAllChatMids_args`.
-    let mids = base.talk().call("getAllChatMids", tv!({"request": {"withMemberChats": true}, "syncReason": "INTERNAL"})).await?;
-    let chat_mids: Vec<String> =
-        mids["memberChatMids"].as_list().unwrap_or_default().iter().filter_map(|v| v.as_str().map(String::from)).collect();
+    let mids = base
+        .talk()
+        .call(
+            "getAllChatMids",
+            tv!({"request": {"withMemberChats": true}, "syncReason": "INTERNAL"}),
+        )
+        .await?;
+    let chat_mids: Vec<String> = mids["memberChatMids"]
+        .as_list()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
     println!("{} chats", chat_mids.len());
 
-    let chats = base.talk().call("getChats", tv!({"request": {"chatMids": chat_mids, "withMembers": true}})).await?;
+    let chats = base
+        .talk()
+        .call(
+            "getChats",
+            tv!({"request": {"chatMids": chat_mids, "withMembers": true}}),
+        )
+        .await?;
     for chat in chats["chats"].as_list().unwrap_or_default() {
-        println!("{}  {}", chat["chatMid"].as_str().unwrap_or("?"), chat["chatName"].as_str().unwrap_or(""));
+        println!(
+            "{}  {}",
+            chat["chatMid"].as_str().unwrap_or("?"),
+            chat["chatName"].as_str().unwrap_or("")
+        );
     }
     Ok(())
 }

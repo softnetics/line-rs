@@ -32,13 +32,13 @@ use std::sync::LazyLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use line_rs::client::{
-    login_with_auth_token, Chat, Client, ClientEvent, InitOptions, ListenHandle, ListenOptions, MessageInput,
-    ReactionType, TalkEvent, TalkMessage, User,
+    Chat, Client, ClientEvent, InitOptions, ListenHandle, ListenOptions, MessageInput,
+    ReactionType, TalkEvent, TalkMessage, User, login_with_auth_token,
 };
 use line_rs::rest::home::PageInfoQuery;
 use line_rs::storage::FileStorage;
-use line_rs::{tv, Device};
-use tokio::sync::{broadcast, Mutex, OnceCell};
+use line_rs::{Device, tv};
+use tokio::sync::{Mutex, OnceCell, broadcast};
 
 const STORAGE_PATH: &str = "./storage.test.json";
 /// Minimum spacing between API calls.
@@ -51,7 +51,10 @@ const MIN_GAP: Duration = Duration::from_secs(5);
 /// One runtime for the whole binary so the client (and its push/listen
 /// tasks) can be shared between tests.
 static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
-    tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("build tokio runtime")
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime")
 });
 
 /// Logged in once per process; a failed login is remembered, never retried.
@@ -105,7 +108,10 @@ fn peer() -> Option<String> {
 const PEER_SKIP: &str = "targets another user; set LINE_PEER_MID and LINE_ALLOW_PEER_TESTS=yes";
 
 fn now_secs() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// The shared, logged-in client.
@@ -117,13 +123,18 @@ async fn client() -> Client {
                 .unwrap_or_else(|| "DESKTOPWIN".into())
                 .parse()
                 .map_err(|_| "LINE_TEST_DEVICE is not a known device name".to_string())?;
-            let storage = FileStorage::new(STORAGE_PATH).map_err(|e| format!("open {STORAGE_PATH}: {e}"))?;
+            let storage =
+                FileStorage::new(STORAGE_PATH).map_err(|e| format!("open {STORAGE_PATH}: {e}"))?;
             throttle().await;
             let client = login_with_auth_token(&token, InitOptions::new(device).storage(storage))
                 .await
                 .map_err(|e| format!("login_with_auth_token failed: {e}"))?;
             watch_token_updates(&client);
-            println!("logged in as {} ({})", client.mid().unwrap_or_default(), device.as_str());
+            println!(
+                "logged in as {} ({})",
+                client.mid().unwrap_or_default(),
+                device.as_str()
+            );
             Ok(client)
         })
         .await;
@@ -141,7 +152,9 @@ fn watch_token_updates(client: &Client) {
         loop {
             match rx.recv().await {
                 Ok(line_rs::ClientEvent::UpdateAuthToken(t)) => {
-                    println!("NOTE: auth token rotated; use this as LINE_AUTH_TOKEN next time:\n{t}");
+                    println!(
+                        "NOTE: auth token rotated; use this as LINE_AUTH_TOKEN next time:\n{t}"
+                    );
                 }
                 Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(broadcast::error::RecvError::Closed) => break,
@@ -170,7 +183,11 @@ async fn post_text(client: &Client, to: &str, label: &str) -> TalkMessage {
         .send_message(to, MessageInput::text(unique_text(label)).e2ee(true))
         .await
         .unwrap_or_else(|e| panic!("send_message to {to} failed: {e}"));
-    assert!(!msg.id().is_empty(), "sent message has no id: {:?}", msg.raw);
+    assert!(
+        !msg.id().is_empty(),
+        "sent message has no id: {:?}",
+        msg.raw
+    );
     println!("sent message {} to {to}", msg.id());
     msg
 }
@@ -182,7 +199,11 @@ fn tiny_png(size: u32) -> Vec<u8> {
         for &b in data {
             crc ^= u32::from(b);
             for _ in 0..8 {
-                crc = if crc & 1 != 0 { (crc >> 1) ^ 0xedb8_8320 } else { crc >> 1 };
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0xedb8_8320
+                } else {
+                    crc >> 1
+                };
             }
         }
         !crc
@@ -207,7 +228,10 @@ fn tiny_png(size: u32) -> Vec<u8> {
     let mut row = vec![0u8];
     row.extend([0x06, 0xc7, 0x55].repeat(size as usize));
     let raw = row.repeat(size as usize);
-    assert!(raw.len() <= 0xffff, "tiny_png: too large for one stored block");
+    assert!(
+        raw.len() <= 0xffff,
+        "tiny_png: too large for one stored block"
+    );
     let mut zlib = vec![0x78, 0x01, 0x01];
     zlib.extend_from_slice(&(raw.len() as u16).to_le_bytes());
     zlib.extend_from_slice(&(!(raw.len() as u16)).to_le_bytes());
@@ -242,13 +266,20 @@ async fn wait_for<T>(
                 println!("(lagged, {n} events dropped)");
                 continue;
             }
-            Ok(Err(broadcast::error::RecvError::Closed)) => panic!("event channel closed while waiting for {what}"),
+            Ok(Err(broadcast::error::RecvError::Closed)) => {
+                panic!("event channel closed while waiting for {what}")
+            }
             Ok(Ok(ev)) => ev,
         };
         match &ev {
             ClientEvent::Event(op) => println!("op: {} {}", op["type"], op),
             ClientEvent::Talk(t) => println!("talk: {t:?}"),
-            ClientEvent::Message(m) => println!("message {} from {} ({})", m.id(), m.from().id, m.content_type()),
+            ClientEvent::Message(m) => println!(
+                "message {} from {} ({})",
+                m.id(),
+                m.from().id,
+                m.content_type()
+            ),
             _ => {}
         }
         if let Some(found) = pick(&ev) {
@@ -267,7 +298,11 @@ impl Drop for Listening {
 }
 
 fn listen_talk(client: &Client) -> Listening {
-    Listening(client.listen(ListenOptions { talk: true, square: false, polling: false }))
+    Listening(client.listen(ListenOptions {
+        talk: true,
+        square: false,
+        polling: false,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -283,7 +318,12 @@ mod read_only {
         run(async {
             let c = client().await;
             throttle().await;
-            let res = c.base.talk().get_pinned_chats(None).await.unwrap_or_else(|e| panic!("getPinnedChats: {e}"));
+            let res = c
+                .base
+                .talk()
+                .get_pinned_chats(None)
+                .await
+                .unwrap_or_else(|e| panic!("getPinnedChats: {e}"));
             println!("getPinnedChats: {res}");
         });
     }
@@ -294,8 +334,12 @@ mod read_only {
         run(async {
             let c = client().await;
             throttle().await;
-            let res =
-                c.base.multi_profile().get_profiles("INITIALIZATION").await.unwrap_or_else(|e| panic!("getProfiles: {e}"));
+            let res = c
+                .base
+                .multi_profile()
+                .get_profiles("INITIALIZATION")
+                .await
+                .unwrap_or_else(|e| panic!("getProfiles: {e}"));
             println!("getProfiles: {res}");
             assert!(!res.is_null(), "getProfiles returned null");
         });
@@ -305,15 +349,17 @@ mod read_only {
     #[ignore = "hits the real LINE server with a test account"]
     fn block_details_for_peer() {
         run(async {
-            let Some(peer) = peer() else { return skip(PEER_SKIP) };
+            let Some(peer) = peer() else {
+                return skip(PEER_SKIP);
+            };
             let c = client().await;
             throttle().await;
             match c.base.relation().get_block_details(&[peer], None).await {
                 Ok(res) => println!("getBlockDetails: {res}"),
                 // device capability (e.g. DESKTOPWIN), not a client bug
-                Err(e) if e.to_string().contains("API method not capable") => {
-                    skip(&format!("getBlockDetails not available on this device type: {e}"))
-                }
+                Err(e) if e.to_string().contains("API method not capable") => skip(&format!(
+                    "getBlockDetails not available on this device type: {e}"
+                )),
                 Err(e) => panic!("getBlockDetails: {e}"),
             }
         });
@@ -342,7 +388,12 @@ mod read_only {
         run(async {
             let c = client().await;
             throttle().await;
-            let res = c.base.talk().get_user_ticket().await.unwrap_or_else(|e| panic!("getUserTicket: {e}"));
+            let res = c
+                .base
+                .talk()
+                .get_user_ticket()
+                .await
+                .unwrap_or_else(|e| panic!("getUserTicket: {e}"));
             println!("getUserTicket: {res}");
             assert!(!res.is_null(), "getUserTicket returned null");
         });
@@ -356,13 +407,22 @@ mod read_only {
             let c = client().await;
             let chat = self_chat(&c);
             throttle().await;
-            let mut fetcher = chat.message_fetcher().await.unwrap_or_else(|e| panic!("getMessageBoxes: {e}"));
+            let mut fetcher = chat
+                .message_fetcher()
+                .await
+                .unwrap_or_else(|e| panic!("getMessageBoxes: {e}"));
             throttle().await;
-            let page = fetcher.fetch(1).await.unwrap_or_else(|e| panic!("getPreviousMessagesV2WithRequest: {e}"));
+            let page = fetcher
+                .fetch(1)
+                .await
+                .unwrap_or_else(|e| panic!("getPreviousMessagesV2WithRequest: {e}"));
             let Some(msg) = page.first() else {
                 return skip("self-chat has no messages; send one to Keep Memo first");
             };
-            let id: i64 = msg.id().parse().unwrap_or_else(|_| panic!("message id {:?} is not numeric", msg.id()));
+            let id: i64 = msg
+                .id()
+                .parse()
+                .unwrap_or_else(|_| panic!("message id {:?} is not numeric", msg.id()));
             let delivered = msg.raw["deliveredTime"].as_i64().unwrap_or(0);
             throttle().await;
             let res = c
@@ -375,8 +435,14 @@ mod read_only {
                 .await
                 .unwrap_or_else(|e| panic!("getMessagesByIds: {e}"));
             println!("getMessagesByIds: {res}");
-            let found = res.as_list().is_some_and(|l| l.iter().any(|m| m["id"].as_str() == Some(msg.id())));
-            assert!(found, "getMessagesByIds did not return message {}: {res}", msg.id());
+            let found = res
+                .as_list()
+                .is_some_and(|l| l.iter().any(|m| m["id"].as_str() == Some(msg.id())));
+            assert!(
+                found,
+                "getMessagesByIds did not return message {}: {res}",
+                msg.id()
+            );
         });
     }
 
@@ -387,7 +453,11 @@ mod read_only {
             let c = client().await;
             let rest = c.base.rest();
             throttle().await;
-            let res = rest.keep().size().await.unwrap_or_else(|e| panic!("keep/size.json: {e}"));
+            let res = rest
+                .keep()
+                .size()
+                .await
+                .unwrap_or_else(|e| panic!("keep/size.json: {e}"));
             println!("keep/size.json: {res}");
         });
     }
@@ -402,7 +472,11 @@ mod read_only {
             let c = client().await;
             let rest = c.base.rest();
             throttle().await;
-            let res = rest.keep().get_content(&id).await.unwrap_or_else(|e| panic!("keep/get.json: {e}"));
+            let res = rest
+                .keep()
+                .get_content(&id)
+                .await
+                .unwrap_or_else(|e| panic!("keep/get.json: {e}"));
             println!("keep/get.json: {res}");
         });
     }
@@ -414,8 +488,15 @@ mod read_only {
             let c = client().await;
             let rest = c.base.rest();
             throttle().await;
-            let q = PageInfoQuery { url: "https://line.me".into(), ..Default::default() };
-            let res = rest.home().page_info(q).await.unwrap_or_else(|e| panic!("pageinfo/get.json: {e}"));
+            let q = PageInfoQuery {
+                url: "https://line.me".into(),
+                ..Default::default()
+            };
+            let res = rest
+                .home()
+                .page_info(q)
+                .await
+                .unwrap_or_else(|e| panic!("pageinfo/get.json: {e}"));
             println!("pageinfo/get.json: {res}");
         });
     }
@@ -432,12 +513,20 @@ mod read_only {
     #[ignore = "hits the real LINE server with a test account"]
     fn group_announcements() {
         run(async {
-            let Some(group) = env("LINE_GROUP_MID") else { return skip("set LINE_GROUP_MID") };
+            let Some(group) = env("LINE_GROUP_MID") else {
+                return skip("set LINE_GROUP_MID");
+            };
             let c = client().await;
             throttle().await;
-            let chat = c.get_chat(&group).await.unwrap_or_else(|e| panic!("getChats({group}): {e}"));
+            let chat = c
+                .get_chat(&group)
+                .await
+                .unwrap_or_else(|e| panic!("getChats({group}): {e}"));
             throttle().await;
-            let list = chat.announcements().await.unwrap_or_else(|e| panic!("getChatRoomAnnouncements: {e}"));
+            let list = chat
+                .announcements()
+                .await
+                .unwrap_or_else(|e| panic!("getChatRoomAnnouncements: {e}"));
             println!("{} announcement(s): {list:?}", list.len());
         });
     }
@@ -446,12 +535,20 @@ mod read_only {
     #[ignore = "hits the real LINE server with a test account"]
     fn group_read_range() {
         run(async {
-            let Some(group) = env("LINE_GROUP_MID") else { return skip("set LINE_GROUP_MID") };
+            let Some(group) = env("LINE_GROUP_MID") else {
+                return skip("set LINE_GROUP_MID");
+            };
             let c = client().await;
             throttle().await;
-            let chat = c.get_chat(&group).await.unwrap_or_else(|e| panic!("getChats({group}): {e}"));
+            let chat = c
+                .get_chat(&group)
+                .await
+                .unwrap_or_else(|e| panic!("getChats({group}): {e}"));
             throttle().await;
-            let range = chat.read_range().await.unwrap_or_else(|e| panic!("getMessageReadRange: {e}"));
+            let range = chat
+                .read_range()
+                .await
+                .unwrap_or_else(|e| panic!("getMessageReadRange: {e}"));
             println!("getMessageReadRange: {range:?}");
         });
     }
@@ -471,7 +568,11 @@ mod write {
             let c = client().await;
             let me = own_mid(&c);
             let msg = post_text(&c, &me, "send_text").await;
-            assert!(msg.is_my_message(), "sent message is not ours: {:?}", msg.raw);
+            assert!(
+                msg.is_my_message(),
+                "sent message is not ours: {:?}",
+                msg.raw
+            );
         });
     }
 
@@ -511,9 +612,16 @@ mod write {
         run(async {
             let c = client().await;
             let me = own_mid(&c);
-            let name = c.base.profile().and_then(|p| p["displayName"].as_str().map(str::to_string)).unwrap_or_default();
+            let name = c
+                .base
+                .profile()
+                .and_then(|p| p["displayName"].as_str().map(str::to_string))
+                .unwrap_or_default();
             throttle().await;
-            let msg = self_chat(&c).send_contact(&me, &name).await.unwrap_or_else(|e| panic!("send_contact: {e}"));
+            let msg = self_chat(&c)
+                .send_contact(&me, &name)
+                .await
+                .unwrap_or_else(|e| panic!("send_contact: {e}"));
             println!("send_contact: {} {:?}", msg.id(), msg.content_metadata());
         });
     }
@@ -528,7 +636,9 @@ mod write {
             throttle().await;
             match msg.edit(&unique_text("edit_message (after)")).await {
                 Ok(res) => println!("editMessage: {res}"),
-                Err(e) if e.code() == Some("NOT_PREMIUM") => skip(&format!("needs LYP Premium: {e}")),
+                Err(e) if e.code() == Some("NOT_PREMIUM") => {
+                    skip(&format!("needs LYP Premium: {e}"))
+                }
                 Err(e) => panic!("editMessage: {e}"),
             }
         });
@@ -544,7 +654,9 @@ mod write {
             throttle().await;
             match c.base.talk().silently_unsend_message(msg.id()).await {
                 Ok(res) => println!("silentlyUnsendMessage: {res}"),
-                Err(e) if e.code() == Some("NOT_PREMIUM") => skip(&format!("needs LYP Premium: {e}")),
+                Err(e) if e.code() == Some("NOT_PREMIUM") => {
+                    skip(&format!("needs LYP Premium: {e}"))
+                }
                 Err(e) => panic!("silentlyUnsendMessage: {e}"),
             }
         });
@@ -557,11 +669,20 @@ mod write {
             let c = client().await;
             let me = own_mid(&c);
             throttle().await;
-            let res = c.base.talk().update_pin_state(&me, true).await.unwrap_or_else(|e| panic!("updatePinState(true): {e}"));
+            let res = c
+                .base
+                .talk()
+                .update_pin_state(&me, true)
+                .await
+                .unwrap_or_else(|e| panic!("updatePinState(true): {e}"));
             println!("updatePinState(true): {res}");
             throttle().await;
-            let res =
-                c.base.talk().update_pin_state(&me, false).await.unwrap_or_else(|e| panic!("updatePinState(false): {e}"));
+            let res = c
+                .base
+                .talk()
+                .update_pin_state(&me, false)
+                .await
+                .unwrap_or_else(|e| panic!("updatePinState(false): {e}"));
             println!("updatePinState(false): {res}");
         });
     }
@@ -576,9 +697,13 @@ mod write {
             let me = own_mid(&c);
             let msg = post_text(&c, &me, "react").await;
             throttle().await;
-            msg.react(ReactionType::Nice).await.unwrap_or_else(|e| panic!("react: {e}"));
+            msg.react(ReactionType::Nice)
+                .await
+                .unwrap_or_else(|e| panic!("react: {e}"));
             throttle().await;
-            msg.cancel_reaction().await.unwrap_or_else(|e| panic!("cancelReaction: {e}"));
+            msg.cancel_reaction()
+                .await
+                .unwrap_or_else(|e| panic!("cancelReaction: {e}"));
         });
     }
 
@@ -587,18 +712,29 @@ mod write {
     #[ignore = "hits the real LINE server with a test account"]
     fn group_mute_favorite_roundtrip() {
         run(async {
-            let Some(group) = env("LINE_GROUP_MID") else { return skip("set LINE_GROUP_MID") };
+            let Some(group) = env("LINE_GROUP_MID") else {
+                return skip("set LINE_GROUP_MID");
+            };
             let c = client().await;
             throttle().await;
-            let chat = c.get_chat(&group).await.unwrap_or_else(|e| panic!("getChats({group}): {e}"));
+            let chat = c
+                .get_chat(&group)
+                .await
+                .unwrap_or_else(|e| panic!("getChats({group}): {e}"));
             throttle().await;
             chat.mute().await.unwrap_or_else(|e| panic!("mute: {e}"));
             throttle().await;
-            chat.unmute().await.unwrap_or_else(|e| panic!("unmute: {e}"));
+            chat.unmute()
+                .await
+                .unwrap_or_else(|e| panic!("unmute: {e}"));
             throttle().await;
-            chat.favorite().await.unwrap_or_else(|e| panic!("favorite: {e}"));
+            chat.favorite()
+                .await
+                .unwrap_or_else(|e| panic!("favorite: {e}"));
             throttle().await;
-            chat.unfavorite().await.unwrap_or_else(|e| panic!("unfavorite: {e}"));
+            chat.unfavorite()
+                .await
+                .unwrap_or_else(|e| panic!("unfavorite: {e}"));
         });
     }
 
@@ -607,17 +743,27 @@ mod write {
     #[ignore = "hits the real LINE server with a test account"]
     fn peer_mute_favorite_roundtrip() {
         run(async {
-            let Some(peer) = peer() else { return skip(PEER_SKIP) };
+            let Some(peer) = peer() else {
+                return skip(PEER_SKIP);
+            };
             let c = client().await;
             let user = User::new(c.clone(), tv!({"targetUserMid": peer}));
             throttle().await;
-            user.set_notification_disabled(true).await.unwrap_or_else(|e| panic!("mute contact: {e}"));
+            user.set_notification_disabled(true)
+                .await
+                .unwrap_or_else(|e| panic!("mute contact: {e}"));
             throttle().await;
-            user.set_notification_disabled(false).await.unwrap_or_else(|e| panic!("unmute contact: {e}"));
+            user.set_notification_disabled(false)
+                .await
+                .unwrap_or_else(|e| panic!("unmute contact: {e}"));
             throttle().await;
-            user.set_favorite(true).await.unwrap_or_else(|e| panic!("favorite contact: {e}"));
+            user.set_favorite(true)
+                .await
+                .unwrap_or_else(|e| panic!("favorite contact: {e}"));
             throttle().await;
-            user.set_favorite(false).await.unwrap_or_else(|e| panic!("unfavorite contact: {e}"));
+            user.set_favorite(false)
+                .await
+                .unwrap_or_else(|e| panic!("unfavorite contact: {e}"));
         });
     }
 
@@ -625,10 +771,17 @@ mod write {
     #[ignore = "hits the real LINE server with a test account"]
     fn block_roundtrip() {
         run(async {
-            let Some(peer) = peer() else { return skip(PEER_SKIP) };
+            let Some(peer) = peer() else {
+                return skip(PEER_SKIP);
+            };
             let c = client().await;
             throttle().await;
-            let res = c.base.relation().block_relation(&peer).await.unwrap_or_else(|e| panic!("blockRelation: {e}"));
+            let res = c
+                .base
+                .relation()
+                .block_relation(&peer)
+                .await
+                .unwrap_or_else(|e| panic!("blockRelation: {e}"));
             println!("blockRelation: {res}");
             throttle().await;
             let res = c
@@ -636,7 +789,9 @@ mod write {
                 .relation()
                 .unblock_relation(&peer, None)
                 .await
-                .unwrap_or_else(|e| panic!("unblockRelation (peer is still BLOCKED, unblock on the phone): {e}"));
+                .unwrap_or_else(|e| {
+                    panic!("unblockRelation (peer is still BLOCKED, unblock on the phone): {e}")
+                });
             println!("unblockRelation: {res}");
         });
     }
@@ -657,21 +812,30 @@ mod events {
     fn read_receipt() {
         run(async {
             let Some(peer) = peer() else {
-                return skip("no read receipts in the self-chat; needs LINE_PEER_MID + LINE_ALLOW_PEER_TESTS=yes");
+                return skip(
+                    "no read receipts in the self-chat; needs LINE_PEER_MID + LINE_ALLOW_PEER_TESTS=yes",
+                );
             };
             let c = client().await;
             let mut rx = c.subscribe();
             let _listen = listen_talk(&c);
             post_text(&c, &peer, "read_receipt").await;
-            println!(">>> On the PEER's phone: open the chat with this account within {WAIT_SECS}s.");
+            println!(
+                ">>> On the PEER's phone: open the chat with this account within {WAIT_SECS}s."
+            );
             let (chat, reader) = wait_for(&mut rx, WAIT_SECS, "TalkEvent::Read", |ev| match ev {
-                ClientEvent::Talk(TalkEvent::Read { chat_mid, reader_mid, .. }) => {
-                    Some((chat_mid.clone(), reader_mid.clone()))
-                }
+                ClientEvent::Talk(TalkEvent::Read {
+                    chat_mid,
+                    reader_mid,
+                    ..
+                }) => Some((chat_mid.clone(), reader_mid.clone())),
                 _ => None,
             })
             .await;
-            assert_eq!(reader, peer, "Read.reader_mid (param2) is not the peer; chat_mid={chat}");
+            assert_eq!(
+                reader, peer,
+                "Read.reader_mid (param2) is not the peer; chat_mid={chat}"
+            );
         });
     }
 
@@ -680,21 +844,37 @@ mod events {
     fn reaction() {
         run(async {
             // LINE does not allow reacting to your own messages: the peer reacts.
-            let Some(peer) = peer() else { return skip(PEER_SKIP) };
+            let Some(peer) = peer() else {
+                return skip(PEER_SKIP);
+            };
             let c = client().await;
             let mut rx = c.subscribe();
             let _listen = listen_talk(&c);
             let msg = post_text(&c, &peer, "react to me").await;
-            println!(">>> Ask the peer to react to \"{}\" in their chat with this account within {WAIT_SECS}s.", msg.text());
+            println!(
+                ">>> Ask the peer to react to \"{}\" in their chat with this account within {WAIT_SECS}s.",
+                msg.text()
+            );
             let r = wait_for(&mut rx, WAIT_SECS, "TalkEvent::Reaction", |ev| match ev {
                 ClientEvent::Talk(TalkEvent::Reaction(r)) => Some(r.clone()),
                 _ => None,
             })
             .await;
             println!("reaction: {r:?}");
-            assert_eq!(r.message_id, msg.id(), "Reaction.message_id (param1) does not match the sent message");
-            assert_eq!(r.reactor_mid, peer, "Reaction.reactor_mid (param3) is not the peer");
-            assert!(r.reaction.is_some(), "reaction type not decoded from param2: {}", r.detail);
+            assert_eq!(
+                r.message_id,
+                msg.id(),
+                "Reaction.message_id (param1) does not match the sent message"
+            );
+            assert_eq!(
+                r.reactor_mid, peer,
+                "Reaction.reactor_mid (param3) is not the peer"
+            );
+            assert!(
+                r.reaction.is_some(),
+                "reaction type not decoded from param2: {}",
+                r.detail
+            );
         });
     }
 
@@ -706,23 +886,35 @@ mod events {
             let me = own_mid(&c);
             let mut rx = c.subscribe();
             let _listen = listen_talk(&c);
-            println!(">>> On your phone: in Keep Memo send a text, then unsend it, within {WAIT_SECS}s.");
+            println!(
+                ">>> On your phone: in Keep Memo send a text, then unsend it, within {WAIT_SECS}s."
+            );
             let mut sent_from_phone = None;
-            let (chat_mid, message_id) = wait_for(&mut rx, WAIT_SECS, "TalkEvent::Unsend", |ev| match ev {
-                ClientEvent::Message(m) if m.to().id == me => {
-                    sent_from_phone = Some(m.id().to_string());
-                    None
-                }
-                ClientEvent::Talk(TalkEvent::Unsend { chat_mid, message_id }) => {
-                    Some((chat_mid.clone(), message_id.clone()))
-                }
-                _ => None,
-            })
-            .await;
-            println!("unsend: chat_mid={chat_mid} message_id={message_id} (phone message seen: {sent_from_phone:?})");
-            assert!(!message_id.is_empty(), "Unsend.message_id (param2) is empty");
+            let (chat_mid, message_id) =
+                wait_for(&mut rx, WAIT_SECS, "TalkEvent::Unsend", |ev| match ev {
+                    ClientEvent::Message(m) if m.to().id == me => {
+                        sent_from_phone = Some(m.id().to_string());
+                        None
+                    }
+                    ClientEvent::Talk(TalkEvent::Unsend {
+                        chat_mid,
+                        message_id,
+                    }) => Some((chat_mid.clone(), message_id.clone())),
+                    _ => None,
+                })
+                .await;
+            println!(
+                "unsend: chat_mid={chat_mid} message_id={message_id} (phone message seen: {sent_from_phone:?})"
+            );
+            assert!(
+                !message_id.is_empty(),
+                "Unsend.message_id (param2) is empty"
+            );
             if let Some(id) = sent_from_phone {
-                assert_eq!(message_id, id, "Unsend.message_id (param2) does not match the message sent from the phone");
+                assert_eq!(
+                    message_id, id,
+                    "Unsend.message_id (param2) does not match the message sent from the phone"
+                );
             }
         });
     }
@@ -752,17 +944,40 @@ mod e2ee {
             let mut rx = c.subscribe();
             let _listen = listen_talk(&c);
             println!(">>> On your phone: send a photo to Keep Memo within 120s.");
-            let msg = wait_for(&mut rx, 120, "an IMAGE message in the self-chat", |ev| match ev {
-                ClientEvent::Message(m) if m.to().id == me && m.content_type() == "IMAGE" => Some(m.clone()),
-                _ => None,
-            })
+            let msg = wait_for(
+                &mut rx,
+                120,
+                "an IMAGE message in the self-chat",
+                |ev| match ev {
+                    ClientEvent::Message(m) if m.to().id == me && m.content_type() == "IMAGE" => {
+                        Some(m.clone())
+                    }
+                    _ => None,
+                },
+            )
             .await;
-            println!("image message {} metadata {:?} e2ee={}", msg.id(), msg.content_metadata(), msg.raw.get("chunks").is_some());
+            println!(
+                "image message {} metadata {:?} e2ee={}",
+                msg.id(),
+                msg.content_metadata(),
+                msg.raw.get("chunks").is_some()
+            );
             throttle().await;
-            let data = msg.data(false).await.unwrap_or_else(|e| panic!("download/decrypt image {}: {e}", msg.id()));
-            println!("downloaded {} bytes, head {:02x?}", data.len(), &data[..data.len().min(16)]);
+            let data = msg
+                .data(false)
+                .await
+                .unwrap_or_else(|e| panic!("download/decrypt image {}: {e}", msg.id()));
+            println!(
+                "downloaded {} bytes, head {:02x?}",
+                data.len(),
+                &data[..data.len().min(16)]
+            );
             assert!(!data.is_empty(), "downloaded image is empty");
-            assert!(is_image(&data), "downloaded data has no known image magic: {:02x?}", &data[..data.len().min(16)]);
+            assert!(
+                is_image(&data),
+                "downloaded data has no known image magic: {:02x?}",
+                &data[..data.len().min(16)]
+            );
         });
     }
 }
@@ -781,25 +996,38 @@ mod session {
     fn proactive_refresh() {
         run(async {
             let c = client().await;
-            let has_refresh = matches!(c.base.storage.get_string("refreshToken").await, Ok(Some(_)));
+            let has_refresh =
+                matches!(c.base.storage.get_string("refreshToken").await, Ok(Some(_)));
             if !has_refresh {
-                return skip("no refreshToken stored (not a V3 token); proactive refresh does not apply");
+                return skip(
+                    "no refreshToken stored (not a V3 token); proactive refresh does not apply",
+                );
             }
             if !c.base.config.proactive_refresh {
                 return skip("Config::proactive_refresh is off");
             }
             let before = c.auth_token();
-            c.base.set_token_expire(now_secs() - 10).await.unwrap_or_else(|e| panic!("set_token_expire: {e}"));
+            c.base
+                .set_token_expire(now_secs() - 10)
+                .await
+                .unwrap_or_else(|e| panic!("set_token_expire: {e}"));
             throttle().await;
             c.base
                 .talk()
                 .call("getProfile", tv!({"syncReason": "INTERNAL"}))
                 .await
                 .unwrap_or_else(|e| panic!("getProfile after forcing expiry: {e}"));
-            let expire = c.base.token_expire().await.unwrap_or_else(|e| panic!("token_expire: {e}"));
+            let expire = c
+                .base
+                .token_expire()
+                .await
+                .unwrap_or_else(|e| panic!("token_expire: {e}"));
             println!("expire now {expire:?}");
             assert_ne!(c.auth_token(), before, "token was not refreshed");
-            assert!(expire.is_some_and(|e| e > now_secs()), "expire not moved forward: {expire:?}");
+            assert!(
+                expire.is_some_and(|e| e > now_secs()),
+                "expire not moved forward: {expire:?}"
+            );
         });
     }
 
@@ -809,13 +1037,19 @@ mod session {
     fn kicked_out() {
         run(async {
             if std::env::var("LINE_ALLOW_KICKOUT_TEST").as_deref() != Ok("yes") {
-                return skip("opt-in only (LINE_ALLOW_KICKOUT_TEST=yes); see LIVE_TESTING.md before enabling");
+                return skip(
+                    "opt-in only (LINE_ALLOW_KICKOUT_TEST=yes); see LIVE_TESTING.md before enabling",
+                );
             }
             let c = client().await;
             let mut rx = c.base.subscribe();
             let _listen = listen_talk(&c);
-            println!("!!! WARNING: this ends the test session for good; the token becomes unusable.");
-            println!(">>> On your phone: Settings > Account > Devices, log out the linejs session, within 180s.");
+            println!(
+                "!!! WARNING: this ends the test session for good; the token becomes unusable."
+            );
+            println!(
+                ">>> On your phone: Settings > Account > Devices, log out the linejs session, within 180s."
+            );
             let deadline = Instant::now() + Duration::from_secs(180);
             let reason = loop {
                 let left = deadline.saturating_duration_since(Instant::now());
@@ -823,7 +1057,9 @@ mod session {
                     Err(_) => panic!("timed out after 180s waiting for ClientEvent::KickedOut"),
                     Ok(Ok(line_rs::ClientEvent::KickedOut(r))) => break r,
                     Ok(Ok(_)) | Ok(Err(broadcast::error::RecvError::Lagged(_))) => {}
-                    Ok(Err(broadcast::error::RecvError::Closed)) => panic!("base event channel closed"),
+                    Ok(Err(broadcast::error::RecvError::Closed)) => {
+                        panic!("base event channel closed")
+                    }
                 }
             };
             println!("kicked out: {reason}");

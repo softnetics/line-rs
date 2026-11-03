@@ -2,10 +2,10 @@
 //! `features/message/talk.ts`).
 
 use super::types::{
-    AppLinkInfo, CallInfo, ChatEventInfo, ContactMeta, Decoration, FileInfo, FlexMeta, GiftInfo, MentionTarget, Mid,
-    PostNotificationInfo, ReactionType,
+    AppLinkInfo, CallInfo, ChatEventInfo, ContactMeta, Decoration, FileInfo, FlexMeta, GiftInfo,
+    MentionTarget, Mid, PostNotificationInfo, ReactionType,
 };
-use super::utils::{fetch_bytes, reply_target, type_error, Content, MessageInput};
+use super::utils::{Content, MessageInput, fetch_bytes, reply_target, type_error};
 use crate::client::Client;
 use crate::e2ee::E2eeContent;
 use crate::error::Result;
@@ -21,7 +21,9 @@ pub struct TalkMessage {
 
 impl std::fmt::Debug for TalkMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TalkMessage").field("raw", &self.raw).finish()
+        f.debug_struct("TalkMessage")
+            .field("raw", &self.raw)
+            .finish()
     }
 }
 
@@ -67,13 +69,17 @@ impl TalkMessage {
     pub fn to(&self) -> Mid {
         Mid {
             id: self.raw["to"].as_str().unwrap_or("").to_string(),
-            kind: super::types::enum_name(&self.raw["toType"], "MIDType").unwrap_or_else(|| "USER".into()),
+            kind: super::types::enum_name(&self.raw["toType"], "MIDType")
+                .unwrap_or_else(|| "USER".into()),
         }
     }
 
     /// The sender (always a user).
     pub fn from(&self) -> Mid {
-        Mid { id: self.raw["from"].as_str().unwrap_or("").to_string(), kind: "USER".into() }
+        Mid {
+            id: self.raw["from"].as_str().unwrap_or("").to_string(),
+            kind: "USER".into(),
+        }
     }
 
     pub fn is_my_message(&self) -> bool {
@@ -98,12 +104,15 @@ impl TalkMessage {
     /// Whether the message was edited (`EDITED` / `UPDATED_TIME` metadata or
     /// a non-zero `updatedTime`).
     pub fn is_edited(&self) -> bool {
-        self.raw["contentMetadata"]["EDITED"].as_str() == Some("true") || self.updated_time().is_some()
+        self.raw["contentMetadata"]["EDITED"].as_str() == Some("true")
+            || self.updated_time().is_some()
     }
 
     /// Time of the last edit (ms), or `None` if never edited.
     pub fn updated_time(&self) -> Option<i64> {
-        if let Some(t) = self.raw["contentMetadata"]["UPDATED_TIME"].as_str().and_then(|s| s.trim().parse::<f64>().ok())
+        if let Some(t) = self.raw["contentMetadata"]["UPDATED_TIME"]
+            .as_str()
+            .and_then(|s| s.trim().parse::<f64>().ok())
         {
             return Some(t as i64);
         }
@@ -153,7 +162,10 @@ impl TalkMessage {
 
     /// `cancelReaction` arguments (the message id must be numeric).
     pub(crate) async fn cancel_reaction_args(&self) -> Result<Value> {
-        let id: i64 = self.id().parse().map_err(|_| type_error("The message id is not numeric."))?;
+        let id: i64 = self
+            .id()
+            .parse()
+            .map_err(|_| type_error("The message id is not numeric."))?;
         let req_seq = self.client.base.get_reqseq("talk").await?;
         Ok(tv!({"cancelReactionRequest": {"reqSeq": req_seq, "messageId": id}}))
     }
@@ -168,7 +180,11 @@ impl TalkMessage {
     /// Report a Flex postback action on this message: `url` is the action's
     /// postback URL (`sendPostback`, origin = the message sender).
     pub async fn send_postback(&self, url: &str) -> Result<()> {
-        self.client.base.talk().send_flex_postback(self.id(), url, &self.chat_mid(), &self.from().id).await?;
+        self.client
+            .base
+            .talk()
+            .send_flex_postback(self.id(), url, &self.chat_mid(), &self.from().id)
+            .await?;
         Ok(())
     }
 
@@ -181,7 +197,11 @@ impl TalkMessage {
     /// Mark the chat as read up to this message.
     pub async fn read(&self) -> Result<()> {
         let args = self.read_args().await?;
-        self.client.base.talk().call("sendChatChecked", args).await?;
+        self.client
+            .base
+            .talk()
+            .call("sendChatChecked", args)
+            .await?;
         Ok(())
     }
 
@@ -235,7 +255,10 @@ impl TalkMessage {
                 .base
                 .encrypt_e2ee_message(&self.to().id, E2eeContent::Text(text.to_string()), 0, 2)
                 .await?;
-            edited.insert("chunks", Value::List(chunks.into_iter().map(Value::Binary).collect()));
+            edited.insert(
+                "chunks",
+                Value::List(chunks.into_iter().map(Value::Binary).collect()),
+            );
             edited.insert("text", Value::Null);
         } else {
             edited.insert("text", text);
@@ -248,7 +271,11 @@ impl TalkMessage {
         if !self.is_my_message() {
             return Err(type_error("Cannot unsend the message which is not yours."));
         }
-        self.client.base.talk().call("unsendMessage", tv!({"messageId": self.id()})).await?;
+        self.client
+            .base
+            .talk()
+            .call("unsendMessage", tv!({"messageId": self.id()}))
+            .await?;
         Ok(())
     }
 
@@ -316,16 +343,25 @@ impl TalkMessage {
             return Err(type_error("message have no contents"));
         }
         if content.metadata.contains_key("DOWNLOAD_URL") {
-            let key = if preview { "PREVIEW_URL" } else { "DOWNLOAD_URL" };
+            let key = if preview {
+                "PREVIEW_URL"
+            } else {
+                "DOWNLOAD_URL"
+            };
             let url = content.metadata.get(key).cloned().unwrap_or_default();
             return fetch_bytes(&self.client.base.http, &url).await;
         }
         let obs = self.client.base.obs();
         if self.raw["chunks"].as_list().is_some_and(|c| !c.is_empty())
-            && let Some(file) = obs.download_e2ee_message_media(&self.raw).await? {
-                return Ok(file.data.to_vec());
-            }
-        Ok(obs.download_message_data(self.id(), preview, false).await?.data.to_vec())
+            && let Some(file) = obs.download_e2ee_message_media(&self.raw).await?
+        {
+            return Ok(file.data.to_vec());
+        }
+        Ok(obs
+            .download_message_data(self.id(), preview, false)
+            .await?
+            .data
+            .to_vec())
     }
 }
 
@@ -369,7 +405,9 @@ mod tests {
 
     #[test]
     fn is_edited_message_box_metadata() {
-        let m = message(tv!({"id": "1234567890123456789", "contentMetadata": {"UPDATED_TIME": "1788432321630"}}));
+        let m = message(
+            tv!({"id": "1234567890123456789", "contentMetadata": {"UPDATED_TIME": "1788432321630"}}),
+        );
         assert!(m.is_edited());
         assert_eq!(m.updated_time(), Some(1788432321630));
     }
@@ -377,8 +415,14 @@ mod tests {
     #[test]
     fn updated_time() {
         assert_eq!(message(tv!({"text": "hi"})).updated_time(), None);
-        assert_eq!(message(tv!({"text": "hi", "updatedTime": 0})).updated_time(), None);
-        assert_eq!(message(tv!({"updatedTime": 1700000000000_i64})).updated_time(), Some(1700000000000));
+        assert_eq!(
+            message(tv!({"text": "hi", "updatedTime": 0})).updated_time(),
+            None
+        );
+        assert_eq!(
+            message(tv!({"updatedTime": 1700000000000_i64})).updated_time(),
+            Some(1700000000000)
+        );
         assert_eq!(
             message(tv!({"updatedTime": 1700000000000_i64, "contentMetadata": {"UPDATED_TIME": "1787927539000"}}))
                 .updated_time(),
@@ -403,7 +447,10 @@ mod tests {
     #[tokio::test]
     async fn read_keeps_counterpart_mid_for_dms() {
         let m = message(raw("u-self", "u-them", "USER"));
-        assert_eq!(m.read_args().await.unwrap()["chatMid"].as_str(), Some("u-them"));
+        assert_eq!(
+            m.read_args().await.unwrap()["chatMid"].as_str(),
+            Some("u-them")
+        );
         // Numeric toType values are resolved through the IDL enum.
         let mut sent = raw("u-them", "u-self", "USER");
         sent.insert("toType", 0);
@@ -420,23 +467,39 @@ mod tests {
         let mut r = raw("g", "u-them", "GROUP");
         r.insert("id", "9007199254740993");
         let args = message(r).cancel_reaction_args().await.unwrap();
-        assert_eq!(args["cancelReactionRequest"]["messageId"].as_i64(), Some(9007199254740993));
-        crate::thrift::encode_struct(crate::thrift::Schema::line(), "cancelReaction_args", &args).unwrap();
+        assert_eq!(
+            args["cancelReactionRequest"]["messageId"].as_i64(),
+            Some(9007199254740993)
+        );
+        crate::thrift::encode_struct(crate::thrift::Schema::line(), "cancelReaction_args", &args)
+            .unwrap();
     }
 
     #[test]
     fn typed_content_accessors() {
-        let m = message(tv!({"contentType": "FILE", "contentMetadata": {"FILE_NAME": "a.txt", "FILE_SIZE": "3"}}));
+        let m = message(
+            tv!({"contentType": "FILE", "contentMetadata": {"FILE_NAME": "a.txt", "FILE_SIZE": "3"}}),
+        );
         assert_eq!(m.file_info().unwrap().name, "a.txt");
-        let m = message(tv!({"contentType": "GIFT", "contentMetadata": {"PRDID": "1", "PRDTYPE": "THEME"}}));
+        let m = message(
+            tv!({"contentType": "GIFT", "contentMetadata": {"PRDID": "1", "PRDTYPE": "THEME"}}),
+        );
         assert_eq!(m.gift().unwrap().product_type, "THEME");
-        assert!(m.call().is_err() && m.app_link().is_err() && m.chat_event().is_err() && m.post_notification().is_err());
+        assert!(
+            m.call().is_err()
+                && m.app_link().is_err()
+                && m.chat_event().is_err()
+                && m.post_notification().is_err()
+        );
     }
 
     #[tokio::test]
     async fn unsend_rejects_foreign_messages() {
         let m = message(raw("u-self", "u-them", "USER"));
         let err = m.unsend().await.unwrap_err();
-        assert!(err.to_string().contains("Cannot unsend the message which is not yours."));
+        assert!(
+            err.to_string()
+                .contains("Cannot unsend the message which is not yours.")
+        );
     }
 }

@@ -40,10 +40,21 @@ pub enum E2eeSendRecovery {
 pub fn send_recovery(code: &str) -> Option<E2eeSendRecovery> {
     use E2eeSendRecovery::*;
     Some(match code {
-        "E2EE_RETRY_ENCRYPT" | "82" | "E2EE_UPDATE_RECEIVER_KEY" | "84" | "E2EE_INVALID_VERSION" | "86" => Reencrypt,
+        "E2EE_RETRY_ENCRYPT"
+        | "82"
+        | "E2EE_UPDATE_RECEIVER_KEY"
+        | "84"
+        | "E2EE_INVALID_VERSION"
+        | "86" => Reencrypt,
         "E2EE_RECREATE_GROUP_KEY" | "99" => RecreateGroupKey,
-        "E2EE_RETRY_PLAIN" | "98" | "E2EE_RECEIVER_DISABLED" | "88" | "E2EE_RECEIVER_NOT_ALLOWED" | "90"
-        | "E2EE_GROUP_TOO_MANY_MEMBERS" | "100" => RetryPlain,
+        "E2EE_RETRY_PLAIN"
+        | "98"
+        | "E2EE_RECEIVER_DISABLED"
+        | "88"
+        | "E2EE_RECEIVER_NOT_ALLOWED"
+        | "90"
+        | "E2EE_GROUP_TOO_MANY_MEMBERS"
+        | "100" => RetryPlain,
         _ => return None,
     })
 }
@@ -54,7 +65,9 @@ impl BaseClient {
     /// room. Re-encryption itself always negotiates the receiver's current
     /// key, so nothing is cached that would need dropping.
     pub async fn prepare_e2ee_resend(&self, to: &str, recovery: E2eeSendRecovery) -> Result<()> {
-        if recovery == E2eeSendRecovery::RecreateGroupKey && matches!(Self::get_to_type(to), Some(1 | 2)) {
+        if recovery == E2eeSendRecovery::RecreateGroupKey
+            && matches!(Self::get_to_type(to), Some(1 | 2))
+        {
             self.try_register_e2ee_group_key(to).await?;
         }
         Ok(())
@@ -67,11 +80,23 @@ mod tests {
 
     #[test]
     fn classifies_codes_by_name_and_number() {
-        assert_eq!(send_recovery("E2EE_RETRY_ENCRYPT"), Some(E2eeSendRecovery::Reencrypt));
+        assert_eq!(
+            send_recovery("E2EE_RETRY_ENCRYPT"),
+            Some(E2eeSendRecovery::Reencrypt)
+        );
         assert_eq!(send_recovery("84"), Some(E2eeSendRecovery::Reencrypt));
-        assert_eq!(send_recovery("E2EE_INVALID_VERSION"), Some(E2eeSendRecovery::Reencrypt));
-        assert_eq!(send_recovery("E2EE_RECREATE_GROUP_KEY"), Some(E2eeSendRecovery::RecreateGroupKey));
-        assert_eq!(send_recovery("E2EE_RETRY_PLAIN"), Some(E2eeSendRecovery::RetryPlain));
+        assert_eq!(
+            send_recovery("E2EE_INVALID_VERSION"),
+            Some(E2eeSendRecovery::Reencrypt)
+        );
+        assert_eq!(
+            send_recovery("E2EE_RECREATE_GROUP_KEY"),
+            Some(E2eeSendRecovery::RecreateGroupKey)
+        );
+        assert_eq!(
+            send_recovery("E2EE_RETRY_PLAIN"),
+            Some(E2eeSendRecovery::RetryPlain)
+        );
         assert_eq!(send_recovery("100"), Some(E2eeSendRecovery::RetryPlain));
         assert_eq!(send_recovery("E2EE_UPDATE_SENDER_KEY"), None);
         assert_eq!(send_recovery("E2EE_SENDER_DISABLED"), None);

@@ -121,17 +121,27 @@ pub struct VoomRestOptions {
 
 impl VoomRestOptions {
     pub fn new(routing: VoomRouting, path: impl Into<String>) -> Self {
-        Self { routing, path: path.into(), ..Default::default() }
+        Self {
+            routing,
+            path: path.into(),
+            ..Default::default()
+        }
     }
 
     pub(crate) fn url(&self) -> String {
         let host = self.host.as_deref().unwrap_or("gw.line.naver.jp");
-        let path = if self.path.starts_with('/') { self.path.clone() } else { format!("/{}", self.path) };
+        let path = if self.path.starts_with('/') {
+            self.path.clone()
+        } else {
+            format!("/{}", self.path)
+        };
         format!("https://{host}{}{path}", self.routing.prefix())
     }
 
     pub(crate) fn method(&self) -> &str {
-        self.method.as_deref().unwrap_or(if self.body.is_some() { "POST" } else { "GET" })
+        self.method
+            .as_deref()
+            .unwrap_or(if self.body.is_some() { "POST" } else { "GET" })
     }
 }
 
@@ -168,7 +178,9 @@ impl Client {
             req = req.header(k, v);
         }
         if let Some(body) = &opts.body {
-            req = req.header("content-type", "application/json").body(serde_json::to_string(body)?);
+            req = req
+                .header("content-type", "application/json")
+                .body(serde_json::to_string(body)?);
         }
         let res = req.send().await?;
         let status = res.status();
@@ -190,7 +202,11 @@ impl Client {
 
     /// `issueChannelToken` for a channel id; returns the token.
     pub async fn channel_token(&self, channel_id: &str) -> Result<String> {
-        let res = self.base.channel().call("issueChannelToken", tv!({"channelId": channel_id})).await?;
+        let res = self
+            .base
+            .channel()
+            .call("issueChannelToken", tv!({"channelId": channel_id}))
+            .await?;
         res["token"]
             .as_str()
             .map(str::to_string)
@@ -207,34 +223,62 @@ pub struct Voom<'a> {
 impl Voom<'_> {
     /// Channel token (cached per channel).
     pub async fn token(&self, channel: VoomChannel) -> Result<String> {
-        if let Some(t) = self.client.inner.voom_tokens.lock().unwrap().get(channel.id()) {
+        if let Some(t) = self
+            .client
+            .inner
+            .voom_tokens
+            .lock()
+            .unwrap()
+            .get(channel.id())
+        {
             return Ok(t.clone());
         }
         let t = self.client.channel_token(channel.id()).await?;
-        self.client.inner.voom_tokens.lock().unwrap().insert(channel.id().to_string(), t.clone());
+        self.client
+            .inner
+            .voom_tokens
+            .lock()
+            .unwrap()
+            .insert(channel.id().to_string(), t.clone());
         Ok(t)
     }
 
     /// REST call with an automatically minted channel token.
-    pub async fn call(&self, channel: VoomChannel, mut opts: VoomRestOptions) -> Result<VoomRestResponse> {
+    pub async fn call(
+        &self,
+        channel: VoomChannel,
+        mut opts: VoomRestOptions,
+    ) -> Result<VoomRestResponse> {
         opts.channel_token = Some(self.token(channel).await?);
         self.client.voom_rest(opts).await
     }
 
     /// `GET /mh/api/v57/post/list.json` — the VOOM feed (defaults 10 / 2).
-    pub async fn feed(&self, post_limit: Option<u32>, following_max_page: Option<u32>) -> Result<VoomRestResponse> {
+    pub async fn feed(
+        &self,
+        post_limit: Option<u32>,
+        following_max_page: Option<u32>,
+    ) -> Result<VoomRestResponse> {
         let path = format!(
             "{}?postLimit={}&followingMaxPage={}",
             endpoints::FEED,
             post_limit.unwrap_or(10),
             following_max_page.unwrap_or(2)
         );
-        self.call(VoomChannel::Timeline, VoomRestOptions::new(VoomRouting::Myhome, path)).await
+        self.call(
+            VoomChannel::Timeline,
+            VoomRestOptions::new(VoomRouting::Myhome, path),
+        )
+        .await
     }
 
     /// `GET /tl/api/v57/timeline/tab/status.json`.
     pub async fn timeline_status(&self) -> Result<VoomRestResponse> {
-        self.call(VoomChannel::Timeline, VoomRestOptions::new(VoomRouting::Timeline, endpoints::TIMELINE_STATUS)).await
+        self.call(
+            VoomChannel::Timeline,
+            VoomRestOptions::new(VoomRouting::Timeline, endpoints::TIMELINE_STATUS),
+        )
+        .await
     }
 }
 
@@ -259,6 +303,9 @@ mod tests {
         o.host = Some("h.test".into());
         assert_eq!(o.method(), "POST");
         assert_eq!(o.url(), "https://h.test/tl/api/x");
-        assert_eq!(VoomRestOptions::new(VoomRouting::default(), "/a").url(), "https://gw.line.naver.jp/mh/a");
+        assert_eq!(
+            VoomRestOptions::new(VoomRouting::default(), "/a").url(),
+            "https://gw.line.naver.jp/mh/a"
+        );
     }
 }

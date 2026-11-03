@@ -59,7 +59,10 @@ impl ShopService<'_> {
     }
 
     /// `getProductLatestVersionForUser(request: YN0_Ob1_P)`.
-    pub async fn get_product_latest_version_for_user(&self, args: impl Into<Value>) -> Result<Value> {
+    pub async fn get_product_latest_version_for_user(
+        &self,
+        args: impl Into<Value>,
+    ) -> Result<Value> {
         self.call("getProductLatestVersionForUser", args).await
     }
 
@@ -124,12 +127,18 @@ impl ShopService<'_> {
     }
 
     /// `placePurchaseOrderForFreeProduct(purchaseOrder: PurchaseOrder)`.
-    pub async fn place_purchase_order_for_free_product(&self, args: impl Into<Value>) -> Result<Value> {
+    pub async fn place_purchase_order_for_free_product(
+        &self,
+        args: impl Into<Value>,
+    ) -> Result<Value> {
         self.call("placePurchaseOrderForFreeProduct", args).await
     }
 
     /// `placePurchaseOrderWithLineCoin(purchaseOrder: PurchaseOrder)`.
-    pub async fn place_purchase_order_with_line_coin(&self, args: impl Into<Value>) -> Result<Value> {
+    pub async fn place_purchase_order_with_line_coin(
+        &self,
+        args: impl Into<Value>,
+    ) -> Result<Value> {
         self.call("placePurchaseOrderWithLineCoin", args).await
     }
 
@@ -139,7 +148,10 @@ impl ShopService<'_> {
     }
 
     /// `shouldShowWelcomeStickerBanner(request: Ob1_C12660s1)`.
-    pub async fn should_show_welcome_sticker_banner(&self, args: impl Into<Value>) -> Result<Value> {
+    pub async fn should_show_welcome_sticker_banner(
+        &self,
+        args: impl Into<Value>,
+    ) -> Result<Value> {
         self.call("shouldShowWelcomeStickerBanner", args).await
     }
 

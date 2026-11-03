@@ -1,7 +1,7 @@
 //! Schema-driven encoding vs. upstream linejs' generated `LINEStruct`
 //! writers (golden hex produced by linejs + node `thrift`).
 
-use line_rs::thrift::{encode_struct, write_message, Protocol, Schema};
+use line_rs::thrift::{Protocol, Schema, encode_struct, write_message};
 use line_rs::tv;
 
 fn encode(method: &str, args_struct: &str, args: line_rs::Value) -> String {
@@ -26,7 +26,10 @@ fn send_message_args() {
 #[test]
 fn sync_args() {
     let args = tv!({"request": {"lastRevision": 5, "lastGlobalRevision": 0, "lastIndividualRevision": 0, "count": 100}});
-    assert_eq!(encode("sync", "sync_args", args), "8221000473796e631c160a15c80116001600000000");
+    assert_eq!(
+        encode("sync", "sync_args", args),
+        "8221000473796e631c160a15c80116001600000000"
+    );
 }
 
 #[test]

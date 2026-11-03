@@ -67,7 +67,9 @@ pub fn sign_on_request_packet(request_id: u16, service_type: u8, request: &[u8])
 
 /// Bitmask of push services for the `m` query parameter (`gen_m`).
 pub fn services_mask(services: &[u8]) -> u32 {
-    services.iter().fold(0, |m, &s| m | 1u32.checked_shl(u32::from(s).wrapping_sub(1)).unwrap_or(0))
+    services.iter().fold(0, |m, &s| {
+        m | 1u32.checked_shl(u32::from(s).wrapping_sub(1)).unwrap_or(0)
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,13 +134,21 @@ mod tests {
 
     #[test]
     fn ping_ack() {
-        let f = PingFrame { ping_type: 2, ping_id: 0x0102 };
+        let f = PingFrame {
+            ping_type: 2,
+            ping_id: 0x0102,
+        };
         assert_eq!(f.ack_packet(), vec![0, 3, 1, 1, 1, 2]);
     }
 
     #[test]
     fn push_ack() {
-        let f = PushFrame { push_type: 2, service_type: 3, push_id: -2, payload: vec![] };
+        let f = PushFrame {
+            push_type: 2,
+            service_type: 3,
+            push_id: -2,
+            payload: vec![],
+        };
         assert_eq!(f.ack_packet(), vec![0, 6, 4, 1, 3, 0xff, 0xff, 0xff, 0xfe]);
     }
 

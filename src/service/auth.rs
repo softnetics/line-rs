@@ -7,7 +7,9 @@ use crate::request::{Parse, RequestOptions};
 use crate::thrift::{self, Protocol, Schema, TValue, Value};
 
 /// Pre-encoded compact `logoutZ` call with empty args.
-const LOGOUT_Z_PAYLOAD: [u8; 12] = [0x82, 0x21, 0x00, 0x07, b'l', b'o', b'g', b'o', b'u', b't', b'Z', 0x00];
+const LOGOUT_Z_PAYLOAD: [u8; 12] = [
+    0x82, 0x21, 0x00, 0x07, b'l', b'o', b'g', b'o', b'u', b't', b'Z', 0x00,
+];
 const LOGOUT_Z_PATH: &str = "/RS4";
 
 impl AuthService<'_> {
@@ -37,19 +39,32 @@ impl AuthService<'_> {
         let msg = thrift::read_message(&res.body, Protocol::Compact).map_err(|_| {
             Error::internal(
                 "RequestError",
-                format!("Invalid response buffer for logoutZ: <{}>", hex::encode(&res.body)),
+                format!(
+                    "Invalid response buffer for logoutZ: <{}>",
+                    hex::encode(&res.body)
+                ),
             )
         })?;
-        let TValue::Struct(fields) = &msg.body else { unreachable!("read_message returns a struct") };
+        let TValue::Struct(fields) = &msg.body else {
+            unreachable!("read_message returns a struct")
+        };
         if let Some((_, exc)) = fields.iter().find(|(id, _)| *id != 0) {
             let data = thrift::decode_struct(Schema::line(), Some("TalkException"), exc);
             let refreshable = data["code"].as_str() == Some("MUST_REFRESH_V3_TOKEN")
                 && client.storage.get("refreshToken").await?.is_some();
             if !refreshable {
-                return Err(Error::Request { method: "logoutZ".into(), path: LOGOUT_Z_PATH.into(), data });
+                return Err(Error::Request {
+                    method: "logoutZ".into(),
+                    path: LOGOUT_Z_PATH.into(),
+                    data,
+                });
             }
         }
-        let result = msg.body.field(0).map(thrift::decode_raw).unwrap_or(Value::Bool(true));
+        let result = msg
+            .body
+            .field(0)
+            .map(thrift::decode_raw)
+            .unwrap_or(Value::Bool(true));
         client.disable();
         client.stop_listening();
         if let Some(profile) = client.profile() {
@@ -98,8 +113,12 @@ impl AuthService<'_> {
     }
 
     /// `issueTokenForAccountMigrationSettings(enforce: bool)`.
-    pub async fn issue_token_for_account_migration_settings(&self, args: impl Into<Value>) -> Result<Value> {
-        self.call("issueTokenForAccountMigrationSettings", args).await
+    pub async fn issue_token_for_account_migration_settings(
+        &self,
+        args: impl Into<Value>,
+    ) -> Result<Value> {
+        self.call("issueTokenForAccountMigrationSettings", args)
+            .await
     }
 
     /// `issueV3TokenForPrimary(request: IssueV3TokenForPrimaryRequest)`.
@@ -119,7 +138,11 @@ impl AuthService<'_> {
 
     /// `refresh(request: RefreshAccessTokenRequest)`.
     pub async fn refresh(&self, args: impl Into<Value>) -> Result<Value> {
-        self.call_with("refresh", args, |o| RequestOptions { path: "/EXT/auth/tokenrefresh/v1", ..o }).await
+        self.call_with("refresh", args, |o| RequestOptions {
+            path: "/EXT/auth/tokenrefresh/v1",
+            ..o
+        })
+        .await
     }
 
     /// `removeIdentifier(authSessionId: string, request: IdentityCredentialRequest)`.
@@ -173,7 +196,10 @@ mod tests {
 
     #[test]
     fn refresh_args_encoding() {
-        let f = encode("refresh_args", &crate::tv!({"request": {"refreshToken": "rt-old"}}));
+        let f = encode(
+            "refresh_args",
+            &crate::tv!({"request": {"refreshToken": "rt-old"}}),
+        );
         assert_eq!(path(&f, &[1, 1]), Some(&s("rt-old")));
     }
 

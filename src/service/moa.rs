@@ -152,23 +152,44 @@ fn encode_uri_component(s: &str) -> String {
 }
 
 /// `https://{endpoint}/ext/album{path_suffix}?k=v&...`; `None` values are dropped.
-pub fn build_moa_url(endpoint: &str, path_suffix: &str, params: &[(&str, Option<String>)]) -> String {
+pub fn build_moa_url(
+    endpoint: &str,
+    path_suffix: &str,
+    params: &[(&str, Option<String>)],
+) -> String {
     build_moa_url_with_base(&format!("https://{endpoint}"), path_suffix, params)
 }
 
 /// [`build_moa_url`] under an explicit `scheme://host` base.
-pub fn build_moa_url_with_base(base: &str, path_suffix: &str, params: &[(&str, Option<String>)]) -> String {
-    let base = format!("{}{LEGY_MOA_PREFIX}{path_suffix}", base.trim_end_matches('/'));
+pub fn build_moa_url_with_base(
+    base: &str,
+    path_suffix: &str,
+    params: &[(&str, Option<String>)],
+) -> String {
+    let base = format!(
+        "{}{LEGY_MOA_PREFIX}{path_suffix}",
+        base.trim_end_matches('/')
+    );
     let query: Vec<String> = params
         .iter()
-        .filter_map(|(k, v)| v.as_ref().map(|v| format!("{}={}", encode_uri_component(k), encode_uri_component(v))))
+        .filter_map(|(k, v)| {
+            v.as_ref()
+                .map(|v| format!("{}={}", encode_uri_component(k), encode_uri_component(v)))
+        })
         .collect();
-    if query.is_empty() { base } else { format!("{base}?{}", query.join("&")) }
+    if query.is_empty() {
+        base
+    } else {
+        format!("{base}?{}", query.join("&"))
+    }
 }
 
 fn encode_path_id(id: &str) -> Result<String> {
     if id.is_empty() || id == "." || id == ".." {
-        return Err(Error::internal(ERROR_KIND, "album and object IDs must be nonempty path segments"));
+        return Err(Error::internal(
+            ERROR_KIND,
+            "album and object IDs must be nonempty path segments",
+        ));
     }
     Ok(encode_uri_component(id))
 }
@@ -188,7 +209,10 @@ pub struct MoaService<'a> {
 impl BaseClient {
     /// The album (Moa) REST API.
     pub fn moa(&self) -> MoaService<'_> {
-        MoaService { client: self, base_url: None }
+        MoaService {
+            client: self,
+            base_url: None,
+        }
     }
 }
 
@@ -215,7 +239,10 @@ impl<'a> MoaService<'a> {
     /// Issue (and memoise) the album channel token.
     pub async fn get_album_channel_token(&self) -> Result<String> {
         let (Some(auth_token), Some(mid)) = (self.client.auth_token(), self.client.mid()) else {
-            return Err(Error::internal(ERROR_KIND, "login must complete before calling Moa"));
+            return Err(Error::internal(
+                ERROR_KIND,
+                "login must complete before calling Moa",
+            ));
         };
         let endpoint = self.client.endpoint.as_str();
         let _guard = ISSUE_LOCK.lock().await;
@@ -234,7 +261,12 @@ impl<'a> MoaService<'a> {
             .await?;
         let token = match res["channelAccessToken"].as_str() {
             Some(t) if !t.is_empty() => t.to_string(),
-            _ => return Err(Error::internal(ERROR_KIND, "channelAccessToken missing from channel response")),
+            _ => {
+                return Err(Error::internal(
+                    ERROR_KIND,
+                    "channelAccessToken missing from channel response",
+                ));
+            }
         };
         let entry = serde_json::json!({"authToken": auth_token, "mid": mid, "endpoint": endpoint, "value": token});
         self.client.storage.set(CHANNEL_TOKEN_KEY, entry).await?;
@@ -248,7 +280,15 @@ impl<'a> MoaService<'a> {
         extra_headers: &[(&str, &str)],
     ) -> Result<T> {
         // linejs POSTs these with `x-lhm: GET`; LEGY routes on `x-lhm`.
-        self.request_lhm(reqwest::Method::POST, "GET", path_suffix, params, extra_headers, None).await
+        self.request_lhm(
+            reqwest::Method::POST,
+            "GET",
+            path_suffix,
+            params,
+            extra_headers,
+            None,
+        )
+        .await
     }
 
     async fn request<T: DeserializeOwned>(
@@ -260,7 +300,8 @@ impl<'a> MoaService<'a> {
         body: Option<serde_json::Value>,
     ) -> Result<T> {
         let lhm = method.as_str().to_string();
-        self.request_lhm(method, &lhm, path_suffix, params, extra_headers, body).await
+        self.request_lhm(method, &lhm, path_suffix, params, extra_headers, body)
+            .await
     }
 
     async fn request_lhm<T: DeserializeOwned>(
@@ -283,7 +324,11 @@ impl<'a> MoaService<'a> {
         // with code 102001.
         let mut headers = self.client.line_headers(lhm);
         header_set(&mut headers, "accept", "application/json");
-        header_set(&mut headers, "content-type", "application/json; charset=UTF-8");
+        header_set(
+            &mut headers,
+            "content-type",
+            "application/json; charset=UTF-8",
+        );
         header_set(&mut headers, "X-Line-ChannelToken", token);
         header_set(&mut headers, "X-Line-Mid", mid);
         for (k, v) in extra_headers {
@@ -294,18 +339,26 @@ impl<'a> MoaService<'a> {
             Some(b) => serde_json::to_vec(b)?,
             None => Vec::new(),
         };
-        let mut req = self.client.http.request(method, url).timeout(self.client.config.timeout).body(payload);
+        let mut req = self
+            .client
+            .http
+            .request(method, url)
+            .timeout(self.client.config.timeout)
+            .body(payload);
         for (k, v) in headers {
             req = req.header(k, v);
         }
         let res = req.send().await?;
         let status = res.status();
         if !status.is_success() {
-            return Err(Error::internal(ERROR_KIND, format!("Moa {path_suffix} HTTP {}", status.as_u16())));
+            return Err(Error::internal(
+                ERROR_KIND,
+                format!("Moa {path_suffix} HTTP {}", status.as_u16()),
+            ));
         }
         let bytes = res.bytes().await?;
-        let json: serde_json::Value =
-            serde_json::from_slice(&bytes).map_err(|_| Error::internal(ERROR_KIND, "Moa returned invalid JSON"))?;
+        let json: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|_| Error::internal(ERROR_KIND, "Moa returned invalid JSON"))?;
         check_moa_response(path_suffix, &json)?;
         Ok(serde_json::from_value(json)?)
     }
@@ -314,7 +367,10 @@ impl<'a> MoaService<'a> {
     pub async fn get_albums(&self, options: GetAlbumsOptions) -> Result<MoaAlbumsResponse> {
         let params = [
             ("cursor", Some(options.cursor.unwrap_or_default())),
-            ("orderBy", Some(options.order_by.unwrap_or_else(|| "createTimeDesc".into()))),
+            (
+                "orderBy",
+                Some(options.order_by.unwrap_or_else(|| "createTimeDesc".into())),
+            ),
             ("include", Some(options.include.unwrap_or_default())),
         ];
         self.fetch("/moa/v2/albums", &params, &[]).await
@@ -322,16 +378,29 @@ impl<'a> MoaService<'a> {
 
     /// Photos of an album in `chat_id`, one page at a time.
     pub async fn get_photos(&self, options: GetPhotosOptions) -> Result<AlbumPhotosResponse> {
-        let path = format!("/api/v6/albums/{}/photos", encode_path_id(&options.album_id)?);
+        let path = format!(
+            "/api/v6/albums/{}/photos",
+            encode_path_id(&options.album_id)?
+        );
         let params = [
             ("cursor", Some(options.cursor.unwrap_or_default())),
-            ("pageSize", Some(options.page_size.unwrap_or(100).to_string())),
-            ("orderBy", Some(options.order_by.unwrap_or_else(|| "createTimeDesc".into()))),
-            ("include", Some(options.include.unwrap_or_else(|| "all".into()))),
+            (
+                "pageSize",
+                Some(options.page_size.unwrap_or(100).to_string()),
+            ),
+            (
+                "orderBy",
+                Some(options.order_by.unwrap_or_else(|| "createTimeDesc".into())),
+            ),
+            (
+                "include",
+                Some(options.include.unwrap_or_else(|| "all".into())),
+            ),
             ("filterType", Some(options.filter_type.unwrap_or_default())),
             ("targetUser", options.target_user),
         ];
-        self.fetch(&path, &params, &[("X-Line-Chat-Id", &options.chat_id)]).await
+        self.fetch(&path, &params, &[("X-Line-Chat-Id", &options.chat_id)])
+            .await
     }
 
     /// Download the original bytes of an album photo (or video with
@@ -339,7 +408,10 @@ impl<'a> MoaService<'a> {
     pub async fn download_photo(&self, options: DownloadPhotoOptions) -> Result<Vec<u8>> {
         let prefix = options.prefix.as_deref().unwrap_or("album/a");
         if prefix != "album/a" && prefix != "album/v" {
-            return Err(Error::internal(ERROR_KIND, "unsupported album resource prefix"));
+            return Err(Error::internal(
+                ERROR_KIND,
+                "unsupported album resource prefix",
+            ));
         }
         let oid = encode_path_id(&options.oid)?;
         let token = self.get_album_channel_token().await?;
@@ -348,13 +420,21 @@ impl<'a> MoaService<'a> {
         header_set(&mut headers, "X-Line-Album", options.album_id.as_str());
         header_set(&mut headers, "X-Line-Mid", options.chat_id.as_str());
         let url = format!("https://{}/oa/r/{prefix}/{oid}", self.client.endpoint);
-        let mut req = self.client.http.post(url).timeout(self.client.config.timeout).body(Vec::new());
+        let mut req = self
+            .client
+            .http
+            .post(url)
+            .timeout(self.client.config.timeout)
+            .body(Vec::new());
         for (k, v) in headers {
             req = req.header(k, v);
         }
         let res = req.send().await?;
         if !res.status().is_success() {
-            return Err(Error::internal(ERROR_KIND, format!("OBS {} HTTP {}", options.oid, res.status().as_u16())));
+            return Err(Error::internal(
+                ERROR_KIND,
+                format!("OBS {} HTTP {}", options.oid, res.status().as_u16()),
+            ));
         }
         Ok(res.bytes().await?.to_vec())
     }
@@ -383,11 +463,17 @@ impl<'a> MoaService<'a> {
     }
 
     fn album_path(album_id: &str, rest: &str) -> Result<String> {
-        Ok(format!("/api/v6/albums/{}{rest}", encode_path_id(album_id)?))
+        Ok(format!(
+            "/api/v6/albums/{}{rest}",
+            encode_path_id(album_id)?
+        ))
     }
 
     fn photo_path(album_id: &str, photo_id: &str, rest: &str) -> Result<String> {
-        Self::album_path(album_id, &format!("/photos/{}{rest}", encode_path_id(photo_id)?))
+        Self::album_path(
+            album_id,
+            &format!("/photos/{}{rest}", encode_path_id(photo_id)?),
+        )
     }
 
     /// `POST /ext/album/api/v6/albums/create[?modifyDuplicateTitle=]` `{title}`.
@@ -397,28 +483,47 @@ impl<'a> MoaService<'a> {
         title: &str,
         modify_duplicate_title: Option<bool>,
     ) -> Result<serde_json::Value> {
-        let params = [("modifyDuplicateTitle", modify_duplicate_title.map(|b| b.to_string()))];
+        let params = [(
+            "modifyDuplicateTitle",
+            modify_duplicate_title.map(|b| b.to_string()),
+        )];
         let body = serde_json::json!({"title": title});
-        self.album_call(reqwest::Method::POST, "/api/v6/albums/create".into(), &params, chat_id, None, Some(body)).await
+        self.album_call(
+            reqwest::Method::POST,
+            "/api/v6/albums/create".into(),
+            &params,
+            chat_id,
+            None,
+            Some(body),
+        )
+        .await
     }
 
     /// `POST .../albums/{albumId}/update` `{title}`.
-    pub async fn update_album_title(&self, chat_id: &str, album_id: &str, title: &str) -> Result<serde_json::Value> {
+    pub async fn update_album_title(
+        &self,
+        chat_id: &str,
+        album_id: &str,
+        title: &str,
+    ) -> Result<serde_json::Value> {
         let path = Self::album_path(album_id, "/update")?;
         let body = serde_json::json!({"title": title});
-        self.album_call(reqwest::Method::POST, path, &[], chat_id, None, Some(body)).await
+        self.album_call(reqwest::Method::POST, path, &[], chat_id, None, Some(body))
+            .await
     }
 
     /// `POST .../albums/{albumId}/delete`.
     pub async fn delete_album(&self, chat_id: &str, album_id: &str) -> Result<serde_json::Value> {
         let path = Self::album_path(album_id, "/delete")?;
-        self.album_call(reqwest::Method::POST, path, &[], chat_id, None, None).await
+        self.album_call(reqwest::Method::POST, path, &[], chat_id, None, None)
+            .await
     }
 
     /// `POST .../albums/{albumId}/share` (share into the chat).
     pub async fn share_album(&self, chat_id: &str, album_id: &str) -> Result<serde_json::Value> {
         let path = Self::album_path(album_id, "/share")?;
-        self.album_call(reqwest::Method::POST, path, &[], chat_id, None, None).await
+        self.album_call(reqwest::Method::POST, path, &[], chat_id, None, None)
+            .await
     }
 
     /// `POST .../albums/{albumId}/photos/create` `{photos}` — register
@@ -431,7 +536,8 @@ impl<'a> MoaService<'a> {
     ) -> Result<serde_json::Value> {
         let path = Self::album_path(album_id, "/photos/create")?;
         let body = serde_json::json!({"photos": photos});
-        self.album_call(reqwest::Method::POST, path, &[], chat_id, None, Some(body)).await
+        self.album_call(reqwest::Method::POST, path, &[], chat_id, None, Some(body))
+            .await
     }
 
     /// `POST .../albums/{albumId}/photos/delete` `{photoIds}`.
@@ -443,7 +549,8 @@ impl<'a> MoaService<'a> {
     ) -> Result<serde_json::Value> {
         let path = Self::album_path(album_id, "/photos/delete")?;
         let body = serde_json::json!({"photoIds": photo_ids});
-        self.album_call(reqwest::Method::POST, path, &[], chat_id, None, Some(body)).await
+        self.album_call(reqwest::Method::POST, path, &[], chat_id, None, Some(body))
+            .await
     }
 
     /// `POST .../albums/{albumId}/photos/{photoId}/likes/create` `{likeType}`.
@@ -459,13 +566,20 @@ impl<'a> MoaService<'a> {
         let path = Self::photo_path(album_id, photo_id, "/likes/create")?;
         let extra = referrer.map(|r| ("x-line-album-referrer", r));
         let body = serde_json::json!({"likeType": like_type});
-        self.album_call(reqwest::Method::POST, path, &[], chat_id, extra, Some(body)).await
+        self.album_call(reqwest::Method::POST, path, &[], chat_id, extra, Some(body))
+            .await
     }
 
     /// `POST .../albums/{albumId}/photos/{photoId}/likes/delete`.
-    pub async fn delete_photo_like(&self, chat_id: &str, album_id: &str, photo_id: &str) -> Result<serde_json::Value> {
+    pub async fn delete_photo_like(
+        &self,
+        chat_id: &str,
+        album_id: &str,
+        photo_id: &str,
+    ) -> Result<serde_json::Value> {
         let path = Self::photo_path(album_id, photo_id, "/likes/delete")?;
-        self.album_call(reqwest::Method::POST, path, &[], chat_id, None, None).await
+        self.album_call(reqwest::Method::POST, path, &[], chat_id, None, None)
+            .await
     }
 
     /// `GET .../albums/{albumId}/photos/{photoId}/likes?cursor&pageSize`.
@@ -478,22 +592,35 @@ impl<'a> MoaService<'a> {
         page_size: Option<u32>,
     ) -> Result<serde_json::Value> {
         let path = Self::photo_path(album_id, photo_id, "/likes")?;
-        let params = [("cursor", cursor), ("pageSize", page_size.map(|n| n.to_string()))];
-        self.album_call(reqwest::Method::GET, path, &params, chat_id, None, None).await
+        let params = [
+            ("cursor", cursor),
+            ("pageSize", page_size.map(|n| n.to_string())),
+        ];
+        self.album_call(reqwest::Method::GET, path, &params, chat_id, None, None)
+            .await
     }
 }
 
 /// Reject non-object bodies and non-zero `code`s.
 fn check_moa_response(path_suffix: &str, json: &serde_json::Value) -> Result<()> {
     let Some(obj) = json.as_object() else {
-        return Err(Error::internal(ERROR_KIND, "Moa returned an invalid response object"));
+        return Err(Error::internal(
+            ERROR_KIND,
+            "Moa returned an invalid response object",
+        ));
     };
     match obj.get("code") {
         None | Some(serde_json::Value::Null) => Ok(()),
         Some(code) if code.as_i64() == Some(0) => Ok(()),
         Some(code) => {
-            let message = obj.get("message").and_then(|m| m.as_str()).unwrap_or("undefined");
-            Err(Error::internal(ERROR_KIND, format!("Moa {path_suffix} code={code} message={message}")))
+            let message = obj
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("undefined");
+            Err(Error::internal(
+                ERROR_KIND,
+                format!("Moa {path_suffix} code={code} message={message}"),
+            ))
         }
     }
 }
@@ -517,7 +644,11 @@ mod tests {
             build_moa_url(
                 "legy.line-apps.com",
                 "/moa/v2/albums",
-                &[("cursor", some("")), ("orderBy", some("createTimeDesc")), ("include", some(""))]
+                &[
+                    ("cursor", some("")),
+                    ("orderBy", some("createTimeDesc")),
+                    ("include", some(""))
+                ]
             ),
             "https://legy.line-apps.com/ext/album/moa/v2/albums?cursor=&orderBy=createTimeDesc&include="
         );
@@ -525,12 +656,21 @@ mod tests {
             build_moa_url(
                 "legy.line-apps.com",
                 "/api/v6/albums/42/photos",
-                &[("cursor", some("")), ("pageSize", some("100")), ("filterType", some("")), ("targetUser", None)]
+                &[
+                    ("cursor", some("")),
+                    ("pageSize", some("100")),
+                    ("filterType", some("")),
+                    ("targetUser", None)
+                ]
             ),
             "https://legy.line-apps.com/ext/album/api/v6/albums/42/photos?cursor=&pageSize=100&filterType="
         );
         assert_eq!(
-            build_moa_url("legy.line-apps.com", "/moa/v2/albums", &[("cursor", some("abc/def="))]),
+            build_moa_url(
+                "legy.line-apps.com",
+                "/moa/v2/albums",
+                &[("cursor", some("abc/def="))]
+            ),
             "https://legy.line-apps.com/ext/album/moa/v2/albums?cursor=abc%2Fdef%3D"
         );
         assert_eq!(
@@ -550,47 +690,90 @@ mod tests {
 
     #[test]
     fn response_validation() {
-        assert!(check_moa_response("/x", &serde_json::json!({"code": 0, "result": {"albums": []}})).is_ok());
+        assert!(
+            check_moa_response(
+                "/x",
+                &serde_json::json!({"code": 0, "result": {"albums": []}})
+            )
+            .is_ok()
+        );
         assert!(check_moa_response("/x", &serde_json::json!({"result": {}})).is_ok());
-        let err = check_moa_response("/x", &serde_json::json!({"code": 102001, "message": "error"})).unwrap_err();
+        let err = check_moa_response(
+            "/x",
+            &serde_json::json!({"code": 102001, "message": "error"}),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("code=102001"), "{err}");
         for bad in [serde_json::Value::Null, serde_json::json!([])] {
             let err = check_moa_response("/x", &bad).unwrap_err();
             assert!(err.to_string().contains("invalid response object"), "{err}");
         }
         let parsed: MoaAlbumsResponse =
-            serde_json::from_value(serde_json::json!({"code": 0, "result": {"albums": []}})).unwrap();
+            serde_json::from_value(serde_json::json!({"code": 0, "result": {"albums": []}}))
+                .unwrap();
         assert_eq!(parsed.result.unwrap().albums, Vec::new());
     }
 
     #[tokio::test]
     async fn requires_login_and_valid_ids_before_any_request() {
         let c = client();
-        let err = c.moa().get_albums(GetAlbumsOptions::default()).await.unwrap_err();
+        let err = c
+            .moa()
+            .get_albums(GetAlbumsOptions::default())
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("login"), "{err}");
         c.set_profile(Some(crate::tv!({"mid": "u-self"})));
-        let opts =
-            DownloadPhotoOptions { chat_id: "c-chat".into(), album_id: "1".into(), oid: "photo".into(), prefix: None };
+        let opts = DownloadPhotoOptions {
+            chat_id: "c-chat".into(),
+            album_id: "1".into(),
+            oid: "photo".into(),
+            prefix: None,
+        };
         let err = c.moa().download_photo(opts.clone()).await.unwrap_err();
         assert!(err.to_string().contains("login"), "{err}");
 
         c.set_auth_token(Some("access-token".into()));
         let err = c
             .moa()
-            .get_photos(GetPhotosOptions { chat_id: "c".into(), album_id: "..".into(), ..Default::default() })
+            .get_photos(GetPhotosOptions {
+                chat_id: "c".into(),
+                album_id: "..".into(),
+                ..Default::default()
+            })
             .await
             .unwrap_err();
         assert!(err.to_string().contains("MoaError"), "{err}");
-        let err = c.moa().download_photo(DownloadPhotoOptions { oid: "..".into(), ..opts.clone() }).await.unwrap_err();
+        let err = c
+            .moa()
+            .download_photo(DownloadPhotoOptions {
+                oid: "..".into(),
+                ..opts.clone()
+            })
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("MoaError"), "{err}");
-        let err = c.moa().download_photo(DownloadPhotoOptions { prefix: some("../other"), ..opts }).await.unwrap_err();
-        assert!(err.to_string().contains("unsupported album resource prefix"), "{err}");
+        let err = c
+            .moa()
+            .download_photo(DownloadPhotoOptions {
+                prefix: some("../other"),
+                ..opts
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unsupported album resource prefix"),
+            "{err}"
+        );
     }
 
     #[tokio::test]
     async fn album_writes() {
         let ok = (200, r#"{"code":0,"result":{}}"#);
-        let (base, seen) = crate::rest::tests::serve(vec![ok, ok, ok, ok, (200, r#"{"code":1,"message":"x"}"#)]).await;
+        let (base, seen) =
+            crate::rest::tests::serve(vec![ok, ok, ok, ok, (200, r#"{"code":1,"message":"x"}"#)])
+                .await;
         let c = client();
         c.set_auth_token(Some("access-token".into()));
         c.set_profile(Some(crate::tv!({"mid": "u-self"})));
@@ -599,10 +782,22 @@ mod tests {
         });
         c.storage.set(CHANNEL_TOKEN_KEY, entry).await.unwrap();
         let moa = c.moa().with_base_url(&base);
-        moa.create_album("c-chat", "trip", Some(true)).await.unwrap();
-        moa.delete_photos("c-chat", "9", vec![serde_json::json!(1), serde_json::json!(2)]).await.unwrap();
-        moa.create_photo_like("c-chat", "9", "p/1", "1003", Some("chat")).await.unwrap();
-        moa.get_photo_likes("c-chat", "9", "p1", None, Some(20)).await.unwrap();
+        moa.create_album("c-chat", "trip", Some(true))
+            .await
+            .unwrap();
+        moa.delete_photos(
+            "c-chat",
+            "9",
+            vec![serde_json::json!(1), serde_json::json!(2)],
+        )
+        .await
+        .unwrap();
+        moa.create_photo_like("c-chat", "9", "p/1", "1003", Some("chat"))
+            .await
+            .unwrap();
+        moa.get_photo_likes("c-chat", "9", "p1", None, Some(20))
+            .await
+            .unwrap();
         let err = moa.delete_album("c-chat", "9").await.unwrap_err();
         assert!(err.to_string().contains("code=1"), "{err}");
         assert!(moa.delete_album("c-chat", "..").await.is_err());
@@ -610,23 +805,36 @@ mod tests {
         let s = seen.lock().unwrap();
         assert_eq!(
             (s[0].method.as_str(), s[0].target.as_str()),
-            ("POST", "/ext/album/api/v6/albums/create?modifyDuplicateTitle=true")
+            (
+                "POST",
+                "/ext/album/api/v6/albums/create?modifyDuplicateTitle=true"
+            )
         );
         assert_eq!(s[0].json(), serde_json::json!({"title": "trip"}));
         assert_eq!(s[0].header("x-line-chat-id"), Some("c-chat"));
         assert_eq!(s[0].header("x-line-channeltoken"), Some("album-token"));
         assert_eq!(s[1].target, "/ext/album/api/v6/albums/9/photos/delete");
         assert_eq!(s[1].json(), serde_json::json!({"photoIds": [1, 2]}));
-        assert_eq!(s[2].target, "/ext/album/api/v6/albums/9/photos/p%2F1/likes/create");
+        assert_eq!(
+            s[2].target,
+            "/ext/album/api/v6/albums/9/photos/p%2F1/likes/create"
+        );
         assert_eq!(s[2].header("x-line-album-referrer"), Some("chat"));
-        assert_eq!((s[3].method.as_str(), s[3].target.as_str()), ("GET", "/ext/album/api/v6/albums/9/photos/p1/likes?pageSize=20"));
+        assert_eq!(
+            (s[3].method.as_str(), s[3].target.as_str()),
+            (
+                "GET",
+                "/ext/album/api/v6/albums/9/photos/p1/likes?pageSize=20"
+            )
+        );
         assert_eq!(s[4].target, "/ext/album/api/v6/albums/9/delete");
         assert!(s[4].body.is_empty());
     }
 
     #[tokio::test]
     async fn album_list_posts_with_lhm_get_like_linejs() {
-        let (base, seen) = crate::rest::tests::serve(vec![(200, r#"{"code":0,"result":{}}"#)]).await;
+        let (base, seen) =
+            crate::rest::tests::serve(vec![(200, r#"{"code":0,"result":{}}"#)]).await;
         let c = client();
         c.set_auth_token(Some("access-token".into()));
         c.set_profile(Some(crate::tv!({"mid": "u-self"})));
@@ -634,7 +842,11 @@ mod tests {
             "authToken": "access-token", "mid": "u-self", "endpoint": c.endpoint, "value": "album-token",
         });
         c.storage.set(CHANNEL_TOKEN_KEY, entry).await.unwrap();
-        c.moa().with_base_url(&base).get_albums(GetAlbumsOptions::default()).await.unwrap();
+        c.moa()
+            .with_base_url(&base)
+            .get_albums(GetAlbumsOptions::default())
+            .await
+            .unwrap();
         let s = seen.lock().unwrap();
         assert_eq!(s[0].method.as_str(), "POST");
         assert_eq!(s[0].header("x-lhm"), Some("GET"));
@@ -649,7 +861,10 @@ mod tests {
             "authToken": "access-token", "mid": "u-self", "endpoint": c.endpoint, "value": "channel-1",
         });
         c.storage.set(CHANNEL_TOKEN_KEY, entry).await.unwrap();
-        assert_eq!(c.moa().get_album_channel_token().await.unwrap(), "channel-1");
+        assert_eq!(
+            c.moa().get_album_channel_token().await.unwrap(),
+            "channel-1"
+        );
         c.moa().clear_album_channel_token().await.unwrap();
         assert!(c.storage.get(CHANNEL_TOKEN_KEY).await.unwrap().is_none());
     }

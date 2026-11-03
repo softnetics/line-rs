@@ -13,8 +13,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use super::crypto::{self, decode_base64};
 use super::E2eeState;
+use super::crypto::{self, decode_base64};
 use crate::base::BaseClient;
 use crate::error::{Error, Result};
 use crate::request::RequestOptions;
@@ -25,7 +25,11 @@ use crate::thrift::{Protocol, Value};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct E2eeKey {
-    #[serde(default, deserialize_with = "lenient_key_id", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_key_id",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub key_id: Option<i64>,
     /// Base64 curve25519 private key.
     pub priv_key: String,
@@ -89,7 +93,10 @@ pub(crate) fn key_id_of(v: &Value) -> Option<i64> {
 pub(crate) fn key_data_of<'v>(key: &'v Value, owner: &str) -> Result<&'v [u8]> {
     match key["keyData"].as_bytes() {
         Some(data) if data.len() == 32 => Ok(data),
-        _ => Err(Error::internal("NoE2EEKey", format!("no valid public key for {owner}"))),
+        _ => Err(Error::internal(
+            "NoE2EEKey",
+            format!("no valid public key for {owner}"),
+        )),
     }
 }
 
@@ -118,8 +125,17 @@ pub(crate) trait E2eeHost: Send + Sync {
 
     async fn get_e2ee_public_keys(&self) -> Result<Value>;
     async fn negotiate_e2ee_public_key(&self, mid: &str) -> Result<Value>;
-    async fn get_e2ee_group_shared_key(&self, key_version: i32, chat_mid: &str, group_key_id: i64) -> Result<Value>;
-    async fn get_last_e2ee_group_shared_key(&self, key_version: i32, chat_mid: &str) -> Result<Value>;
+    async fn get_e2ee_group_shared_key(
+        &self,
+        key_version: i32,
+        chat_mid: &str,
+        group_key_id: i64,
+    ) -> Result<Value>;
+    async fn get_last_e2ee_group_shared_key(
+        &self,
+        key_version: i32,
+        chat_mid: &str,
+    ) -> Result<Value>;
     async fn get_last_e2ee_public_keys(&self, chat_mid: &str) -> Result<Value>;
     async fn register_e2ee_group_key(&self, args: Value) -> Result<Value>;
     async fn register_e2ee_public_key(&self, public_key: Value) -> Result<Value>;
@@ -139,21 +155,39 @@ impl E2eeHost for BaseClient {
 
     async fn get_e2ee_public_keys(&self) -> Result<Value> {
         // No `getE2EEPublicKeys_args` in the IDL: the call takes no arguments.
-        self.request(vec![], "getE2EEPublicKeys", RequestOptions::new(self.talk().path, Protocol::Compact)).await
+        self.request(
+            vec![],
+            "getE2EEPublicKeys",
+            RequestOptions::new(self.talk().path, Protocol::Compact),
+        )
+        .await
     }
     async fn negotiate_e2ee_public_key(&self, mid: &str) -> Result<Value> {
-        self.talk().call("negotiateE2EEPublicKey", crate::tv!({"mid": mid})).await
+        self.talk()
+            .call("negotiateE2EEPublicKey", crate::tv!({"mid": mid}))
+            .await
     }
-    async fn get_e2ee_group_shared_key(&self, key_version: i32, chat_mid: &str, group_key_id: i64) -> Result<Value> {
+    async fn get_e2ee_group_shared_key(
+        &self,
+        key_version: i32,
+        chat_mid: &str,
+        group_key_id: i64,
+    ) -> Result<Value> {
         let args = crate::tv!({"keyVersion": key_version, "chatMid": chat_mid, "groupKeyId": group_key_id});
         self.talk().call("getE2EEGroupSharedKey", args).await
     }
-    async fn get_last_e2ee_group_shared_key(&self, key_version: i32, chat_mid: &str) -> Result<Value> {
+    async fn get_last_e2ee_group_shared_key(
+        &self,
+        key_version: i32,
+        chat_mid: &str,
+    ) -> Result<Value> {
         let args = crate::tv!({"keyVersion": key_version, "chatMid": chat_mid});
         self.talk().call("getLastE2EEGroupSharedKey", args).await
     }
     async fn get_last_e2ee_public_keys(&self, chat_mid: &str) -> Result<Value> {
-        self.talk().call("getLastE2EEPublicKeys", crate::tv!({"chatMid": chat_mid})).await
+        self.talk()
+            .call("getLastE2EEPublicKeys", crate::tv!({"chatMid": chat_mid}))
+            .await
     }
     async fn register_e2ee_group_key(&self, args: Value) -> Result<Value> {
         self.talk().call("registerE2EEGroupKey", args).await
@@ -190,14 +224,23 @@ impl<'a> E2ee<'a> {
     }
 
     async fn set_json<T: Serialize>(&self, key: &str, value: &T) -> Result<()> {
-        self.host.storage().set(key, serde_json::to_string(value)?.into()).await
+        self.host
+            .storage()
+            .set(key, serde_json::to_string(value)?.into())
+            .await
     }
 
     pub async fn get_self_key_by_key_id(&self, key_id: impl std::fmt::Display) -> Option<E2eeKey> {
-        self.get_json::<E2eeKey>(&format!("e2eeKeys:{key_id}")).await.filter(E2eeKey::is_complete)
+        self.get_json::<E2eeKey>(&format!("e2eeKeys:{key_id}"))
+            .await
+            .filter(E2eeKey::is_complete)
     }
 
-    pub async fn save_self_key_by_key_id(&self, key_id: impl std::fmt::Display, key: &E2eeKey) -> Result<()> {
+    pub async fn save_self_key_by_key_id(
+        &self,
+        key_id: impl std::fmt::Display,
+        key: &E2eeKey,
+    ) -> Result<()> {
         self.set_json(&format!("e2eeKeys:{key_id}"), key).await
     }
 
@@ -223,7 +266,9 @@ impl<'a> E2ee<'a> {
         }
         let keys = self.host.get_e2ee_public_keys().await?;
         for k in keys.as_list().unwrap_or_default() {
-            let Some(id) = key_id_of(field(k, "keyId", 2)) else { continue };
+            let Some(id) = key_id_of(field(k, "keyId", 2)) else {
+                continue;
+            };
             if let Some(key) = self.get_self_key_by_key_id(id).await {
                 self.save_self_key(&key).await?;
                 return Ok(key);
@@ -234,7 +279,11 @@ impl<'a> E2ee<'a> {
 
     /// Compare a private key with the public key the server has for `key_id`.
     /// `None` when the server is unreachable or does not list the id.
-    pub async fn check_stored_key_against_server(&self, key_id: &str, private_key: &[u8]) -> Option<bool> {
+    pub async fn check_stored_key_against_server(
+        &self,
+        key_id: &str,
+        private_key: &[u8],
+    ) -> Option<bool> {
         let keys = match self.host.get_e2ee_public_keys().await {
             Ok(k) => k,
             Err(e) => {
@@ -244,12 +293,17 @@ impl<'a> E2ee<'a> {
         };
         for k in keys.as_list().unwrap_or_default() {
             let id = field(k, "keyId", 2);
-            if key_id_of(id).map(|i| i.to_string()).or_else(|| id.as_str().map(str::to_string)).as_deref()
+            if key_id_of(id)
+                .map(|i| i.to_string())
+                .or_else(|| id.as_str().map(str::to_string))
+                .as_deref()
                 != Some(key_id)
             {
                 continue;
             }
-            let Some(data) = field(k, "keyData", 4).as_bytes() else { continue };
+            let Some(data) = field(k, "keyData", 4).as_bytes() else {
+                continue;
+            };
             return Some(crypto::verify_key_pair(private_key, data));
         }
         None
@@ -260,8 +314,11 @@ impl<'a> E2ee<'a> {
     /// the mid must be part of the cache key.
     pub async fn get_user_public_key(&self, mid: &str, key_id: Option<i64>) -> Result<Vec<u8>> {
         if let Some(id) = key_id
-            && let Ok(Some(serde_json::Value::String(cached))) =
-                self.host.storage().get(&format!("e2eePublicKeys:{mid}:{id}")).await
+            && let Ok(Some(serde_json::Value::String(cached))) = self
+                .host
+                .storage()
+                .get(&format!("e2eePublicKeys:{mid}:{id}"))
+                .await
             && !cached.is_empty()
         {
             return Ok(decode_base64(&cached));
@@ -282,17 +339,33 @@ impl<'a> E2ee<'a> {
                 ),
             ));
         }
-        let data = public_key["keyData"].as_bytes().unwrap_or_default().to_vec();
-        let cache_id = receiver_key_id.map(|i| i.to_string()).unwrap_or_else(|| "undefined".into());
-        self.host.storage().set(&format!("e2eePublicKeys:{mid}:{cache_id}"), B64.encode(&data).into()).await?;
+        let data = public_key["keyData"]
+            .as_bytes()
+            .unwrap_or_default()
+            .to_vec();
+        let cache_id = receiver_key_id
+            .map(|i| i.to_string())
+            .unwrap_or_else(|| "undefined".into());
+        self.host
+            .storage()
+            .set(
+                &format!("e2eePublicKeys:{mid}:{cache_id}"),
+                B64.encode(&data).into(),
+            )
+            .await?;
         Ok(data)
     }
 
     async fn cached_group_key(&self, chat_mid: &str, key_id: i64) -> Option<GroupKey> {
         // The per-id slot is the real cache; the unsuffixed one is read for
         // storages written by earlier linejs versions.
-        for slot in [format!("e2eeGroupKeys:{chat_mid}:{key_id}"), format!("e2eeGroupKeys:{chat_mid}")] {
-            let Some(key) = self.get_json::<GroupKey>(&slot).await else { continue };
+        for slot in [
+            format!("e2eeGroupKeys:{chat_mid}:{key_id}"),
+            format!("e2eeGroupKeys:{chat_mid}"),
+        ] {
+            let Some(key) = self.get_json::<GroupKey>(&slot).await else {
+                continue;
+            };
             if key.key_id == key_id {
                 return Some(key);
             }
@@ -326,7 +399,9 @@ impl<'a> E2ee<'a> {
             Some(s) => s,
             None => match self.host.get_last_e2ee_group_shared_key(2, chat_mid).await {
                 Ok(v) => v,
-                Err(e) if e.code() == Some("NOT_FOUND") => self.try_register_group_key(chat_mid).await?,
+                Err(e) if e.code() == Some("NOT_FOUND") => {
+                    self.try_register_group_key(chat_mid).await?
+                }
                 Err(e) => return Err(e),
             },
         };
@@ -343,15 +418,26 @@ impl<'a> E2ee<'a> {
         let receiver_key_id = key_id_of(&shared["receiverKeyId"]).unwrap_or_default();
         let encrypted = shared["encryptedSharedKey"].as_bytes().unwrap_or_default();
 
-        let self_key = self.get_self_key_by_key_id(receiver_key_id).await.ok_or_else(no_e2ee_key)?;
+        let self_key = self
+            .get_self_key_by_key_id(receiver_key_id)
+            .await
+            .ok_or_else(no_e2ee_key)?;
         let creator_key = self.get_user_public_key(creator, creator_key_id).await?;
         let secret = crypto::generate_shared_secret(&self_key.private_key(), &creator_key);
         let (key, iv) = crypto::derive_key_iv(&secret, &[]);
         let plain = crypto::decrypt_aes_cbc(&key, &iv, encrypted, true)?;
 
-        let group_key = GroupKey { priv_key: B64.encode(plain), key_id: group_key_id };
-        self.set_json(&format!("e2eeGroupKeys:{chat_mid}:{group_key_id}"), &group_key).await?;
-        self.set_json(&format!("e2eeGroupKeys:{chat_mid}"), &group_key).await?;
+        let group_key = GroupKey {
+            priv_key: B64.encode(plain),
+            key_id: group_key_id,
+        };
+        self.set_json(
+            &format!("e2eeGroupKeys:{chat_mid}:{group_key_id}"),
+            &group_key,
+        )
+        .await?;
+        self.set_json(&format!("e2eeGroupKeys:{chat_mid}"), &group_key)
+            .await?;
         Ok(group_key)
     }
 
@@ -359,9 +445,15 @@ impl<'a> E2ee<'a> {
     /// key and register it. Returns the server's `Pb1_U3` for us.
     pub async fn try_register_group_key(&self, chat_mid: &str) -> Result<Value> {
         let public_keys = self.host.get_last_e2ee_public_keys(chat_mid).await?;
-        let mid = self.host.self_mid().ok_or_else(|| Error::internal("NotAuthorized", "profile is not loaded"))?;
+        let mid = self
+            .host
+            .self_mid()
+            .ok_or_else(|| Error::internal("NotAuthorized", "profile is not loaded"))?;
         let self_key_id = key_id_of(&public_keys[mid.as_str()]["keyId"]).ok_or_else(no_e2ee_key)?;
-        let self_key = self.get_self_key_by_key_id(self_key_id).await.ok_or_else(no_e2ee_key)?;
+        let self_key = self
+            .get_self_key_by_key_id(self_key_id)
+            .await
+            .ok_or_else(no_e2ee_key)?;
         let self_private = self_key.private_key();
         let group_private = crypto::random_bytes(32);
 
@@ -369,7 +461,11 @@ impl<'a> E2ee<'a> {
         for (member, key) in public_keys.entries() {
             let secret = crypto::generate_shared_secret(&self_private, key_data_of(key, &member)?);
             let (aes_key, iv) = crypto::derive_key_iv(&secret, &[]);
-            wrapped.push(Value::Binary(crypto::encrypt_aes_cbc(&aes_key, &iv, &group_private)?));
+            wrapped.push(Value::Binary(crypto::encrypt_aes_cbc(
+                &aes_key,
+                &iv,
+                &group_private,
+            )?));
             key_ids.push(Value::Int(key_id_of(&key["keyId"]).unwrap_or_default()));
             members.push(Value::String(member));
         }
@@ -394,17 +490,26 @@ impl<'a> E2ee<'a> {
             pub_key: B64.encode(&public),
             e2ee_version: Some(1.into()),
         };
-        let id = key_id.map(|i| i.to_string()).unwrap_or_else(|| "undefined".into());
+        let id = key_id
+            .map(|i| i.to_string())
+            .unwrap_or_else(|| "undefined".into());
         self.save_self_key_by_key_id(&id, &key).await?;
         self.save_self_key(&key).await?;
-        self.log("registerE2EEKeyPairSuccess", serde_json::json!({"keyId": key_id}));
+        self.log(
+            "registerE2EEKeyPairSuccess",
+            serde_json::json!({"keyId": key_id}),
+        );
         Ok(key)
     }
 
     /// Decode the login key chain (`encryptedKeyChain`, `publicKey`, `keyId`,
     /// `e2eeVersion`). Every generation is stored under its own id; the
     /// requested one is remembered for [`Self::verify_login_key`].
-    pub async fn decode_key_v1(&self, data: &Value, secret: &[u8]) -> Result<Option<(E2eeKey, Vec<u8>, Vec<u8>)>> {
+    pub async fn decode_key_v1(
+        &self,
+        data: &Value,
+        secret: &[u8],
+    ) -> Result<Option<(E2eeKey, Vec<u8>, Vec<u8>)>> {
         let parsed;
         let data = match data {
             // ForSecure logins hand the e2ee info over as a JSON string.
@@ -438,10 +543,16 @@ impl<'a> E2ee<'a> {
         let selected = keys
             .iter()
             .find(|k| k.key_id.to_string() == key_id)
-            .ok_or_else(|| Error::internal("NoE2EEKey", "Requested keyId is absent from the login keychain"))?
+            .ok_or_else(|| {
+                Error::internal(
+                    "NoE2EEKey",
+                    "Requested keyId is absent from the login keychain",
+                )
+            })?
             .clone();
         // Server verification is deferred until the login token is installed.
-        *self.state.login_key.lock().unwrap() = Some((key_id.clone(), selected.private_key.clone()));
+        *self.state.login_key.lock().unwrap() =
+            Some((key_id.clone(), selected.private_key.clone()));
         for k in &keys {
             let stored = E2eeKey {
                 key_id: Some(k.key_id),
@@ -463,8 +574,14 @@ impl<'a> E2ee<'a> {
     /// Check the key chosen at login against the server. Fails only on a
     /// definite mismatch, and never rotates keys.
     pub async fn verify_login_key(&self) -> Result<()> {
-        let Some((key_id, private_key)) = self.state.login_key.lock().unwrap().clone() else { return Ok(()) };
-        if self.check_stored_key_against_server(&key_id, &private_key).await == Some(false) {
+        let Some((key_id, private_key)) = self.state.login_key.lock().unwrap().clone() else {
+            return Ok(());
+        };
+        if self
+            .check_stored_key_against_server(&key_id, &private_key)
+            .await
+            == Some(false)
+        {
             return Err(Error::internal(
                 "E2EEKeyMismatch",
                 "Login key does not match the server-registered public key; no replacement key was registered",
@@ -502,7 +619,11 @@ pub(crate) mod tests {
 
     impl FakeHost {
         pub fn new() -> Self {
-            Self { mid: Some("u-self".into()), public_keys: Some(vec![]), ..Default::default() }
+            Self {
+                mid: Some("u-self".into()),
+                public_keys: Some(vec![]),
+                ..Default::default()
+            }
         }
         pub fn calls(&self) -> Vec<(String, Value)> {
             self.calls.lock().unwrap().clone()
@@ -519,7 +640,11 @@ pub(crate) mod tests {
     }
 
     fn not_found() -> Error {
-        Error::Request { method: "x".into(), path: "/S4".into(), data: tv!({"code": "NOT_FOUND"}) }
+        Error::Request {
+            method: "x".into(),
+            path: "/S4".into(),
+            data: tv!({"code": "NOT_FOUND"}),
+        }
     }
 
     #[async_trait]
@@ -532,7 +657,10 @@ pub(crate) mod tests {
         }
         async fn get_e2ee_public_keys(&self) -> Result<Value> {
             self.record("getE2EEPublicKeys", Value::Null);
-            self.public_keys.clone().map(Value::List).ok_or_else(|| Error::internal("Offline", "offline"))
+            self.public_keys
+                .clone()
+                .map(Value::List)
+                .ok_or_else(|| Error::internal("Offline", "offline"))
         }
         async fn negotiate_e2ee_public_key(&self, mid: &str) -> Result<Value> {
             self.record("negotiateE2EEPublicKey", tv!({"mid": mid}));
@@ -543,16 +671,30 @@ pub(crate) mod tests {
             res.insert("publicKey", pk);
             Ok(res)
         }
-        async fn get_e2ee_group_shared_key(&self, key_version: i32, chat_mid: &str, id: i64) -> Result<Value> {
+        async fn get_e2ee_group_shared_key(
+            &self,
+            key_version: i32,
+            chat_mid: &str,
+            id: i64,
+        ) -> Result<Value> {
             self.record(
                 "getE2EEGroupSharedKey",
                 tv!({"keyVersion": key_version, "chatMid": chat_mid, "groupKeyId": id}),
             );
             self.group_keys.get(&id).cloned().ok_or_else(not_found)
         }
-        async fn get_last_e2ee_group_shared_key(&self, key_version: i32, chat_mid: &str) -> Result<Value> {
-            self.record("getLastE2EEGroupSharedKey", tv!({"keyVersion": key_version, "chatMid": chat_mid}));
-            self.last_group_key_id.and_then(|id| self.group_keys.get(&id).cloned()).ok_or_else(not_found)
+        async fn get_last_e2ee_group_shared_key(
+            &self,
+            key_version: i32,
+            chat_mid: &str,
+        ) -> Result<Value> {
+            self.record(
+                "getLastE2EEGroupSharedKey",
+                tv!({"keyVersion": key_version, "chatMid": chat_mid}),
+            );
+            self.last_group_key_id
+                .and_then(|id| self.group_keys.get(&id).cloned())
+                .ok_or_else(not_found)
         }
         async fn get_last_e2ee_public_keys(&self, chat_mid: &str) -> Result<Value> {
             self.record("getLastE2EEPublicKeys", tv!({"chatMid": chat_mid}));
@@ -587,28 +729,49 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn public_key_cache_is_per_mid() {
         let mut host = FakeHost::new();
-        host.negotiate.insert("u-a".into(), (1, b"pub-of-u-a".to_vec()));
-        host.negotiate.insert("u-b".into(), (1, b"pub-of-u-b".to_vec()));
+        host.negotiate
+            .insert("u-a".into(), (1, b"pub-of-u-a".to_vec()));
+        host.negotiate
+            .insert("u-b".into(), (1, b"pub-of-u-b".to_vec()));
         let state = E2eeState::default();
         let e2ee = E2ee::new(&host, &state);
 
-        assert_eq!(e2ee.get_user_public_key("u-a", Some(1)).await.unwrap(), b"pub-of-u-a");
+        assert_eq!(
+            e2ee.get_user_public_key("u-a", Some(1)).await.unwrap(),
+            b"pub-of-u-a"
+        );
         // Same keyId on another contact must not be served A's cached key.
-        assert_eq!(e2ee.get_user_public_key("u-b", Some(1)).await.unwrap(), b"pub-of-u-b");
-        assert_eq!(e2ee.get_user_public_key("u-a", Some(1)).await.unwrap(), b"pub-of-u-a");
-        let negotiated: Vec<_> =
-            host.calls().into_iter().map(|(_, a)| a["mid"].as_str().unwrap().to_string()).collect();
+        assert_eq!(
+            e2ee.get_user_public_key("u-b", Some(1)).await.unwrap(),
+            b"pub-of-u-b"
+        );
+        assert_eq!(
+            e2ee.get_user_public_key("u-a", Some(1)).await.unwrap(),
+            b"pub-of-u-a"
+        );
+        let negotiated: Vec<_> = host
+            .calls()
+            .into_iter()
+            .map(|(_, a)| a["mid"].as_str().unwrap().to_string())
+            .collect();
         assert_eq!(negotiated, ["u-a", "u-b"]);
-        assert_eq!(host.get("e2eePublicKeys:u-a:1").await, Some(b64(b"pub-of-u-a").into()));
+        assert_eq!(
+            host.get("e2eePublicKeys:u-a:1").await,
+            Some(b64(b"pub-of-u-a").into())
+        );
     }
 
     #[tokio::test]
     async fn public_key_without_key_id_accepts_negotiated_key() {
         let mut host = FakeHost::new();
-        host.negotiate.insert("u-a".into(), (1, b"pub-of-u-a".to_vec()));
+        host.negotiate
+            .insert("u-a".into(), (1, b"pub-of-u-a".to_vec()));
         let state = E2eeState::default();
         let e2ee = E2ee::new(&host, &state);
-        assert_eq!(e2ee.get_user_public_key("u-a", None).await.unwrap(), b"pub-of-u-a");
+        assert_eq!(
+            e2ee.get_user_public_key("u-a", None).await.unwrap(),
+            b"pub-of-u-a"
+        );
         assert!(e2ee.get_user_public_key("u-a", Some(5)).await.is_err());
     }
 
@@ -616,7 +779,10 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn register_key_pair_sends_raw_public_key() {
-        let host = FakeHost { register_key_id: 7, ..FakeHost::new() };
+        let host = FakeHost {
+            register_key_id: 7,
+            ..FakeHost::new()
+        };
         let state = E2eeState::default();
         let key = E2ee::new(&host, &state).register_key_pair().await.unwrap();
         let calls = host.calls();
@@ -638,36 +804,88 @@ pub(crate) mod tests {
     }
 
     fn expected(id: i64) -> GroupKey {
-        GroupKey { priv_key: b64(&shared_key_material(id)), key_id: id }
+        GroupKey {
+            priv_key: b64(&shared_key_material(id)),
+            key_id: id,
+        }
     }
 
     async fn group_fixture(served: &[i64], last: i64) -> FakeHost {
         let mut host = FakeHost::new();
         let (self_priv, self_pub) = crypto::generate_key_pair();
         let (_, creator_pub) = crypto::generate_key_pair();
-        let (aes_key, iv) = crypto::derive_key_iv(&crypto::generate_shared_secret(&self_priv, &creator_pub), &[]);
+        let (aes_key, iv) = crypto::derive_key_iv(
+            &crypto::generate_shared_secret(&self_priv, &creator_pub),
+            &[],
+        );
         for &id in served {
             let mut v = tv!({
                 "keyVersion": 2, "groupKeyId": id, "creator": CREATOR, "creatorKeyId": 3,
                 "receiver": "u-self", "receiverKeyId": 5, "specVersion": 2
             });
-            v.insert("encryptedSharedKey", crypto::encrypt_aes_cbc(&aes_key, &iv, &shared_key_material(id)).unwrap());
+            v.insert(
+                "encryptedSharedKey",
+                crypto::encrypt_aes_cbc(&aes_key, &iv, &shared_key_material(id)).unwrap(),
+            );
             host.group_keys.insert(id, v);
         }
         host.last_group_key_id = Some(last);
         let self_key = serde_json::json!({"privKey": b64(&self_priv), "pubKey": b64(&self_pub)});
         host.set("e2eeKeys:5", self_key.to_string()).await;
         // Pre-seed the creator's public key so the unwrap needs no extra RPC.
-        host.set(&format!("e2eePublicKeys:{CREATOR}:3"), b64(&creator_pub)).await;
+        host.set(&format!("e2eePublicKeys:{CREATOR}:3"), b64(&creator_pub))
+            .await;
         host
     }
 
+    #[tokio::test]
+    async fn group_message_is_checked_as_members_open_it() {
+        let mut host = group_fixture(&[7], 7).await;
+        let stored: serde_json::Value = serde_json::from_str(
+            &host
+                .storage
+                .get_string("e2eeKeys:5")
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        let mut key = stored.clone();
+        key["keyId"] = 5.into();
+        host.set("e2eeKeys:5", key.to_string()).await;
+        host.set("e2eeKeys:u-self", key.to_string()).await;
+        let mut raw = tv!({"2": 5});
+        raw.insert(
+            "4",
+            Value::Binary(decode_base64(stored["pubKey"].as_str().unwrap())),
+        );
+        host.public_keys = Some(vec![raw]);
+        let state = E2eeState::default();
+        let e2ee = E2ee::new(&host, &state);
+        let chunks = e2ee
+            .encrypt_message(
+                "c-group",
+                super::super::E2eeContent::Text("hi".into()),
+                0,
+                2,
+            )
+            .await
+            .unwrap();
+        assert_eq!(crypto::byte2int(&chunks[4]), 7);
+    }
+
     fn by_id(id: i64) -> (String, Value) {
-        ("getE2EEGroupSharedKey".into(), tv!({"keyVersion": 2, "chatMid": GROUP, "groupKeyId": id}))
+        (
+            "getE2EEGroupSharedKey".into(),
+            tv!({"keyVersion": 2, "chatMid": GROUP, "groupKeyId": id}),
+        )
     }
 
     fn last() -> (String, Value) {
-        ("getLastE2EEGroupSharedKey".into(), tv!({"keyVersion": 2, "chatMid": GROUP}))
+        (
+            "getLastE2EEGroupSharedKey".into(),
+            tv!({"keyVersion": 2, "chatMid": GROUP}),
+        )
     }
 
     async fn cached(host: &FakeHost, key: &str) -> Option<GroupKey> {
@@ -679,11 +897,18 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn group_key_cached_generation_needs_no_rpc() {
-        for slot in [format!("e2eeGroupKeys:{GROUP}:7"), format!("e2eeGroupKeys:{GROUP}")] {
+        for slot in [
+            format!("e2eeGroupKeys:{GROUP}:7"),
+            format!("e2eeGroupKeys:{GROUP}"),
+        ] {
             let host = group_fixture(&[7], 7).await;
-            host.set(&slot, serde_json::to_string(&expected(7)).unwrap()).await;
+            host.set(&slot, serde_json::to_string(&expected(7)).unwrap())
+                .await;
             let state = E2eeState::default();
-            let key = E2ee::new(&host, &state).get_group_key(GROUP, Some(7)).await.unwrap();
+            let key = E2ee::new(&host, &state)
+                .get_group_key(GROUP, Some(7))
+                .await
+                .unwrap();
             assert_eq!(key, expected(7));
             assert!(host.calls().is_empty());
         }
@@ -692,23 +917,42 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn group_key_requested_generation_is_fetched_by_id() {
         let host = group_fixture(&[7, 9], 9).await;
-        host.set(&format!("e2eeGroupKeys:{GROUP}"), serde_json::to_string(&expected(9)).unwrap()).await;
+        host.set(
+            &format!("e2eeGroupKeys:{GROUP}"),
+            serde_json::to_string(&expected(9)).unwrap(),
+        )
+        .await;
         let state = E2eeState::default();
-        let key = E2ee::new(&host, &state).get_group_key(GROUP, Some(7)).await.unwrap();
+        let key = E2ee::new(&host, &state)
+            .get_group_key(GROUP, Some(7))
+            .await
+            .unwrap();
         assert_eq!(host.calls(), [by_id(7)]);
         assert_eq!(key, expected(7));
-        assert_eq!(cached(&host, &format!("e2eeGroupKeys:{GROUP}:7")).await, Some(key.clone()));
-        assert_eq!(cached(&host, &format!("e2eeGroupKeys:{GROUP}")).await, Some(key));
+        assert_eq!(
+            cached(&host, &format!("e2eeGroupKeys:{GROUP}:7")).await,
+            Some(key.clone())
+        );
+        assert_eq!(
+            cached(&host, &format!("e2eeGroupKeys:{GROUP}")).await,
+            Some(key)
+        );
     }
 
     #[tokio::test]
     async fn group_key_omitted_id_asks_for_last_key() {
         let host = group_fixture(&[9], 9).await;
         let state = E2eeState::default();
-        let key = E2ee::new(&host, &state).get_group_key(GROUP, None).await.unwrap();
+        let key = E2ee::new(&host, &state)
+            .get_group_key(GROUP, None)
+            .await
+            .unwrap();
         assert_eq!(host.calls(), [last()]);
         assert_eq!(key, expected(9));
-        assert_eq!(cached(&host, &format!("e2eeGroupKeys:{GROUP}:9")).await, Some(key));
+        assert_eq!(
+            cached(&host, &format!("e2eeGroupKeys:{GROUP}:9")).await,
+            Some(key)
+        );
     }
 
     #[tokio::test]
@@ -729,7 +973,10 @@ pub(crate) mod tests {
     async fn group_key_generation_zero_is_fetched_by_id() {
         let host = group_fixture(&[0, 9], 9).await;
         let state = E2eeState::default();
-        let key = E2ee::new(&host, &state).get_group_key(GROUP, Some(0)).await.unwrap();
+        let key = E2ee::new(&host, &state)
+            .get_group_key(GROUP, Some(0))
+            .await
+            .unwrap();
         assert_eq!(host.calls(), [by_id(0)]);
         assert_eq!(key, expected(0));
     }
@@ -739,16 +986,25 @@ pub(crate) mod tests {
         for id in [0, 7] {
             let host = group_fixture(&[9], 9).await;
             let state = E2eeState::default();
-            let key = E2ee::new(&host, &state).get_group_key(GROUP, Some(id)).await.unwrap();
+            let key = E2ee::new(&host, &state)
+                .get_group_key(GROUP, Some(id))
+                .await
+                .unwrap();
             assert_eq!(host.calls(), [by_id(id), last()]);
             assert_eq!(key, expected(9));
-            assert_eq!(cached(&host, &format!("e2eeGroupKeys:{GROUP}:9")).await, Some(key));
+            assert_eq!(
+                cached(&host, &format!("e2eeGroupKeys:{GROUP}:9")).await,
+                Some(key)
+            );
         }
     }
 
     // --- login_keychain.test.ts --------------------------------------------
 
-    async fn login_fixture(ids: &[i64], corrupt: bool) -> (FakeHost, Vec<u8>, Value, Vec<crypto::KeyChainEntry>) {
+    async fn login_fixture(
+        ids: &[i64],
+        corrupt: bool,
+    ) -> (FakeHost, Vec<u8>, Value, Vec<crypto::KeyChainEntry>) {
         let (secret, public, encrypted, keys) = crypto::tests::key_chain_fixture(ids, corrupt);
         let data = tv!({
             "keyId": "80",
@@ -765,20 +1021,33 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn login_key_chain_selects_requested_entry_and_keeps_generations() {
-        let (host, secret, data, keys) = login_fixture(&[10, 20, 30, 40, 50, 60, 70, 80], false).await;
+        let (host, secret, data, keys) =
+            login_fixture(&[10, 20, 30, 40, 50, 60, 70, 80], false).await;
         let state = E2eeState::default();
-        let (_, priv_key, pub_key) = E2ee::new(&host, &state).decode_key_v1(&data, &secret).await.unwrap().unwrap();
+        let (_, priv_key, pub_key) = E2ee::new(&host, &state)
+            .decode_key_v1(&data, &secret)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(priv_key, keys[7].private_key);
         assert_eq!(pub_key, keys[7].public_key);
         assert_eq!(saved_count(&host).await, 8);
         for k in &keys {
-            let stored: E2eeKey =
-                serde_json::from_str(host.get(&format!("e2eeKeys:{}", k.key_id)).await.unwrap().as_str().unwrap())
-                    .unwrap();
+            let stored: E2eeKey = serde_json::from_str(
+                host.get(&format!("e2eeKeys:{}", k.key_id))
+                    .await
+                    .unwrap()
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
             assert_eq!(stored.key_id, Some(k.key_id));
             assert_eq!(stored.priv_key, b64(&k.private_key));
         }
-        assert!(host.calls().is_empty(), "server verification must be deferred");
+        assert!(
+            host.calls().is_empty(),
+            "server verification must be deferred"
+        );
     }
 
     #[tokio::test]
@@ -786,17 +1055,26 @@ pub(crate) mod tests {
         let state = E2eeState::default();
         let (host, secret, mut data, _) = login_fixture(&[10, 80], false).await;
         data.insert("keyId", 999);
-        let err = E2ee::new(&host, &state).decode_key_v1(&data, &secret).await.unwrap_err();
+        let err = E2ee::new(&host, &state)
+            .decode_key_v1(&data, &secret)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("Requested keyId"));
         assert_eq!(saved_count(&host).await, 0);
 
         let (host, secret, data, _) = login_fixture(&[10, 80], true).await;
-        let err = E2ee::new(&host, &state).decode_key_v1(&data, &secret).await.unwrap_err();
+        let err = E2ee::new(&host, &state)
+            .decode_key_v1(&data, &secret)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("invalid key pair"));
         assert_eq!(saved_count(&host).await, 0);
 
         let (host, secret, data, _) = login_fixture(&[80, 80], false).await;
-        let err = E2ee::new(&host, &state).decode_key_v1(&data, &secret).await.unwrap_err();
+        let err = E2ee::new(&host, &state)
+            .decode_key_v1(&data, &secret)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("duplicate keyId"));
         assert_eq!(saved_count(&host).await, 0);
     }
@@ -804,13 +1082,18 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn login_key_mismatch_is_reported_without_rotation() {
         let (mut host, secret, data, _) = login_fixture(&[10, 80], false).await;
-        host.public_keys = Some(vec![tv!({"keyId": 80, "keyData": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="})]);
+        host.public_keys = Some(vec![
+            tv!({"keyId": 80, "keyData": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}),
+        ]);
         let state = E2eeState::default();
         let e2ee = E2ee::new(&host, &state);
         e2ee.decode_key_v1(&data, &secret).await.unwrap();
         assert!(host.calls().is_empty());
         let err = e2ee.verify_login_key().await.unwrap_err();
-        assert!(err.to_string().contains("no replacement key was registered"));
+        assert!(
+            err.to_string()
+                .contains("no replacement key was registered")
+        );
         assert_eq!(host.calls().len(), 1);
     }
 
@@ -831,14 +1114,23 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn unavailable_server_verification_is_unknown() {
         let (_, _, _, keys) = login_fixture(&[10, 80], false).await;
-        let host = FakeHost { public_keys: None, ..FakeHost::new() };
+        let host = FakeHost {
+            public_keys: None,
+            ..FakeHost::new()
+        };
         let state = E2eeState::default();
-        assert_eq!(E2ee::new(&host, &state).check_stored_key_against_server("80", &keys[1].private_key).await, None);
+        assert_eq!(
+            E2ee::new(&host, &state)
+                .check_stored_key_against_server("80", &keys[1].private_key)
+                .await,
+            None
+        );
     }
 
     #[tokio::test]
     async fn relogin_repairs_stale_mid_alias() {
-        let (host, secret, data, keys) = login_fixture(&[10, 20, 30, 40, 50, 60, 70, 80], false).await;
+        let (host, secret, data, keys) =
+            login_fixture(&[10, 20, 30, 40, 50, 60, 70, 80], false).await;
         let stale = serde_json::json!({
             "keyId": 80, "privKey": b64(&keys[0].private_key), "pubKey": b64(&keys[0].public_key)
         });
@@ -846,17 +1138,33 @@ pub(crate) mod tests {
         let state = E2eeState::default();
         let e2ee = E2ee::new(&host, &state);
         e2ee.decode_key_v1(&data, &secret).await.unwrap();
-        assert_eq!(e2ee.get_self_key("u-self").await.unwrap().priv_key, b64(&keys[7].private_key));
+        assert_eq!(
+            e2ee.get_self_key("u-self").await.unwrap().priv_key,
+            b64(&keys[7].private_key)
+        );
     }
 
     #[tokio::test]
     async fn qr_login_map_shape_is_accepted() {
         // SQR responses carry e2ee info as map<string, string>.
         let (host, secret, data, keys) = login_fixture(&[80], false).await;
-        let as_text = |v: &Value| v.as_str().map(str::to_string).unwrap_or_else(|| v.to_json().to_string());
-        let map = Value::Map(data.entries().into_iter().map(|(k, v)| (k.into(), as_text(v).into())).collect());
+        let as_text = |v: &Value| {
+            v.as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| v.to_json().to_string())
+        };
+        let map = Value::Map(
+            data.entries()
+                .into_iter()
+                .map(|(k, v)| (k.into(), as_text(v).into()))
+                .collect(),
+        );
         let state = E2eeState::default();
-        let (key, _, _) = E2ee::new(&host, &state).decode_key_v1(&map, &secret).await.unwrap().unwrap();
+        let (key, _, _) = E2ee::new(&host, &state)
+            .decode_key_v1(&map, &secret)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(key.key_id, Some(80));
         assert_eq!(key.priv_key, b64(&keys[0].private_key));
     }

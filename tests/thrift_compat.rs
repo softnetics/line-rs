@@ -1,7 +1,7 @@
 //! Golden vectors produced by upstream linejs' `writeThrift` (node `thrift`
 //! 0.20) to pin byte-for-byte wire compatibility.
 
-use line_rs::thrift::{read_message, write_message, Protocol, TType, TValue};
+use line_rs::thrift::{Protocol, TType, TValue, read_message, write_message};
 
 fn sample() -> Vec<(i16, TValue)> {
     vec![
@@ -14,11 +14,27 @@ fn sample() -> Vec<(i16, TValue)> {
             21,
             TValue::Struct(vec![
                 (1, TValue::Bool(false)),
-                (2, TValue::List(TType::String, vec![TValue::string("a"), TValue::string("b")])),
+                (
+                    2,
+                    TValue::List(
+                        TType::String,
+                        vec![TValue::string("a"), TValue::string("b")],
+                    ),
+                ),
             ]),
         ),
-        (22, TValue::Map(TType::String, TType::I32, vec![(TValue::string("k"), TValue::I32(7))])),
-        (23, TValue::List(TType::Bool, vec![TValue::Bool(true), TValue::Bool(false)])),
+        (
+            22,
+            TValue::Map(
+                TType::String,
+                TType::I32,
+                vec![(TValue::string("k"), TValue::I32(7))],
+            ),
+        ),
+        (
+            23,
+            TValue::List(TType::Bool, vec![TValue::Bool(true), TValue::Bool(false)]),
+        ),
         (30, TValue::I64(-1)),
     ]
 }
@@ -31,17 +47,26 @@ const BINARY: &str = "800100010000000b73656e644d65737361676500000000080001ffffff
 
 #[test]
 fn compact_matches_linejs() {
-    assert_eq!(hex::encode(write_message("sendMessage", &sample(), Protocol::Compact).unwrap()), COMPACT);
+    assert_eq!(
+        hex::encode(write_message("sendMessage", &sample(), Protocol::Compact).unwrap()),
+        COMPACT
+    );
 }
 
 #[test]
 fn binary_matches_linejs() {
-    assert_eq!(hex::encode(write_message("sendMessage", &sample(), Protocol::Binary).unwrap()), BINARY);
+    assert_eq!(
+        hex::encode(write_message("sendMessage", &sample(), Protocol::Binary).unwrap()),
+        BINARY
+    );
 }
 
 #[test]
 fn empty_args_match_linejs() {
-    assert_eq!(hex::encode(write_message("getProfile", &[], Protocol::Compact).unwrap()), "8221000a67657450726f66696c6500");
+    assert_eq!(
+        hex::encode(write_message("getProfile", &[], Protocol::Compact).unwrap()),
+        "8221000a67657450726f66696c6500"
+    );
 }
 
 #[test]

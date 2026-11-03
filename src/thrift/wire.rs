@@ -144,7 +144,16 @@ pub fn write_message(name: &str, args: &[(i16, TValue)], protocol: Protocol) -> 
     let mut out = Vec::with_capacity(64);
     match protocol {
         Protocol::Binary => {
-            out.extend_from_slice(&[0x80, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, name_bytes.len() as u8]);
+            out.extend_from_slice(&[
+                0x80,
+                0x01,
+                0x00,
+                0x01,
+                0x00,
+                0x00,
+                0x00,
+                name_bytes.len() as u8,
+            ]);
             out.extend_from_slice(name_bytes);
             out.extend_from_slice(&[0, 0, 0, 0]);
         }
@@ -236,7 +245,11 @@ struct Writer {
 
 impl Writer {
     fn new(protocol: Protocol) -> Self {
-        Self { protocol, buf: Vec::new(), last_fid: vec![0] }
+        Self {
+            protocol,
+            buf: Vec::new(),
+            last_fid: vec![0],
+        }
     }
 
     fn write_struct(&mut self, fields: &[(i16, TValue)]) -> Result<()> {
@@ -346,7 +359,8 @@ impl Writer {
                     }
                 } else {
                     self.buf.push(*et as u8);
-                    self.buf.extend_from_slice(&(items.len() as i32).to_be_bytes());
+                    self.buf
+                        .extend_from_slice(&(items.len() as i32).to_be_bytes());
                 }
                 for item in items {
                     self.write_value(item)?;
@@ -361,7 +375,8 @@ impl Writer {
                 } else {
                     self.buf.push(*kt as u8);
                     self.buf.push(*vt as u8);
-                    self.buf.extend_from_slice(&(entries.len() as i32).to_be_bytes());
+                    self.buf
+                        .extend_from_slice(&(entries.len() as i32).to_be_bytes());
                 }
                 for (k, v) in entries {
                     self.write_value(k)?;
@@ -382,7 +397,12 @@ pub fn read_message(data: &[u8], protocol: Protocol) -> Result<TMessage> {
     let mut r = Reader::new(data, protocol);
     let (name, mtype, seqid) = r.read_message_begin()?;
     let body = r.read_struct()?;
-    Ok(TMessage { name, mtype, seqid, body })
+    Ok(TMessage {
+        name,
+        mtype,
+        seqid,
+        body,
+    })
 }
 
 /// Decode a bare struct (no message header).
@@ -403,7 +423,14 @@ struct Reader<'a> {
 
 impl<'a> Reader<'a> {
     fn new(data: &'a [u8], protocol: Protocol) -> Self {
-        Self { data, pos: 0, protocol, last_fid: vec![0], pending_bool: None, depth: 0 }
+        Self {
+            data,
+            pos: 0,
+            protocol,
+            last_fid: vec![0],
+            pending_bool: None,
+            depth: 0,
+        }
     }
 
     fn eof() -> Error {
@@ -574,10 +601,18 @@ impl<'a> Reader<'a> {
             }
             TType::Double => {
                 let b: [u8; 8] = self.take(8)?.try_into().unwrap();
-                TValue::Double(if compact { f64::from_le_bytes(b) } else { f64::from_be_bytes(b) })
+                TValue::Double(if compact {
+                    f64::from_le_bytes(b)
+                } else {
+                    f64::from_be_bytes(b)
+                })
             }
             TType::String => {
-                let len = if compact { self.varint()? as usize } else { self.be_i32()? as usize };
+                let len = if compact {
+                    self.varint()? as usize
+                } else {
+                    self.be_i32()? as usize
+                };
                 TValue::Binary(self.take(len)?.to_vec())
             }
             TType::Struct => self.read_struct()?,
@@ -599,7 +634,11 @@ impl<'a> Reader<'a> {
                 for _ in 0..size {
                     items.push(self.read_elem(et)?);
                 }
-                if ttype == TType::List { TValue::List(et, items) } else { TValue::Set(et, items) }
+                if ttype == TType::List {
+                    TValue::List(et, items)
+                } else {
+                    TValue::Set(et, items)
+                }
             }
             TType::Map => {
                 let (kt, vt, size) = if compact {
@@ -608,7 +647,11 @@ impl<'a> Reader<'a> {
                         (TType::Stop, TType::Stop, 0)
                     } else {
                         let kv = self.byte()?;
-                        (from_compact_type(kv >> 4)?, from_compact_type(kv & 0x0f)?, size)
+                        (
+                            from_compact_type(kv >> 4)?,
+                            from_compact_type(kv & 0x0f)?,
+                            size,
+                        )
                     }
                 } else {
                     let kt = TType::from_u8(self.byte()?)?;
@@ -625,7 +668,9 @@ impl<'a> Reader<'a> {
                 TValue::Map(kt, vt, entries)
             }
             TType::Stop | TType::Void => {
-                return Err(Error::Thrift(format!("cannot read value of type {ttype:?}")));
+                return Err(Error::Thrift(format!(
+                    "cannot read value of type {ttype:?}"
+                )));
             }
         })
     }
@@ -634,14 +679,20 @@ impl<'a> Reader<'a> {
     fn read_elem(&mut self, t: TType) -> Result<TValue> {
         if t == TType::Bool {
             let b = self.byte()?;
-            return Ok(TValue::Bool(if self.protocol == Protocol::Compact { b == 1 } else { b != 0 }));
+            return Ok(TValue::Bool(if self.protocol == Protocol::Compact {
+                b == 1
+            } else {
+                b != 0
+            }));
         }
         self.read_value(t)
     }
 
     fn check_size(&self, size: usize) -> Result<()> {
         if size > self.data.len().saturating_sub(self.pos) {
-            return Err(Error::Thrift(format!("container size {size} exceeds remaining data")));
+            return Err(Error::Thrift(format!(
+                "container size {size} exceeds remaining data"
+            )));
         }
         Ok(())
     }
@@ -662,14 +713,27 @@ mod tests {
                 21,
                 TValue::Struct(vec![
                     (1, TValue::Bool(false)),
-                    (2, TValue::List(TType::String, vec![TValue::string("a"), TValue::string("b")])),
+                    (
+                        2,
+                        TValue::List(
+                            TType::String,
+                            vec![TValue::string("a"), TValue::string("b")],
+                        ),
+                    ),
                 ]),
             ),
             (
                 22,
-                TValue::Map(TType::String, TType::I32, vec![(TValue::string("k"), TValue::I32(7))]),
+                TValue::Map(
+                    TType::String,
+                    TType::I32,
+                    vec![(TValue::string("k"), TValue::I32(7))],
+                ),
             ),
-            (23, TValue::List(TType::Bool, vec![TValue::Bool(true), TValue::Bool(false)])),
+            (
+                23,
+                TValue::List(TType::Bool, vec![TValue::Bool(true), TValue::Bool(false)]),
+            ),
             (-1, TValue::I64(-1)),
         ]
     }

@@ -9,4 +9,6 @@ pub mod wire;
 pub use codec::{decode_raw, decode_struct, decode_value, encode_struct, encode_value};
 pub use schema::{BaseType, EnumDef, FieldDef, Schema, StructDef, TypeRef};
 pub use value::{Map, Value};
-pub use wire::{read_message, read_struct, write_message, write_struct, Protocol, TMessage, TType, TValue};
+pub use wire::{
+    Protocol, TMessage, TType, TValue, read_message, read_struct, write_message, write_struct,
+};

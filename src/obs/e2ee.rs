@@ -6,7 +6,7 @@ use bytes::Bytes;
 use indexmap::IndexMap;
 
 use super::crypto::{self, encrypt_by_key_material};
-use super::{ObjType, Obs, ObjectUpload, ObsFile};
+use super::{ObjType, ObjectUpload, Obs, ObsFile};
 use crate::base::BaseClient;
 use crate::e2ee::E2eeContent;
 use crate::error::{Error, Result};
@@ -70,7 +70,9 @@ pub fn e2ee_content_metadata(
     meta.insert("FILE_SIZE".to_string(), encrypted_size.to_string());
     meta.insert("e2eeVersion".to_string(), "2".to_string());
     if has_preview(o_type) {
-        let ext = extension.map(|e| format!(",\"extension\":{}", serde_json::Value::from(e))).unwrap_or_default();
+        let ext = extension
+            .map(|e| format!(",\"extension\":{}", serde_json::Value::from(e)))
+            .unwrap_or_default();
         meta.insert(
             "MEDIA_CONTENT_INFO".to_string(),
             format!(
@@ -89,9 +91,19 @@ pub fn e2ee_content_metadata(
 /// without a server.
 #[async_trait]
 pub(crate) trait E2eeMediaBackend: Sync {
-    async fn upload(&self, data: Bytes, obs_path: String, params: Vec<(String, String)>) -> Result<String>;
-    async fn encrypt_message(&self, to: &str, key_material: &str, file_name: &str, content_type: i32)
-    -> Result<Vec<Vec<u8>>>;
+    async fn upload(
+        &self,
+        data: Bytes,
+        obs_path: String,
+        params: Vec<(String, String)>,
+    ) -> Result<String>;
+    async fn encrypt_message(
+        &self,
+        to: &str,
+        key_material: &str,
+        file_name: &str,
+        content_type: i32,
+    ) -> Result<Vec<Vec<u8>>>;
     async fn send(
         &self,
         to: &str,
@@ -103,7 +115,12 @@ pub(crate) trait E2eeMediaBackend: Sync {
 
 #[async_trait]
 impl E2eeMediaBackend for Obs<'_> {
-    async fn upload(&self, data: Bytes, obs_path: String, params: Vec<(String, String)>) -> Result<String> {
+    async fn upload(
+        &self,
+        data: Bytes,
+        obs_path: String,
+        params: Vec<(String, String)>,
+    ) -> Result<String> {
         let up = self
             .upload_object_for_service(ObjectUpload {
                 data,
@@ -123,8 +140,12 @@ impl E2eeMediaBackend for Obs<'_> {
         file_name: &str,
         content_type: i32,
     ) -> Result<Vec<Vec<u8>>> {
-        let content = E2eeContent::Json(serde_json::json!({"keyMaterial": key_material, "fileName": file_name}));
-        self.client.encrypt_e2ee_message(to, content, content_type, 2).await
+        let content = E2eeContent::Json(
+            serde_json::json!({"keyMaterial": key_material, "fileName": file_name}),
+        );
+        self.client
+            .encrypt_e2ee_message(to, content, content_type, 2)
+            .await
     }
 
     async fn send(
@@ -154,15 +175,35 @@ async fn send_chunked_message(
         "contentType": content_type,
         "sessionId": 0,
     });
-    message.insert("contentMetadata", Value::Struct(metadata.into_iter().map(|(k, v)| (k, Value::String(v))).collect()));
-    message.insert("chunks", Value::List(chunks.into_iter().map(Value::Binary).collect()));
+    message.insert(
+        "contentMetadata",
+        Value::Struct(
+            metadata
+                .into_iter()
+                .map(|(k, v)| (k, Value::String(v)))
+                .collect(),
+        ),
+    );
+    message.insert(
+        "chunks",
+        Value::List(chunks.into_iter().map(Value::Binary).collect()),
+    );
     let mut args = crate::tv!({"seq": client.get_reqseq("talk").await?});
     args.insert("message", message);
     client.talk().call("sendMessage", args).await
 }
 
-pub(crate) async fn upload_media_by_e2ee(backend: &dyn E2eeMediaBackend, opts: E2eeMediaUpload) -> Result<Value> {
-    let E2eeMediaUpload { file, o_type, to, preview, duration_ms } = opts;
+pub(crate) async fn upload_media_by_e2ee(
+    backend: &dyn E2eeMediaBackend,
+    opts: E2eeMediaUpload,
+) -> Result<Value> {
+    let E2eeMediaUpload {
+        file,
+        o_type,
+        to,
+        preview,
+        duration_ms,
+    } = opts;
     let ext = file.extension();
     let (namespace, content_type) = type_set(o_type);
     let mut params = vec![("type".to_string(), "file".to_string())];
@@ -176,7 +217,13 @@ pub(crate) async fn upload_media_by_e2ee(backend: &dyn E2eeMediaBackend, opts: E
     let edata = Bytes::from(enc.encrypted_data);
     let size = edata.len();
     let temp_id = format!("reqid-{}", super::uuid_v4());
-    let obj_id = backend.upload(edata.clone(), format!("talk/{namespace}/{temp_id}"), params.clone()).await?;
+    let obj_id = backend
+        .upload(
+            edata.clone(),
+            format!("talk/{namespace}/{temp_id}"),
+            params.clone(),
+        )
+        .await?;
 
     if has_preview(o_type) {
         let preview_data = match preview {
@@ -189,14 +236,28 @@ pub(crate) async fn upload_media_by_e2ee(backend: &dyn E2eeMediaBackend, opts: E
             }
             None => edata,
         };
-        let obj_id2 = backend.upload(preview_data, format!("talk/{namespace}/{obj_id}__ud-preview"), params).await?;
+        let obj_id2 = backend
+            .upload(
+                preview_data,
+                format!("talk/{namespace}/{obj_id}__ud-preview"),
+                params,
+            )
+            .await?;
         if obj_id != obj_id2 {
-            return Err(Error::internal("ObsError", format!("objId not match: {obj_id} != {obj_id2}")));
+            return Err(Error::internal(
+                "ObsError",
+                format!("objId not match: {obj_id} != {obj_id2}"),
+            ));
         }
     }
 
-    let file_name = file.name.clone().unwrap_or_else(|| format!("line.{}", ext.as_deref().unwrap_or("undefined")));
-    let chunks = backend.encrypt_message(&to, &enc.key_material, &file_name, content_type).await?;
+    let file_name = file
+        .name
+        .clone()
+        .unwrap_or_else(|| format!("line.{}", ext.as_deref().unwrap_or("undefined")));
+    let chunks = backend
+        .encrypt_message(&to, &enc.key_material, &file_name, content_type)
+        .await?;
     let metadata = e2ee_content_metadata(o_type, &obj_id, size, ext.as_deref(), duration_ms);
     backend.send(&to, chunks, content_type, metadata).await
 }
@@ -206,7 +267,10 @@ pub(crate) fn talk_meta(message_id: &str) -> Result<String> {
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD;
     let s = thrift::write_struct(
-        &[(4, TValue::Binary(message_id.as_bytes().to_vec())), (27, TValue::List(TType::Struct, Vec::new()))],
+        &[
+            (4, TValue::Binary(message_id.as_bytes().to_vec())),
+            (27, TValue::List(TType::Struct, Vec::new())),
+        ],
         Protocol::Binary,
     )?;
     let json = format!("{{\"message\":{}}}", serde_json::Value::from(b64.encode(s)));
@@ -224,11 +288,12 @@ impl Obs<'_> {
     /// `keyMaterial` / `fileName` from its decrypted payload.
     pub async fn download_e2ee_message_media(&self, message: &Value) -> Result<Option<ObsFile>> {
         let payload = self.client.decrypt_e2ee_data_message(message).await?;
-        let key_material = payload["keyMaterial"]
-            .as_str()
-            .ok_or_else(|| Error::internal("E2EEMediaError", "decrypted payload has no keyMaterial"))?;
+        let key_material = payload["keyMaterial"].as_str().ok_or_else(|| {
+            Error::internal("E2EEMediaError", "decrypted payload has no keyMaterial")
+        })?;
         let file_name = payload["fileName"].as_str().unwrap_or("file");
-        self.download_media_by_e2ee(message, key_material, file_name).await
+        self.download_media_by_e2ee(message, key_material, file_name)
+            .await
     }
 
     /// Download and decrypt the media of an E2EE `message`.
@@ -253,8 +318,13 @@ impl Obs<'_> {
         let meta = &message["contentMetadata"];
         let oid = meta["OID"].as_str().unwrap_or_default();
         let sid = meta["SID"].as_str().unwrap_or_default();
-        let data =
-            self.download_object_for_service(&format!("talk/{sid}"), oid, vec![("X-Talk-Meta".into(), talk_meta(id)?)]).await?;
+        let data = self
+            .download_object_for_service(
+                &format!("talk/{sid}"),
+                oid,
+                vec![("X-Talk-Meta".into(), talk_meta(id)?)],
+            )
+            .await?;
         let plain = crypto::decrypt_by_key_material_b64(&data, key_material)?;
         Ok(Some(ObsFile::new(plain).name(file_name)))
     }
