@@ -215,3 +215,30 @@ Date:            Commit:            Device:
 | session::proactive_refresh | | |
 | session::kicked_out | | |
 ```
+
+## Calls from LINE Android 26.x (`tests/live_android26.rs`)
+
+Run like the others; calls are spaced by a random 1–3 s gap:
+
+```sh
+LINE_TEST_ACCOUNT_CONFIRM=yes LINE_AUTH_TOKEN=... LINE_TEST_DEVICE=... \
+  cargo test --test live_android26 read_only -- --ignored --test-threads=1 --nocapture
+```
+
+If the token belongs to a client that is still running, give the tests their
+own `LINE_TEST_STORAGE` file with no `refreshToken` (a refresh here would sign
+the other client out) and a `reqseq` well above that client's.
+
+Results on 2026-11-04, `ANDROIDSECONDARY` token:
+
+| Call | Result |
+|---|---|
+| `getUserBlockIds`, `getBotBlockIds`, `getUserRecommendIds`, `getBotFriendIds` | ok, fields decode by name |
+| `getMessageRequestBoxList` | ok |
+| `deleteFriend` | ok; the contact reads back as `notFriend` |
+| `updateFriendFavorite`, `updateFriendHidden`, `updateUserFriendOverridenName`, `updateNotificationSetting` | ok; each change reads back from `getContactsV3` and was put back |
+| `findContactBySearchIdOrTicketV3` with your own ticket | `NOT_A_MEMBER`; a lookup of yourself may not be allowed, so try another account's ticket |
+
+Not run live: `sync_contacts_v3`, `update_chat_status_bulk`,
+`createSessionV2`, the smart-switch keys, `requestDeletePaidSquare` and
+`searchSquareChatMentionables`.

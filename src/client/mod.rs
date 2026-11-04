@@ -19,6 +19,7 @@
 //! # Ok(()) }
 //! ```
 
+pub mod calendar;
 mod chat;
 pub mod liff;
 mod listen;

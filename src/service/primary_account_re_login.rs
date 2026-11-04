@@ -6,6 +6,15 @@ use super::PrimaryAccountReLoginService;
 use crate::error::Result;
 use crate::thrift::Value;
 
+// --- Methods recovered by static RE of LINE Android 26.x (unverified). ---
+impl PrimaryAccountReLoginService<'_> {
+    /// `createSessionV2(request: CreateSessionV2Request)`: starts a re-login
+    /// session and returns the account profile and available auth factors.
+    pub async fn create_session_v2(&self, args: impl Into<Value>) -> Result<Value> {
+        self.call("createSessionV2", args).await
+    }
+}
+
 // <generated pass-through>
 impl PrimaryAccountReLoginService<'_> {
     /// `createSession(request: h80_C25643c)`.

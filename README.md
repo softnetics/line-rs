@@ -66,12 +66,13 @@ a local dashboard for the live tests (see
 | `base` | `@evex/linejs/base` | `BaseClient`: config, token, storage, events, request pipeline |
 | `login` | `base/login` | QR (SQR v1, ForSecure v2), email and password (v1 `loginZ`, v3 `loginV2`), auth token |
 | `e2ee` | `base/e2ee` | Letter Sealing keys, crypto for text, location and data messages, file crypto |
-| `service` | `base/service` | 40 services and 380+ typed methods; any IDL method through `Service::call` |
+| `service` | `base/service` | 40 services and 400+ typed methods; any IDL method through `Service::call` |
 | `push`, `polling` | `base/push`, `base/polling` | LEGY HTTP/2 push connection; `sync` and `fetchMyEvents` polling |
 | `obs` | `base/obs` | media upload and download, plain and E2EE |
 | `timeline` | `base/timeline` | posts, likes, comments |
 | `rest` | none | Note extras, home profile and cover, URL preview, translation, Keep (404s now). Album writes are in `service::moa`. Reverse engineered from LINE for macOS and not verified |
 | `request` | `base/request` | Thrift over HTTP, LEGY encrypted gateway (`gf.line.naver.jp/enc`) |
+| `grpc`, `protobuf` | none | unary and server-streaming gRPC over HTTP/2 to LEGY, and a hand-written protobuf codec |
 | `thrift` | `base/thrift`, `@evex/linejs-types` | binary and compact protocols, IDL schema, dynamic `Value` |
 | `storage` | `@evex/linejs/storage` | `MemoryStorage`, `FileStorage` (JSON, same format as LINEJS) |
 
@@ -150,6 +151,17 @@ live server:
 - Album writes: create, rename, delete and share albums, upload and delete
   photos, like photos. LINEJS can only download album photos.
 
+Reverse engineered from LINE for Android 26.x, and not yet checked against
+the live server:
+
+- Friends and contacts: delete, favorite, hide and rename friends, look up
+  by ticket, sync the address book, and list blocked users and bots,
+  recommended users and added bots.
+- The message request box, accepting or rejecting request chats, and
+  muting a chat.
+- LINE Calendar over gRPC (`client::calendar`): list calendars and their
+  events.
+
 ## Compatibility with LINEJS
 
 - Thrift output is byte for byte the same. The golden vectors in `tests/`
@@ -172,7 +184,9 @@ welcome.
 - VoIP media (`client/features/call/**` in LINEJS: SRTP, ICE, Opus, Planet)
   and the `@evex/linejs-agent` package.
 - The LINEJS docs site and its IDL and APK tooling (`scripts/`).
-  `resources/line.thrift` is LINEJS's IDL plus the methods listed above.
+  `resources/line.thrift` is LINEJS's IDL plus the methods listed above,
+  and every other Thrift method in the LINE Android 26.x app (callable
+  through `Service::call`, without typed accessors).
 
 ## Development
 
