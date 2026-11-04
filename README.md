@@ -72,6 +72,7 @@ a local dashboard for the live tests (see
 | `timeline` | `base/timeline` | posts, likes, comments |
 | `rest` | none | Note extras, home profile and cover, URL preview, translation, Keep (404s now). Album writes are in `service::moa`. Reverse engineered from LINE for macOS and not verified |
 | `request` | `base/request` | Thrift over HTTP, LEGY encrypted gateway (`gf.line.naver.jp/enc`) |
+| `grpc`, `protobuf` | none | unary and server-streaming gRPC over HTTP/2 to LEGY, and a hand-written protobuf codec |
 | `thrift` | `base/thrift`, `@evex/linejs-types` | binary and compact protocols, IDL schema, dynamic `Value` |
 | `storage` | `@evex/linejs/storage` | `MemoryStorage`, `FileStorage` (JSON, same format as LINEJS) |
 
@@ -160,6 +161,8 @@ the live server:
   muting a chat.
 - Passkeys: register, rename and delete them, and move an account to a new
   device with one.
+- LINE Calendar over gRPC (`client::calendar`): list calendars and their
+  events.
 
 ## Compatibility with LINEJS
 

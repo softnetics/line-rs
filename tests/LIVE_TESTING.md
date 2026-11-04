@@ -235,8 +235,11 @@ Results on 2026-11-04, `ANDROIDSECONDARY` token:
 |---|---|
 | `getUserBlockIds`, `getBotBlockIds`, `getUserRecommendIds`, `getBotFriendIds` | ok, fields decode by name |
 | `getMessageRequestBoxList` | ok |
+| `deleteFriend` | ok; the contact reads back as `notFriend` |
+| `updateFriendFavorite`, `updateFriendHidden`, `updateUserFriendOverridenName`, `updateNotificationSetting` | ok; each change reads back from `getContactsV3` and was put back |
+| `findContactBySearchIdOrTicketV3` with your own ticket | `NOT_A_MEMBER`; a lookup of yourself may not be allowed, so try another account's ticket |
 
-Not run live: `delete_friend`, `sync_contacts_v3`, `update_chat_status_bulk`,
+Not run live: `sync_contacts_v3`, `update_chat_status_bulk`,
 the passkey migration flow, `createSessionV2`, the smart-switch keys,
-`requestDeletePaidSquare`, `getPasskeyRegistrationOptions`, and the friend setting
-roundtrips (they need `LINE_PEER_MID` and `LINE_ALLOW_PEER_TESTS=yes`).
+`requestDeletePaidSquare`, `searchSquareChatMentionables` and
+`getPasskeyRegistrationOptions`.
