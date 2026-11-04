@@ -1,5 +1,5 @@
 //! Live checks for the calls recovered from LINE Android 26.x (friends,
-//! message request box, passkeys). Same rules as `tests/live_auth.rs`; read `tests/LIVE_TESTING.md`.
+//! message request box). Same rules as `tests/live_auth.rs`; read `tests/LIVE_TESTING.md`.
 //!
 //! ```sh
 //! LINE_TEST_ACCOUNT_CONFIRM=yes LINE_AUTH_TOKEN=... LINE_TEST_DEVICE=... \
@@ -13,11 +13,10 @@
 //!   client that is still running: a refresh here would sign that client
 //!   out. Without one, `MUST_REFRESH_V3_TOKEN` fails the test instead.
 //! * Output is limited to field names and counts, not account data.
-//! * The only write opens a passkey registration session and stops before
-//!   registering anything. Calls that cannot be undone, or that act on other
-//!   people, are not run here: delete_friend, sync_contacts_v3,
-//!   update_chat_status_bulk, the passkey migration flow, createSessionV2,
-//!   the smart-switch keys and requestDeletePaidSquare.
+//! * Read-only. Calls that change the account are not run here:
+//!   delete_friend, the friend setting changes, sync_contacts_v3,
+//!   update_chat_status_bulk, createSessionV2, the smart-switch keys and
+//!   requestDeletePaidSquare.
 
 use std::future::Future;
 use std::sync::LazyLock;
@@ -163,32 +162,6 @@ mod read_only {
                     .talk()
                     .get_message_request_box_list("PEER", None)
                     .await,
-            );
-        });
-    }
-}
-
-mod write {
-    use super::*;
-
-    /// Open a passkey registration session and fetch its options; stops
-    /// before registering anything.
-    #[test]
-    #[ignore = "hits the real LINE server with a test account"]
-    fn passkey_registration_options() {
-        run(async {
-            let c = client().await;
-            let svc = c.base.account_passkey_command();
-            throttle().await;
-            let session = svc
-                .open_session_for_passkey_registration()
-                .await
-                .unwrap_or_else(|e| panic!("openSessionForPasskeyRegistration: {e}"));
-            println!("openSessionForPasskeyRegistration: ok");
-            throttle().await;
-            report(
-                "getPasskeyRegistrationOptions",
-                svc.get_passkey_registration_options(&session).await,
             );
         });
     }

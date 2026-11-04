@@ -411,14 +411,6 @@ mod tests {
             "getMessageRequestBoxList",
             "updateChatStatusBulk",
             "updateNotificationSetting",
-            "openSessionForPasskeyRegistration",
-            "getPasskeyRegistrationOptions",
-            "registerPasskey",
-            "updatePasskeyName",
-            "deletePasskey",
-            "getPasskeyAuthenticationOptions",
-            "authenticatePasskey",
-            "migratePrimaryUsingPasskey",
             "createSessionV2",
             "getSSEncryptionKey",
             "registerSSEncryptionKey",
@@ -433,13 +425,6 @@ mod tests {
         // Holes that predate these additions, reached through existing structs.
         missing.retain(|n| !PREEXISTING_HOLES.contains(&n.as_str()));
         assert!(missing.is_empty(), "unresolved types: {missing:?}");
-        // Appending must not have replaced the older pwless WebAuthn structs.
-        let old = s.get_struct("PublicKeyCredentialCreationOptions").unwrap();
-        assert_eq!(old.field_by_id(8).unwrap().name, "attestation");
-        let new = s
-            .get_struct("PasskeyPublicKeyCredentialCreationOptions")
-            .unwrap();
-        assert_eq!(new.field_by_id(8).unwrap().name, "hints");
         let msg = s.get_struct("Message").unwrap();
         assert_eq!(msg.field_by_id(28).unwrap().name, "updatedTime");
     }

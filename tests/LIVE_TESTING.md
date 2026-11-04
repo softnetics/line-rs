@@ -240,6 +240,5 @@ Results on 2026-11-04, `ANDROIDSECONDARY` token:
 | `findContactBySearchIdOrTicketV3` with your own ticket | `NOT_A_MEMBER`; a lookup of yourself may not be allowed, so try another account's ticket |
 
 Not run live: `sync_contacts_v3`, `update_chat_status_bulk`,
-the passkey migration flow, `createSessionV2`, the smart-switch keys,
-`requestDeletePaidSquare`, `searchSquareChatMentionables` and
-`getPasskeyRegistrationOptions`.
+`createSessionV2`, the smart-switch keys, `requestDeletePaidSquare` and
+`searchSquareChatMentionables`.
