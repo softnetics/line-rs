@@ -184,7 +184,9 @@ welcome.
 - VoIP media (`client/features/call/**` in LINEJS: SRTP, ICE, Opus, Planet)
   and the `@evex/linejs-agent` package.
 - The LINEJS docs site and its IDL and APK tooling (`scripts/`).
-  `resources/line.thrift` is LINEJS's IDL plus the methods listed above.
+  `resources/line.thrift` is LINEJS's IDL plus the methods listed above,
+  and every other Thrift method in the LINE Android 26.x app (callable
+  through `Service::call`, without typed accessors).
 
 ## Development
 

@@ -6010,12 +6010,6 @@ struct GetPredefinedScenarioSetsResponse {
     1: map<string, ScenarioSet> scenarioSets;
 }
 
-struct GetPremiumContextForMigResponse {
-    1: bool isPremiumActive;
-    2: bool isPremiumBackupActive;
-    3: T70_L premiumType;
-    4: list<i32> availablePremiumTypes;
-}
 
 struct GetPremiumDataRetentionResponse {
     1: list<DataRetention> dataRetentions;
@@ -17172,6 +17166,8 @@ struct LoginResult {
     6: i64 lastPrimaryBindTime;
     7: string displayMessage;
     8: VerificationSessionData sessionForSMSConfirm;
+    9: TokenV3IssueResult tokenV3IssueResult;
+    10: string mid;
 }
 
 enum F61_EnumC10204a0 {
@@ -17914,4 +17910,2278 @@ struct SquareService_requestDeletePaidSquare_args {
 struct SquareService_requestDeletePaidSquare_result {
     0: RequestDeletePaidSquareResponse success;
     1: SquareException e;
+}
+
+// ---------------------------------------------------------------------------
+// Every other Thrift method in the LINE Android 26.x app that the IDL above
+// lacked, with the types it needs. No typed accessors; call them with
+// Service::call. Unverified against a live server.
+// ---------------------------------------------------------------------------
+
+struct AbortInitialBackupRequest {
+    1: string sessionId;
+}
+
+struct abortInitialBackup_args {
+    1: AbortInitialBackupRequest request;
+}
+
+struct AbortInitialBackupResponse {
+
+}
+
+enum PasskeyAccountMigrationExceptionCode {
+    INTERNAL_ERROR = 0,
+    ILLEGAL_ARGUMENT = 1,
+    INVALID_SESSION = 2,
+    FORBIDDEN = 3,
+    RETRY_LATER = 4,
+    VERIFICATION_FAILED = 5,
+    INVALID_CONTEXT = 100,
+    APP_UPGRADE_REQUIRED = 101
+}
+
+exception PasskeyAccountMigrationException {
+    1: PasskeyAccountMigrationExceptionCode code;
+    2: string alertMessage;
+}
+
+struct abortInitialBackup_result {
+    0: AbortInitialBackupResponse success;
+    1: PasskeyAccountMigrationException e;
+}
+
+struct AbortInitialBackupForMigRequest {
+    1: string authSessionId;
+}
+
+struct abortInitialBackupForMig_args {
+    1: AbortInitialBackupForMigRequest request;
+}
+
+struct AbortInitialBackupForMigResponse {
+
+}
+
+struct abortInitialBackupForMig_result {
+    0: AbortInitialBackupForMigResponse success;
+    1: AuthException e;
+}
+
+struct FavoriteMiniApp {
+    1: string liffId;
+}
+
+struct AddFavoriteMiniAppsRequest {
+    1: list<FavoriteMiniApp> favorites;
+}
+
+struct addFavoriteMiniApps_args {
+    1: AddFavoriteMiniAppsRequest request;
+}
+
+enum AddFavoriteMiniAppsErrorType {
+    MAX_FAVORITES_EXCEEDED = 1
+}
+
+struct AddFavoriteMiniAppsError {
+    1: AddFavoriteMiniAppsErrorType type;
+}
+
+struct AddFavoriteMiniAppsResponse {
+    1: AddFavoriteMiniAppsError error;
+}
+
+struct addFavoriteMiniApps_result {
+    0: AddFavoriteMiniAppsResponse success;
+    1: WalletException e;
+}
+
+struct LifetimePayloadDataMetadata {
+    1: E2EEMetadata e2ee;
+    2: SingleValueMetadata singleValue;
+}
+
+struct LifetimePayloadData {
+    1: LifetimePayloadDataMetadata metadata;
+    2: binary blobPayload;
+}
+
+struct AddLifetimeKeyBackupPayloadDataListRequest {
+    1: list<LifetimePayloadData> payloadDataList;
+}
+
+struct addLifetimeKeyBackupPayloadDataList_args {
+    2: AddLifetimeKeyBackupPayloadDataListRequest request;
+}
+
+enum LifetimeBackupFailedPayloadErrorCode {
+    ILLEGAL_ARGUMENT = 0,
+    AUTHENTICATION_FAILED = 1,
+    INTERNAL_ERROR = 2,
+    RESTORE_KEY_FIRST = 3,
+    NO_BACKUP = 4,
+    INVALID_PIN = 6,
+    PERMANENTLY_LOCKED = 7,
+    INVALID_PASSWORD = 8,
+    MASTER_KEY_CONFLICT = 9,
+    KEY_BACKUP_HEADER_MISMATCH = 10
+}
+
+struct LifetimeBackupFailedPayload {
+    1: LifetimePayloadDataMetadata metadata;
+    2: LifetimeBackupFailedPayloadErrorCode errorCode;
+}
+
+struct AddLifetimeKeyBackupPayloadDataListResponse {
+    1: list<LifetimeBackupFailedPayload> failedPayloads;
+}
+
+struct addLifetimeKeyBackupPayloadDataList_result {
+    0: AddLifetimeKeyBackupPayloadDataListResponse success;
+    1: E2EEKeyBackupException e;
+}
+
+struct PasskeyAuthenticatorAssertionResponse {
+    1: string clientDataJson;
+    2: string authenticatorData;
+    3: string signature;
+    4: string userHandle;
+}
+
+struct CredentialPropertiesOutput {
+    1: bool rk;
+}
+
+struct AuthenticationExtensionsPRFOutputs {
+    1: bool enabled;
+}
+
+struct PasskeyAuthenticationExtensionsClientOutputs {
+    1: CredentialPropertiesOutput credProps;
+    2: AuthenticationExtensionsPRFOutputs prf;
+}
+
+struct AuthenticationPublicKeyCredential {
+    1: string id;
+    2: string type;
+    3: PasskeyAuthenticatorAssertionResponse response;
+    4: string authenticatorAttachment;
+    5: PasskeyAuthenticationExtensionsClientOutputs clientExtensionResults;
+}
+
+struct AuthenticatePasskeyRequest {
+    1: string sessionId;
+    2: AuthenticationPublicKeyCredential authenticationPublicKeyCredential;
+}
+
+struct authenticatePasskey_args {
+    1: AuthenticatePasskeyRequest request;
+}
+
+struct AuthenticatePasskeyResponse {
+    1: bool sameUdidFromAccount;
+}
+
+struct authenticatePasskey_result {
+    0: AuthenticatePasskeyResponse success;
+    1: PasskeyAccountMigrationException e;
+}
+
+struct CheckInitialBackupStateRequest {
+    1: string sessionId;
+}
+
+struct checkInitialBackupState_args {
+    1: CheckInitialBackupStateRequest request;
+}
+
+enum CheckInitialBackupStateResponseInitialBackupState {
+    INITIAL_BACKUP_STATE_UNSPECIFIED = 0,
+    INITIAL_BACKUP_STATE_READY = 1,
+    INITIAL_BACKUP_STATE_MESSAGE_ONGOING = 2,
+    INITIAL_BACKUP_STATE_FINISHED = 3,
+    INITIAL_BACKUP_STATE_ABORTED = 4,
+    INITIAL_BACKUP_STATE_MEDIA_ONGOING = 5,
+    INITIAL_BACKUP_STATE_RESET = 6
+}
+
+struct CheckInitialBackupStateResponse {
+    1: CheckInitialBackupStateResponseInitialBackupState initialBackupState;
+}
+
+struct checkInitialBackupState_result {
+    0: CheckInitialBackupStateResponse success;
+    1: PasskeyAccountMigrationException e;
+}
+
+struct CheckInitialBackupStateForMigRequest {
+    1: string authSessionId;
+}
+
+struct checkInitialBackupStateForMig_args {
+    1: CheckInitialBackupStateForMigRequest request;
+}
+
+enum CheckInitialBackupStateForMigResponseInitialBackupState {
+    INITIAL_BACKUP_STATE_UNSPECIFIED = 0,
+    INITIAL_BACKUP_STATE_READY = 1,
+    INITIAL_BACKUP_STATE_RESET = 6,
+    INITIAL_BACKUP_STATE_MESSAGE_ONGOING = 2,
+    INITIAL_BACKUP_STATE_MEDIA_ONGOING = 5,
+    INITIAL_BACKUP_STATE_FINISHED = 3,
+    INITIAL_BACKUP_STATE_ABORTED = 4
+}
+
+struct CheckInitialBackupStateForMigResponse {
+    1: CheckInitialBackupStateForMigResponseInitialBackupState initialBackupState;
+}
+
+struct checkInitialBackupStateForMig_result {
+    0: CheckInitialBackupStateForMigResponse success;
+    1: AuthException e;
+}
+
+struct CheckPinCodeVerifiedRequest {
+    1: string authSessionId;
+}
+
+struct checkPinCodeVerified_args {
+    1: CheckPinCodeVerifiedRequest request;
+}
+
+struct CheckPinCodeVerifiedResponse {
+
+}
+
+struct checkPinCodeVerified_result {
+    0: CheckPinCodeVerifiedResponse success;
+    1: SecondaryQrCodeException e;
+}
+
+struct CheckQrCodeVerifiedRequest {
+    1: string authSessionId;
+}
+
+struct checkQrCodeVerified_args {
+    1: CheckQrCodeVerifiedRequest request;
+}
+
+struct CheckQrCodeVerifiedResponse {
+
+}
+
+struct checkQrCodeVerified_result {
+    0: CheckQrCodeVerifiedResponse success;
+    1: SecondaryQrCodeException e;
+}
+
+struct ConfirmPasswordRequest {
+    1: string sessionId;
+    2: string v1HashedPassword;
+    3: string clientHashedPassword;
+}
+
+struct confirmPassword_args {
+    1: ConfirmPasswordRequest request;
+}
+
+struct ConfirmPasswordResponse {
+    1: bool success;
+}
+
+enum PasswordConfirmationFeatureExceptionErrorCode {
+    INTERNAL_ERROR = 0,
+    ILLEGAL_ARGUMENT = 1,
+    SESSION_NOT_FOUND = 2
+}
+
+exception PasswordConfirmationFeatureException {
+    1: PasswordConfirmationFeatureExceptionErrorCode errorCode;
+    2: string errorMessage;
+}
+
+struct confirmPassword_result {
+    0: ConfirmPasswordResponse success;
+    1: PasswordConfirmationFeatureException pcfe;
+    2: TokenAuthException tae;
+}
+
+struct CreatePinCodeRequest {
+    1: string authSessionId;
+}
+
+struct createPinCode_args {
+    1: CreatePinCodeRequest request;
+}
+
+struct CreatePinCodeResponse {
+    1: string pinCode;
+}
+
+struct createPinCode_result {
+    0: CreatePinCodeResponse success;
+    1: SecondaryQrCodeException e;
+}
+
+struct CreateQrCodeRequest {
+    1: string authSessionId;
+}
+
+struct createQrCodeForSecure_args {
+    1: CreateQrCodeRequest request;
+}
+
+struct CreateQrCodeForSecureResponse {
+    1: string callbackUrl;
+    2: i32 longPollingMaxCount;
+    3: i32 longPollingIntervalSec;
+    4: string nonce;
+}
+
+struct createQrCodeForSecure_result {
+    0: CreateQrCodeForSecureResponse success;
+    1: SecondaryQrCodeException e;
+}
+
+struct DeletePasskeyRequest {
+    1: string credentialId;
+}
+
+struct deletePasskey_args {
+    1: DeletePasskeyRequest request;
+}
+
+struct DeletePasskeyResponse {
+
+}
+
+enum AccountPasskeyCommandExceptionCode {
+    INTERNAL_ERROR = 0,
+    ILLEGAL_ARGUMENT = 1,
+    INVALID_SESSION = 2,
+    FORBIDDEN = 3,
+    RETRY_LATER = 4,
+    MAX_PASSKEY_REGISTERED = 5,
+    EMAIL_NOT_REGISTERED = 6,
+    INVALID_CONTEXT = 100,
+    APP_UPGRADE_REQUIRED = 101
+}
+
+exception AccountPasskeyCommandException {
+    1: AccountPasskeyCommandExceptionCode code;
+    2: string alertMessage;
+}
+
+struct deletePasskey_result {
+    0: DeletePasskeyResponse success;
+    1: AccountPasskeyCommandException apce;
+    2: TokenAuthException tae;
+}
+
+struct DeletePhoneNumberRequest {
+
+}
+
+struct deletePhoneNumber_args {
+    1: DeletePhoneNumberRequest request;
+}
+
+struct DeletePhoneNumberResponse {
+
+}
+
+enum AccountPhoneNumberCommandExceptionCode {
+    INTERNAL_ERROR = 0,
+    ILLEGAL_ARGUMENT = 1,
+    FORBIDDEN = 2,
+    NOT_FOUND = 3,
+    RETRY_LATER = 4,
+    APP_UPGRADE_REQUIRED = 101,
+    LAST_AUTH_FACTOR = 102
+}
+
+exception AccountPhoneNumberCommandException {
+    1: AccountPhoneNumberCommandExceptionCode code;
+    2: string alertMessage;
+}
+
+struct deletePhoneNumber_result {
+    0: DeletePhoneNumberResponse success;
+    1: AccountPhoneNumberCommandException apce;
+    2: TokenAuthException tae;
+}
+
+struct ScheduledMessageSchedule {
+    1: i64 initialScheduledTime;
+}
+
+struct ScheduledMessageRequest {
+    1: Message message;
+    2: ScheduledMessageSchedule schedule;
+}
+
+struct ScheduledMessageRegisterRequest {
+    1: i32 reqSeq;
+    2: ScheduledMessageRequest scheduledMessage;
+}
+
+struct doRegister_args {
+    1: ScheduledMessageRegisterRequest request;
+}
+
+struct ScheduledMessageRegisterResponse {
+    1: i64 scheduledMessageId;
+    2: i64 registeredTime;
+}
+
+struct doRegister_result {
+    0: ScheduledMessageRegisterResponse success;
+    1: TalkException e;
+}
+
+struct ScheduledMessageE2eeReencryptRequest {
+    1: map<i64, Message> messages;
+}
+
+struct e2eeReencrypt_args {
+    1: ScheduledMessageE2eeReencryptRequest request;
+}
+
+struct ScheduledMessageE2eeReencryptResponse {
+
+}
+
+struct e2eeReencrypt_result {
+    0: ScheduledMessageE2eeReencryptResponse success;
+    1: TalkException e;
+}
+
+struct GetAccountProfileRequest {
+    1: string sessionId;
+}
+
+struct getAccountProfile_args {
+    1: GetAccountProfileRequest request;
+}
+
+struct GetAccountProfileResponse {
+    1: UserProfile accountProfile;
+}
+
+struct getAccountProfile_result {
+    0: GetAccountProfileResponse success;
+    1: PasskeyAccountMigrationException e;
+}
+
+struct GetAssetMetaPopupsRequest {
+
+}
+
+struct getAssetMetaPopups_args {
+    1: GetAssetMetaPopupsRequest request;
+}
+
+enum PopupExposureGroupListPerServiceType {
+    COMMON = 1,
+    FONT = 2,
+    APP_ICON = 3,
+    ALBUM = 4,
+    SUB_PROFILE = 5
+}
+
+enum PopupCountType {
+    EVERY_TIME = 1,
+    DAILY_LIMIT = 2,
+    TOTAL_LIMIT = 3
+}
+
+struct PopupCount {
+    1: PopupCountType type;
+    2: i64 times;
+}
+
+enum AssetMetaPopupContentDisplayStyle {
+    ONE_BUTTON = 1,
+    TWO_BUTTON_HORIZONTAL = 2,
+    TWO_BUTTON_VERTICAL = 3,
+    THREE_BUTTON = 4,
+    BOTTOM_SHEET = 5
+}
+
+enum PopupPremiumIconType {
+    LABEL = 1,
+    BADGE = 2,
+    LOGO = 3,
+    NONE = 4
+}
+
+struct PopupPremiumIcon {
+    1: PopupPremiumIconType type;
+    2: Qj_EnumC13588e iconThemeForLightMode;
+    3: Qj_EnumC13588e iconThemeForDarkMode;
+}
+
+enum PopupImagePosition {
+    TOP = 1,
+    BOTTOM = 2
+}
+
+struct PopupImage {
+    1: PopupImagePosition position;
+    2: string lightThemeImageUrl;
+    3: string darkThemeImageUrl;
+    4: string alt;
+}
+
+struct PopupButton {
+    1: string label;
+    2: string url;
+}
+
+struct PopupButtons {
+    1: PopupButton first;
+    2: PopupButton second;
+    3: PopupButton third;
+}
+
+struct PopupColorSet {
+    1: string backgroundColor;
+    2: string titleTextColor;
+    3: string messageTextColor;
+    4: string buttonBackgroundColor;
+    5: string buttonTextColor;
+    6: string closeButtonColor;
+}
+
+struct BottomSheetStyle {
+    1: bool useDefaultColor;
+    2: PopupColorSet lightThemeColors;
+    3: PopupColorSet darkThemeColors;
+}
+
+struct AssetMetaPopupContent {
+    1: AssetMetaPopupContentDisplayStyle displayStyle;
+    2: PopupPremiumIcon premiumIcon;
+    3: string title;
+    4: string message;
+    5: PopupImage image;
+    6: PopupButtons buttons;
+    7: BottomSheetStyle bottomSheetStyle;
+}
+
+enum PopupFilterUserTypes {
+    FALSE = 1,
+    TRUE_CANCELED = 2,
+    FALSE_RETENTION = 3,
+    TRUE = 4,
+    TRUE_TRIAL = 5,
+    ALL = 6
+}
+
+enum PopupFilterAppVersionFilterType {
+    SHOW_ALL = 1,
+    FILTER_ONLY_IOS = 2,
+    FILTER_ONLY_ANDROID = 3,
+    FILTER_BOTH = 4
+}
+
+struct PopupFilterAppVersion {
+    1: PopupFilterAppVersionFilterType filterType;
+    2: string iosMinVersion;
+    3: string androidMinVersion;
+}
+
+struct PopupFilter {
+    1: list<PopupFilterUserTypes> userTypes;
+    2: PopupFilterAppVersion appVersion;
+}
+
+struct AssetMetaPopup {
+    1: i64 id;
+    2: i64 validFrom;
+    3: i64 validTo;
+    4: PopupCount count;
+    5: AssetMetaPopupContent content;
+    6: PopupFilter filter;
+}
+
+struct PopupListPerExposureGroup {
+    1: string name;
+    2: list<AssetMetaPopup> popups;
+}
+
+struct PopupExposureGroupListPerService {
+    1: PopupExposureGroupListPerServiceType type;
+    2: list<PopupListPerExposureGroup> exposureGroups;
+}
+
+struct GetAssetMetaPopupsResponse {
+    1: list<PopupExposureGroupListPerService> services;
+    2: i32 ttlInSeconds;
+}
+
+struct getAssetMetaPopups_result {
+    0: GetAssetMetaPopupsResponse success;
+    1: TalkException e;
+}
+
+struct GetAvailableBackupMethodsRequest {
+    1: string sessionId;
+}
+
+struct getAvailableBackupMethods_args {
+    1: GetAvailableBackupMethodsRequest request;
+}
+
+enum GetAvailableBackupMethodsResponseAvailableBackupMethods {
+    JUST_IN_CASE_BACKUP = 0,
+    PREMIUM_BACKUP = 1
+}
+
+struct GetAvailableBackupMethodsResponse {
+    1: set<GetAvailableBackupMethodsResponseAvailableBackupMethods> availableBackupMethods;
+}
+
+struct getAvailableBackupMethods_result {
+    0: GetAvailableBackupMethodsResponse success;
+    1: PasskeyAccountMigrationException e;
+}
+
+struct ScheduledMessageGetByPaginationRequest {
+    1: i64 startScheduledMessageId;
+    2: i32 pageSize;
+}
+
+struct getByPagination_args {
+    1: ScheduledMessageGetByPaginationRequest request;
+}
+
+struct ScheduledMessage {
+    1: i64 scheduledMessageId;
+    2: Message message;
+    3: ScheduledMessageSchedule schedule;
+    4: i64 version;
+    5: i64 registeredTime;
+}
+
+struct ScheduledMessageGetByPaginationResponse {
+    1: list<ScheduledMessage> scheduledMessages;
+    2: i64 nextScheduledMessageId;
+    3: map<string, i32> lastE2EEKeyIds;
+}
+
+struct getByPagination_result {
+    0: ScheduledMessageGetByPaginationResponse success;
+    1: TalkException e;
+}
+
+struct GetCampaignStatusModuleRequest {
+    1: string campaignId;
+}
+
+struct getCampaignStatusModule_args {
+    1: GetCampaignStatusModuleRequest request;
+}
+
+enum CampaignStatusInfoIconType {
+    CHEVRON_RIGHT = 0,
+    CHEVRON_DOUBLE_DOWN = 1
+}
+
+struct CampaignStatusInfo {
+    1: string imageUrl;
+    2: string text;
+    3: CampaignStatusInfoIconType iconType;
+    4: string linkUrl;
+    5: string progress;
+}
+
+struct GetCampaignStatusModuleResponse {
+    1: CampaignStatusInfo campaignStatusInfo;
+}
+
+struct getCampaignStatusModule_result {
+    0: GetCampaignStatusModuleResponse success;
+    1: WalletException e;
+}
+
+struct GetDatamodeRequest {
+    1: Geolocation location;
+    2: string regionCode;
+}
+
+struct getDatamode_args {
+    2: GetDatamodeRequest getDatamodeRequest;
+}
+
+struct GetDatamodeResponse {
+    1: bool limitedNetwork;
+}
+
+struct getDatamode_result {
+    0: GetDatamodeResponse success;
+    1: TalkException e;
+}
+
+struct GetFavoriteDataRequest {
+    1: string targetUrl;
+}
+
+struct getFavoriteData_args {
+    1: GetFavoriteDataRequest request;
+}
+
+struct GetFavoriteDataResponse {
+    1: bool favorite;
+}
+
+enum LiffFavoriteDataExceptionCode {
+    INVALID_REQUEST = 1,
+    TOO_MANY_FAVORITE_DATA = 2
+}
+
+exception LiffFavoriteDataException {
+    1: LiffFavoriteDataExceptionCode code;
+    2: string message;
+}
+
+struct getFavoriteData_result {
+    0: GetFavoriteDataResponse success;
+    1: LiffFavoriteDataException favoriteDataException;
+    2: LiffException liffException;
+    3: TalkException talkException;
+}
+
+struct GetIncrementalBackupMessagesRequest {
+    1: string chatMid;
+    2: MessageBoxV2MessageId endMessageId;
+    3: i32 messagesCount;
+    4: bool inclusive;
+}
+
+struct getIncrementalBackupMessages_args {
+    2: GetIncrementalBackupMessagesRequest request;
+}
+
+struct GetIncrementalBackupMessagesResponse {
+    1: list<Message> messages;
+    2: string initialBackupOid;
+    3: bool hasMoreEntries;
+    4: MessageBoxV2MessageId nextEndMessageId;
+}
+
+struct getIncrementalBackupMessages_result {
+    0: GetIncrementalBackupMessagesResponse success;
+    1: TalkException e;
+}
+
+struct GetJustInCaseBackupContextRequest {
+    1: string sessionId;
+}
+
+struct getJustInCaseBackupContext_args {
+    1: GetJustInCaseBackupContextRequest request;
+}
+
+struct GetJustInCaseBackupContextResponse {
+    1: i32 e2eeKeyBackupPeriod;
+    2: bool appTypeChangedFromPrevDevice;
+}
+
+struct getJustInCaseBackupContext_result {
+    0: GetJustInCaseBackupContextResponse success;
+    1: PasskeyAccountMigrationException e;
+}
+
+struct GetKeyboardBannersRequest {
+
+}
+
+struct getKeyboardBanners_args {
+    2: GetKeyboardBannersRequest request;
+}
+
+enum KeyboardBannerLocation {
+    EMPTY_HISTORY = 0,
+    NOT_EMPTY_HISTORY = 1
+}
+
+enum KeyboardBannerType {
+    DEFAULT_BIG_BANNER = 0,
+    DEFAULT_SMALL_BANNER = 1
+}
+
+struct DefaultBigBannerDetail {
+    1: string icon;
+    2: string title;
+    3: string subtitle;
+    4: string copyright;
+    5: string buttonText;
+}
+
+struct DefaultSmallBannerDetail {
+    1: string icon;
+    2: string title;
+    3: string subtitle;
+    4: string copyright;
+}
+
+struct KeyboardBannerDetail {
+    1: DefaultBigBannerDetail defaultBigBannerDetail;
+    2: DefaultSmallBannerDetail defaultSmallBannerDetail;
+}
+
+enum KeyboardBannerTemplateType {
+    DEFAULT = 0,
+    CUSTOMIZED_COLOR = 1
+}
+
+struct CustomizedColorTemplateDetail {
+    1: string backgroundImage;
+    2: string backgroundColor;
+    3: string foregroundColor;
+}
+
+struct KeyboardBannerTemplate {
+    1: KeyboardBannerTemplateType type;
+    2: CustomizedColorTemplateDetail customizedColorTemplateDetail;
+}
+
+struct KeyboardBanner {
+    1: KeyboardBannerLocation location;
+    2: KeyboardBannerType type;
+    3: KeyboardBannerDetail detail;
+    4: KeyboardBannerTemplate bannerTemplate;
+    5: string utsId;
+}
+
+enum BannerTargetType {
+    URL = 0
+}
+
+struct BannerTargetValue {
+    1: string url;
+}
+
+struct BannerTarget {
+    1: BannerTargetType type;
+    2: BannerTargetValue value;
+}
+
+struct ForceSelection {
+    1: bool enabled;
+    2: i32 frequencyInDays;
+}
+
+struct KeyboardBannerData {
+    1: string bannerId;
+    2: list<KeyboardBanner> subBanners;
+    3: BannerTarget target;
+    4: ForceSelection forceSelection;
+    5: i64 startTimeInclusive;
+    6: i64 endTimeExclusive;
+}
+
+struct GetKeyboardBannersResponse {
+    1: list<KeyboardBannerData> keyboardBanners;
+}
+
+struct getKeyboardBanners_result {
+    0: GetKeyboardBannersResponse success;
+    1: ShopException e;
+}
+
+struct GetLifetimeKeyBackupPayloadDataListRequest {
+    1: list<LifetimePayloadDataMetadata> metadataList;
+}
+
+struct getLifetimeKeyBackupPayloadDataList_args {
+    2: GetLifetimeKeyBackupPayloadDataListRequest request;
+}
+
+struct GetLifetimeKeyBackupPayloadDataListResponse {
+    1: list<LifetimePayloadData> payloadDataList;
+    2: list<LifetimeBackupFailedPayload> failedPayloads;
+}
+
+struct getLifetimeKeyBackupPayloadDataList_result {
+    0: GetLifetimeKeyBackupPayloadDataListResponse success;
+    1: E2EEKeyBackupException e;
+}
+
+struct GetLinePremiumStatusRequest {
+
+}
+
+struct getLinePremiumStatus_args {
+    1: GetLinePremiumStatusRequest req;
+}
+
+enum GetLinePremiumStatusResponsePlanType {
+    UNKNOWN = 0,
+    SOFTBANK_BUNDLE = 1,
+    YBB_BUNDLE = 2,
+    YAHOO_MOBILE_BUNDLE = 3,
+    PPCG_BUNDLE = 4,
+    ENJOY_BUNDLE = 5,
+    YAHOO_TRIAL_BUNDLE = 6,
+    YAHOO_APPLE = 7,
+    YAHOO_GOOGLE = 8,
+    LINE_APPLE = 9,
+    LINE_GOOGLE = 10,
+    YAHOO_WALLET = 11,
+    LINE_MUSIC = 12
+}
+
+struct GetLinePremiumStatusResponse {
+    1: i64 validUntil;
+    2: i64 nextPaymentTime;
+    3: i64 updatedTime;
+    4: bool freeTrialUsed;
+    5: bool willExpire;
+    6: bool onFreeTrial;
+    7: GetLinePremiumStatusResponsePlanType planType;
+    8: i64 noSyncUntil;
+    9: string productId;
+    10: string currency;
+    11: string price;
+    12: fN0_H status;
+    13: string productTier;
+}
+
+struct getLinePremiumStatus_result {
+    0: GetLinePremiumStatusResponse success;
+    1: PremiumException e;
+}
+
+struct GetMiniAppCategoryRequest {
+
+}
+
+struct getMiniAppCategories_args {
+    1: GetMiniAppCategoryRequest request;
+}
+
+struct MiniAppCategoryData {
+    1: i32 categoryId;
+    2: string categoryName;
+    3: string categoryModuleTitle;
+}
+
+struct GetMiniAppCategoryResponse {
+    1: list<MiniAppCategoryData> categories;
+}
+
+enum MiniAppListExceptionCode {
+    INVALID_REQUEST = 1
+}
+
+exception MiniAppListException {
+    1: MiniAppListExceptionCode code;
+    2: string message;
+}
+
+struct getMiniAppCategories_result {
+    0: GetMiniAppCategoryResponse success;
+    1: MiniAppListException miniAppListException;
+    2: LiffException liffException;
+    3: TalkException talkException;
+}
+
+enum GetMiniAppListRequestSource {
+    RECENTLY_SEEN = 1,
+    FAVORITES = 2,
+    RECOMMENDED = 3
+}
+
+struct GetMiniAppListRequest {
+    1: GetMiniAppListRequestSource source;
+    2: i32 categoryId;
+    3: i32 offset;
+    4: i32 limit;
+}
+
+struct getMiniAppList_args {
+    1: GetMiniAppListRequest request;
+}
+
+struct MiniAppMeta {
+    1: string appID;
+    2: string appName;
+    3: string appIconUrl;
+    4: string appDescription;
+    5: bool favorite;
+    6: string appUrl;
+}
+
+struct GetMiniAppListResponse {
+    1: list<MiniAppMeta> miniApps;
+    2: i32 totalCount;
+    3: i32 nextOffset;
+}
+
+struct getMiniAppList_result {
+    0: GetMiniAppListResponse success;
+    1: MiniAppListException miniAppListException;
+    2: LiffException liffException;
+    3: TalkException talkException;
+}
+
+struct GetModuleLayoutV3Request {
+    1: binary etag;
+}
+
+struct getModuleLayoutV3_args {
+    1: GetModuleLayoutV3Request request;
+}
+
+struct ModuleLayoutV3Module {
+    1: string name;
+    2: string wrsModelId;
+}
+
+struct ModuleLayoutV3Response {
+    1: string id;
+    2: list<ModuleLayoutV3Module> modulesOrder;
+    3: i32 refreshTimeSec;
+    4: binary etag;
+}
+
+struct NotModified {
+
+}
+
+struct NotFound {
+
+}
+
+struct ModuleLayoutV3Result {
+    1: ModuleLayoutV3Response moduleLayoutV3;
+    2: NotModified notModified;
+    3: NotFound notFound;
+}
+
+struct getModuleLayoutV3_result {
+    0: ModuleLayoutV3Result success;
+    1: WalletException e;
+}
+
+struct GetMyAssetInformationV3Request {
+    1: bool refresh;
+}
+
+struct getMyAssetInformationV3_args {
+    1: GetMyAssetInformationV3Request request;
+}
+
+enum AssetServiceInfoV3MyAssetServiceCode {
+    POI = 0,
+    BIT = 1,
+    LIN = 2,
+    SCO = 3,
+    POC = 4
+}
+
+struct PocketMoneyInfoV3 {
+    1: NZ0_I0 displayType;
+    2: NZ0_K0 productType;
+    3: string refinanceText;
+}
+
+struct AssetServiceInfoV3 {
+    1: NZ0_C0 status;
+    2: AssetServiceInfoV3MyAssetServiceCode myAssetServiceCode;
+    3: string name;
+    4: string signupText;
+    5: string iconUrl;
+    6: string landingUrl;
+    7: CurrencyProperty currencyProperty;
+    8: string balance;
+    9: string profit;
+    10: string maintenanceText;
+    11: PocketMoneyInfoV3 pocketMoneyInfo;
+}
+
+struct GetMyAssetInformationV3Response {
+    1: i64 timestamp;
+    2: list<AssetServiceInfoV3> assetServiceInfos;
+    3: ServiceDisclaimerInfo serviceDisclaimerInfo;
+}
+
+struct getMyAssetInformationV3_result {
+    0: GetMyAssetInformationV3Response success;
+    1: WalletException e;
+}
+
+struct GetMyMiniRequest {
+
+}
+
+struct getMyMini_args {
+    1: GetMyMiniRequest request;
+}
+
+struct MyMiniPoint {
+    1: NZ0_W0 responseStatus;
+    2: string balance;
+    3: string iconUrl;
+    4: string iconAltText;
+    5: string linkUrl;
+    6: string targetId;
+    7: string targetName;
+    8: string id;
+}
+
+struct MyMiniCoupon {
+    1: NZ0_W0 responseStatus;
+    2: string couponCount;
+    3: string label;
+    4: string iconUrl;
+    5: string iconAltText;
+    6: string linkUrl;
+    7: string targetId;
+    8: string targetName;
+    9: string id;
+}
+
+struct MyMiniCampaign {
+    1: string name;
+    2: string iconUrl;
+    3: string iconAltText;
+    4: string linkUrl;
+    5: string targetId;
+    6: string targetName;
+}
+
+enum MyMiniMiniAppSourceType {
+    RECOMMENDATION = 0,
+    FAVORITE = 1,
+    HISTORY = 2
+}
+
+struct MyMiniMiniApp {
+    1: string id;
+    2: MyMiniMiniAppSourceType sourceType;
+    3: string name;
+    4: string appDescription;
+    5: string iconUrl;
+    6: string iconAltText;
+    7: string linkUrl;
+    8: string targetId;
+    9: string targetName;
+    10: string sourceDisplayName;
+    11: bool favorited;
+    12: bool canFavorite;
+    13: string liffId;
+}
+
+struct MyMiniFamilyService {
+    1: string id;
+    2: string name;
+    3: bool pictogramIcon;
+    4: string lightModeIconUrl;
+    5: string darkModeIconUrl;
+    6: string iconAltText;
+    7: string serviceEntryUrl;
+    8: string storeUrl;
+    9: string badgeActiveUntilTimestamp;
+    10: bool excludedFromFirstDepth;
+    11: string targetId;
+    12: string targetName;
+    13: string recommendedModelId;
+}
+
+struct GetMyMiniResponse {
+    1: string firstDepthTitle;
+    2: string seeMoreText;
+    3: string secondDepthTitle;
+    4: string familyServiceTitle;
+    5: string miniActivityTitle;
+    6: string miniActivityLinkUrl;
+    7: MyMiniPoint point;
+    8: MyMiniCoupon coupon;
+    9: MyMiniCampaign campaign;
+    10: list<MyMiniMiniApp> miniApps;
+    11: list<MyMiniFamilyService> familyServices;
+}
+
+struct getMyMini_result {
+    0: GetMyMiniResponse success;
+    1: WalletException e;
+}
+
+struct GetMyMiniV2AllowDuplicateRequest {
+
+}
+
+struct getMyMiniV2AllowDuplicate_args {
+    1: GetMyMiniV2AllowDuplicateRequest request;
+}
+
+struct MyMiniV2AllowDuplicateMiniApp {
+    1: string liffId;
+    2: string name;
+    3: string appDescription;
+    4: string iconUrl;
+    5: string iconAltText;
+    6: string sourceDisplayName;
+    7: bool favorited;
+    8: bool canFavorite;
+    9: string targetId;
+    10: string targetName;
+}
+
+struct MyMiniV2AllowDuplicateItem {
+    1: string appId;
+    2: string linkUrl;
+}
+
+struct MyMiniV2AllowDuplicateContent {
+    1: MyMiniMiniAppSourceType sourceType;
+    2: string title;
+    3: string emptyStateLinkUrl;
+    4: list<MyMiniV2AllowDuplicateItem> items;
+    5: bool hasReachedUpperLimit;
+}
+
+struct GetMyMiniV2AllowDuplicateResponse {
+    1: NZ0_W0 responseStatus;
+    2: string secondDepthTitle;
+    3: map<string, MyMiniV2AllowDuplicateMiniApp> apps;
+    4: list<MyMiniV2AllowDuplicateContent> contents;
+}
+
+struct getMyMiniV2AllowDuplicate_result {
+    0: GetMyMiniV2AllowDuplicateResponse success;
+    1: WalletException e;
+}
+
+struct GetPasskeyAuthenticationOptionsRequest {
+    1: string sessionId;
+}
+
+struct getPasskeyAuthenticationOptions_args {
+    1: GetPasskeyAuthenticationOptionsRequest request;
+}
+
+struct AuthenticationExtensionsPRFValues {
+    1: string first;
+    2: string second;
+}
+
+struct AuthenticationExtensionsPRFInputs {
+    1: AuthenticationExtensionsPRFValues eval;
+    2: map<string, AuthenticationExtensionsPRFValues> evalByCredential;
+}
+
+struct PasskeyAuthenticationExtensionsClientInputs {
+    1: bool credProps;
+    2: string credentialProtectionPolicy;
+    3: bool enforceCredentialProtectionPolicy;
+    4: AuthenticationExtensionsPRFInputs prf;
+}
+
+struct PasskeyPublicKeyCredentialRequestOptions {
+    1: string challenge;
+    2: i64 timeout;
+    3: string rpId;
+    4: list<PublicKeyCredentialDescriptor> allowCredentials;
+    5: string userVerification;
+    6: list<string> hints;
+    7: PasskeyAuthenticationExtensionsClientInputs extensions;
+}
+
+struct CredentialRequestOptions {
+    1: string mediation;
+    2: PasskeyPublicKeyCredentialRequestOptions publicKey;
+}
+
+struct GetPasskeyAuthenticationOptionsResponse {
+    1: CredentialRequestOptions credentialRequestOptions;
+}
+
+struct getPasskeyAuthenticationOptions_result {
+    0: GetPasskeyAuthenticationOptionsResponse success;
+    1: PasskeyAccountMigrationException e;
+}
+
+struct GetPasskeyRegistrationOptionsRequest {
+    1: string sessionId;
+}
+
+struct getPasskeyRegistrationOptions_args {
+    1: GetPasskeyRegistrationOptionsRequest request;
+}
+
+struct PasskeyPublicKeyCredentialRpEntity {
+    1: string id;
+    2: string name;
+}
+
+struct PasskeyPublicKeyCredentialUserEntity {
+    1: string id;
+    2: string name;
+    3: string displayName;
+}
+
+struct PasskeyAuthenticatorSelectionCriteria {
+    1: string authenticatorAttachment;
+    2: string residentKey;
+    3: bool requireResidentKey;
+    4: string userVerification;
+}
+
+struct PasskeyPublicKeyCredentialCreationOptions {
+    1: PasskeyPublicKeyCredentialRpEntity rp;
+    2: PasskeyPublicKeyCredentialUserEntity user;
+    3: string challenge;
+    4: list<PublicKeyCredentialParameters> pubKeyCredParams;
+    5: i64 timeout;
+    6: list<PublicKeyCredentialDescriptor> excludeCredentials;
+    7: PasskeyAuthenticatorSelectionCriteria authenticatorSelection;
+    8: list<string> hints;
+    9: string attestation;
+    10: list<string> attestationFormats;
+    11: PasskeyAuthenticationExtensionsClientInputs extensions;
+}
+
+struct CredentialCreationOptions {
+    1: string mediation;
+    2: PasskeyPublicKeyCredentialCreationOptions publicKey;
+}
+
+struct GetPasskeyRegistrationOptionsResponse {
+    1: CredentialCreationOptions credentialCreationOptions;
+}
+
+struct getPasskeyRegistrationOptions_result {
+    0: GetPasskeyRegistrationOptionsResponse success;
+    1: AccountPasskeyCommandException apce;
+    2: TokenAuthException tae;
+}
+
+struct GetPasskeysRequest {
+
+}
+
+struct getPasskeys_args {
+    1: GetPasskeysRequest request;
+}
+
+struct PasskeyCredential {
+    1: string credentialId;
+    2: string passkeyName;
+    3: i64 registeredAt;
+    4: i64 authenticatedAt;
+}
+
+struct GetPasskeysResponse {
+    1: list<PasskeyCredential> passkeys;
+}
+
+enum AccountAuthFactorQueryExceptionCode {
+    INTERNAL_ERROR = 0,
+    RETRY_LATER = 1,
+    INVALID_CONTEXT = 100,
+    APP_UPGRADE_REQUIRED = 101
+}
+
+exception AccountAuthFactorQueryException {
+    1: AccountAuthFactorQueryExceptionCode code;
+    2: string alertMessage;
+}
+
+struct getPasskeys_result {
+    0: GetPasskeysResponse success;
+    1: AccountAuthFactorQueryException aafqe;
+    2: TokenAuthException tae;
+}
+
+struct getPasswordHashingParameters_args {
+    1: GetPasswordHashingParametersRequest request;
+}
+
+struct AccountGetPasswordHashingParametersResponse {
+    1: bool isV1HashRequired;
+    2: V1PasswordHashingParameters v1HashParams;
+    3: PasswordHashingParameters hashParams;
+}
+
+struct getPasswordHashingParameters_result {
+    0: AccountGetPasswordHashingParametersResponse success;
+    1: PasswordConfirmationFeatureException pcfe;
+    2: TokenAuthException tae;
+}
+
+struct GetPhoneVerifSupportedCountriesForMigRequest {
+    1: string authSessionId;
+}
+
+struct getPhoneVerifSupportedCountriesForMig_args {
+    1: GetPhoneVerifSupportedCountriesForMigRequest request;
+}
+
+struct GetPhoneVerifSupportedCountriesForMigResponse {
+    1: set<string> phoneVerifSupportedCountries;
+}
+
+struct getPhoneVerifSupportedCountriesForMig_result {
+    0: GetPhoneVerifSupportedCountriesForMigResponse success;
+    1: AuthException e;
+}
+
+struct GetPremiumBackupContextRequest {
+    1: string sessionId;
+}
+
+struct getPremiumBackupContext_args {
+    1: GetPremiumBackupContextRequest request;
+}
+
+enum GetPremiumBackupContextResponseCurrentPremiumStatus {
+    PREMIUM_STATUS_UNSPECIFIED = 0,
+    PREMIUM_STATUS_INACTIVE = 1,
+    PREMIUM_STATUS_LYP_ACTIVE = 2,
+    PREMIUM_STATUS_LINE_ACTIVE = 3
+}
+
+enum GetPremiumBackupContextResponseAvailablePremiumTypes {
+    PREMIUM_TYPE_UNSPECIFIED = 0,
+    PREMIUM_TYPE_LYP_PREMIUM = 1,
+    PREMIUM_TYPE_LINE_PREMIUM = 2
+}
+
+struct GetPremiumBackupContextResponse {
+    1: GetPremiumBackupContextResponseCurrentPremiumStatus currentPremiumStatus;
+    2: list<GetPremiumBackupContextResponseAvailablePremiumTypes> availablePremiumTypes;
+    3: bool premiumBackupActive;
+    4: bool willSubscriptionBeCanceled;
+    5: bool isPremiumBackupBenefitIncluded;
+}
+
+struct getPremiumBackupContext_result {
+    0: GetPremiumBackupContextResponse success;
+    1: PasskeyAccountMigrationException e;
+}
+
+struct GetPremiumContextForMigRequest {
+    1: string authSessionId;
+    2: AccountIdentifier accountIdentifier;
+}
+
+struct getPremiumContextForMig_args {
+    1: GetPremiumContextForMigRequest request;
+}
+
+enum GetPremiumContextForMigResponseCurrentPremiumStatus {
+    PREMIUM_STATUS_UNSPECIFIED = 0,
+    PREMIUM_STATUS_INACTIVE = 1,
+    PREMIUM_STATUS_LYP_ACTIVE = 2,
+    PREMIUM_STATUS_LINE_ACTIVE = 3
+}
+
+struct GetPremiumContextForMigResponse {
+    1: GetPremiumContextForMigResponseCurrentPremiumStatus currentPremiumStatus;
+    2: list<T70_L> availablePremiumTypes;
+    3: bool isPremiumBackupActive;
+    4: bool willSubscriptionBeCanceled;
+    5: bool isPremiumBackupBenefitIncluded;
+}
+
+struct getPremiumContextForMig_result {
+    0: GetPremiumContextForMigResponse success;
+    1: AuthException e;
+}
+
+struct GetQuickMenuV2Request {
+
+}
+
+struct getQuickMenuV2_args {
+    1: GetQuickMenuV2Request request;
+}
+
+struct QuickMenuV2PointInfo {
+    1: NZ0_W0 responseStatus;
+    2: string balance;
+    3: string iconUrl;
+    4: string iconAltText;
+    5: string linkUrl;
+    6: string earnButtonText;
+    7: string earnButtonLinkUrl;
+    8: string useButtonText;
+    9: string useButtonLinkUrl;
+    10: string iconTargetId;
+    11: string iconTargetName;
+    12: string balanceTargetId;
+    13: string balanceTargetName;
+    14: TooltipInfo tooltip;
+}
+
+struct QuickMenuV2CouponInfo {
+    1: NZ0_W0 responseStatus;
+    2: string couponCount;
+    3: string title;
+    4: string titleLinkUrl;
+    5: string iconUrl;
+    6: string darkModeIconUrl;
+    7: string iconLinkUrl;
+    8: string iconAltText;
+    9: string targetId;
+    10: string targetName;
+}
+
+enum QuickMenuV2MyCardItemCardType {
+    OWNED = 0,
+    SHOPCARD = 1,
+    RECOMMENDED = 2
+}
+
+struct QuickMenuV2MyCardItem {
+    1: QuickMenuV2MyCardItemCardType cardType;
+    2: string linkUrl;
+    3: string iconUrl;
+    4: string iconAltText;
+    5: string targetId;
+    6: string targetName;
+}
+
+struct QuickMenuV2MyCardAddIcon {
+    1: string linkUrl;
+    2: string iconUrl;
+    3: string darkModeIconUrl;
+    4: string iconAltText;
+    5: string targetId;
+    6: string targetName;
+}
+
+struct QuickMenuV2MyCardNumberIcon {
+    1: string linkUrl;
+    2: string iconText;
+    3: string targetId;
+    4: string targetName;
+}
+
+struct QuickMenuV2MyCardInfoMyCardIcon {
+    1: QuickMenuV2MyCardAddIcon addIcon;
+    2: QuickMenuV2MyCardNumberIcon numberIcon;
+}
+
+struct QuickMenuV2MyCardInfo {
+    1: NZ0_W0 responseStatus;
+    2: string title;
+    3: string titleLinkUrl;
+    4: list<QuickMenuV2MyCardItem> myCardItems;
+    5: QuickMenuV2MyCardInfoMyCardIcon myCardIcon;
+    6: string targetId;
+    7: string targetName;
+    8: TooltipInfo tooltip;
+}
+
+struct GetQuickMenuV2Response {
+    1: QuickMenuV2PointInfo pointInfo;
+    2: QuickMenuV2CouponInfo couponInfo;
+    3: QuickMenuV2MyCardInfo myCardInfo;
+}
+
+struct getQuickMenuV2_result {
+    0: GetQuickMenuV2Response success;
+    1: WalletException e;
+}
+
+struct getRSAKeyInfo_args {
+    2: IdentityProvider provider;
+}
+
+struct GetServiceShortcutMenuV2Request {
+
+}
+
+struct getServiceShortcutMenuV2_args {
+    1: GetServiceShortcutMenuV2Request request;
+}
+
+struct ShortcutItemIconImage {
+    1: string darkModeUrl;
+    2: string lightModeUrl;
+    3: string altText;
+}
+
+struct ShortcutItemBadge {
+    1: i64 untilTimeMillis;
+}
+
+struct ShortcutItem {
+    1: string id;
+    2: string label;
+    3: string linkUrl;
+    4: string storeUrl;
+    5: ShortcutItemIconImage iconImage;
+    6: ShortcutItemBadge badge;
+    7: string utsClickTarget;
+    8: string targetId;
+    9: string targetName;
+    10: string targetType;
+    11: string wrsModelId;
+}
+
+struct GetServiceShortcutMenuV2Response {
+    1: list<ShortcutItem> shortcutItems;
+    2: string seeMoreText;
+    3: string seeLessText;
+}
+
+struct getServiceShortcutMenuV2_result {
+    0: GetServiceShortcutMenuV2Response success;
+    1: WalletException e;
+}
+
+struct GetTargetProfileNoticeRequest {
+    1: string targetUserMid;
+}
+
+struct getTargetProfileNotice_args {
+    1: GetTargetProfileNoticeRequest request;
+}
+
+struct NoticeEmpty {
+
+}
+
+struct NoticeAntiFraudGeneral {
+
+}
+
+struct NoticeAntiFraudDifferentRegion {
+
+}
+
+struct GetTargetProfileNoticeResponseNotice {
+    1: NoticeEmpty noticeEmpty;
+    2: NoticeAntiFraudGeneral noticeAntiFraudGeneral;
+    3: NoticeAntiFraudDifferentRegion noticeAntiFraudDifferentRegion;
+}
+
+enum CelebrityNoticeResult {
+    NOT_DISPLAY = 1,
+    DISPLAY_SUSPICIOUS_WORDING = 2,
+    DISPLAY_DEFINITELY_NOT_CELEBRITY_WORDING = 3
+}
+
+struct CelebrityNotice {
+    1: CelebrityNoticeResult result;
+    2: string category;
+    3: string name;
+}
+
+struct GetTargetProfileNoticeResponse {
+    1: GetTargetProfileNoticeResponseNotice notice;
+    2: CelebrityNotice celebrityNotice;
+}
+
+struct getTargetProfileNotice_result {
+    0: GetTargetProfileNoticeResponse success;
+    1: RejectedException re;
+    2: ServerFailureException sfe;
+    3: TalkException te;
+}
+
+enum LoginRequestType {
+    ID_CREDENTIAL = 0,
+    QRCODE = 1,
+    ID_CREDENTIAL_WITH_E2EE = 2
+}
+
+struct LoginRequest {
+    1: LoginRequestType type;
+    2: IdentityProvider identityProvider;
+    3: string identifier;
+    4: string password;
+    5: bool keepLoggedIn;
+    6: string accessLocation;
+    7: string systemName;
+    8: string certificate;
+    9: string verifier;
+    10: binary secret;
+    11: i32 e2eeVersion;
+    12: string modelName;
+}
+
+struct loginV2_args {
+    2: LoginRequest loginRequest;
+}
+
+struct loginV2_result {
+    0: LoginResult success;
+    1: TalkException e;
+}
+
+struct MigratePrimaryUsingPasskeyRequest {
+    1: string sessionId;
+}
+
+struct migratePrimaryUsingPasskey_args {
+    1: MigratePrimaryUsingPasskeyRequest request;
+}
+
+struct MigratePrimaryUsingPasskeyResponse {
+    1: string mid;
+    2: TokenV3IssueResult tokenV3IssueResult;
+    3: TokenV1IssueResult tokenV1IssueResult;
+    4: CountryCode accountCountryCode;
+    5: FormattedPhoneNumbers formattedPhoneNumbers;
+}
+
+struct migratePrimaryUsingPasskey_result {
+    0: MigratePrimaryUsingPasskeyResponse success;
+    1: PasskeyAccountMigrationException e;
+}
+
+struct OpenSessionForPasskeyRegistrationRequest {
+
+}
+
+struct openSessionForPasskeyRegistration_args {
+    1: OpenSessionForPasskeyRegistrationRequest request;
+}
+
+struct OpenSessionForPasskeyRegistrationResponse {
+    1: string sessionId;
+}
+
+struct openSessionForPasskeyRegistration_result {
+    0: OpenSessionForPasskeyRegistrationResponse success;
+    1: AccountPasskeyCommandException apce;
+    2: TokenAuthException tae;
+}
+
+struct QrCodeLoginV2ForSecureRequest {
+    1: string authSessionId;
+    2: string systemName;
+    3: string modelName;
+    4: bool autoLoginIsRequired;
+    5: string nonce;
+}
+
+struct qrCodeLoginV2ForSecure_args {
+    1: QrCodeLoginV2ForSecureRequest request;
+}
+
+struct QrCodeLoginV2Response {
+    1: string certificate;
+    2: string accessTokenV2;
+    3: TokenV3IssueResult tokenV3IssueResult;
+    4: string mid;
+    9: i64 lastBindTimestamp;
+    10: map<string, string> metaData;
+}
+
+struct qrCodeLoginV2ForSecure_result {
+    0: QrCodeLoginV2Response success;
+    1: SecondaryQrCodeException e;
+}
+
+struct RecordHistoryRequest {
+    1: string liffId;
+}
+
+struct recordHistory_args {
+    1: RecordHistoryRequest request;
+}
+
+struct recordHistory_result {
+    1: LiffException liffException;
+    2: TalkException talkException;
+}
+
+struct PasskeyAuthenticatorAttestationResponse {
+    1: string clientDataJson;
+    2: string attestationObject;
+    3: list<string> transports;
+}
+
+struct RegistrationPublicKeyCredential {
+    1: string id;
+    2: string type;
+    3: PasskeyAuthenticatorAttestationResponse response;
+    4: string authenticatorAttachment;
+    5: PasskeyAuthenticationExtensionsClientOutputs clientExtensionResults;
+}
+
+struct RegisterPasskeyRequest {
+    1: string sessionId;
+    2: string passkeyName;
+    3: RegistrationPublicKeyCredential registrationPublicKeyCredential;
+}
+
+struct registerPasskey_args {
+    1: RegisterPasskeyRequest request;
+}
+
+struct RegisterPasskeyResponse {
+
+}
+
+struct registerPasskey_result {
+    0: RegisterPasskeyResponse success;
+    1: AccountPasskeyCommandException apce;
+    2: TokenAuthException tae;
+}
+
+struct ReloginPrimaryRequest {
+    1: string authSessionId;
+}
+
+struct reloginPrimaryUsingEapAccount_args {
+    1: ReloginPrimaryRequest request;
+}
+
+struct ReloginPrimaryResponse {
+    1: string mid;
+    2: TokenV3IssueResult tokenV3IssueResult;
+    3: TokenV1IssueResult tokenV1IssueResult;
+    4: CountryCode accountCountryCode;
+    5: FormattedPhoneNumbers formattedPhoneNumbers;
+}
+
+struct reloginPrimaryUsingEapAccount_result {
+    0: ReloginPrimaryResponse success;
+    1: AccountReloginException e;
+}
+
+struct reloginPrimaryUsingPhone_args {
+    1: ReloginPrimaryRequest request;
+}
+
+struct reloginPrimaryUsingPhone_result {
+    0: ReloginPrimaryResponse success;
+    1: AccountReloginException e;
+}
+
+struct RemoveFavoriteMiniAppsRequest {
+    1: list<FavoriteMiniApp> favorites;
+}
+
+struct removeFavoriteMiniApps_args {
+    1: RemoveFavoriteMiniAppsRequest request;
+}
+
+struct removeFavoriteMiniApps_result {
+    1: WalletException e;
+}
+
+enum ReserveSubscriptionChangeRequestStoreCode {
+    APPLE = 1,
+    GOOGLE = 2,
+    TRIAL = 3,
+    DOGFOOD = 4,
+    MUSIC = 5
+}
+
+struct ReserveSubscriptionChangeRequest {
+    1: string billingItemId;
+    2: ReserveSubscriptionChangeRequestStoreCode storeCode;
+    3: string entryPoint;
+    4: bool addOaFriend;
+}
+
+struct reserveSubscriptionChange_args {
+    1: ReserveSubscriptionChangeRequest request;
+}
+
+struct ReserveSubscriptionChangeResponse {
+    1: fN0_F result;
+    2: string orderId;
+    3: string confirmUrl;
+}
+
+struct reserveSubscriptionChange_result {
+    0: ReserveSubscriptionChangeResponse success;
+    1: PremiumException e;
+}
+
+struct ReserveSubscriptionMigrationRequest {
+    1: string fromBillingItemId;
+    2: string toBillingItemId;
+    3: ReserveSubscriptionChangeRequestStoreCode storeCode;
+    4: string entryPoint;
+    5: bool addOaFriend;
+    6: string fromOrderId;
+}
+
+struct reserveSubscriptionMigration_args {
+    1: ReserveSubscriptionMigrationRequest request;
+}
+
+struct ReserveSubscriptionMigrationResponse {
+    1: fN0_F result;
+    2: string orderId;
+    3: string confirmUrl;
+}
+
+struct reserveSubscriptionMigration_result {
+    0: ReserveSubscriptionMigrationResponse success;
+    1: PremiumException e;
+}
+
+struct RestoreLifetimeKeyBackupHeaderRequest {
+    1: binary restoreClaim;
+}
+
+struct restoreLifetimeKeyBackupHeader_args {
+    2: RestoreLifetimeKeyBackupHeaderRequest request;
+}
+
+struct RestoreLifetimeKeyBackupHeaderResponse {
+    1: binary recoveryKey;
+}
+
+struct restoreLifetimeKeyBackupHeader_result {
+    0: RestoreLifetimeKeyBackupHeaderResponse success;
+    1: E2EEKeyBackupException e;
+}
+
+struct RestorePrimaryRequest {
+    1: string authSessionId;
+}
+
+struct restorePrimaryViaSmartSwitchUsingEapAccount_args {
+    1: RestorePrimaryRequest request;
+}
+
+struct RestorePrimaryResponse {
+    1: string mid;
+    2: TokenV3IssueResult tokenV3IssueResult;
+    3: TokenV1IssueResult tokenV1IssueResult;
+    4: CountryCode accountCountryCode;
+    5: FormattedPhoneNumbers formattedPhoneNumbers;
+}
+
+struct restorePrimaryViaSmartSwitchUsingEapAccount_result {
+    0: RestorePrimaryResponse success;
+    1: AccountSSRestoreException e;
+}
+
+struct restorePrimaryViaSmartSwitchUsingPhone_args {
+    1: RestorePrimaryRequest request;
+}
+
+struct restorePrimaryViaSmartSwitchUsingPhone_result {
+    0: RestorePrimaryResponse success;
+    1: AccountSSRestoreException e;
+}
+
+struct ScheduledMessageSendNowRequest {
+    1: i64 scheduledMessageId;
+    2: Message message;
+}
+
+struct sendNow_args {
+    1: ScheduledMessageSendNowRequest request;
+}
+
+struct ScheduledMessageSendNowResponse {
+
+}
+
+struct sendNow_result {
+    0: ScheduledMessageSendNowResponse success;
+    1: TalkException e;
+}
+
+struct StartRestorationRequest {
+    1: string authSessionId;
+    2: string modelName;
+    3: string deviceUid;
+}
+
+struct startRestoration_args {
+    1: StartRestorationRequest request;
+}
+
+struct StartRestorationResponse {
+    1: string displayName;
+    2: list<I80_EnumC26394c> availableAuthFactors;
+}
+
+struct startRestoration_result {
+    0: StartRestorationResponse success;
+    1: AccountSSRestoreException e;
+}
+
+struct StoreFavoriteDataRequest {
+    1: string targetUrl;
+    2: bool favorite;
+}
+
+struct storeFavoriteData_args {
+    1: StoreFavoriteDataRequest request;
+}
+
+struct storeFavoriteData_result {
+    1: LiffFavoriteDataException favoriteDataException;
+    2: LiffException liffException;
+    3: TalkException talkException;
+}
+
+struct ScheduledMessageUnregisterRequest {
+    1: set<i64> scheduledMessageIds;
+}
+
+struct unregister_args {
+    1: ScheduledMessageUnregisterRequest request;
+}
+
+enum ScheduledMessageFailureCode {
+    INTERNAL_ERROR = 0
+}
+
+struct ScheduledMessageUnregisterResponse {
+    1: set<i64> succeededScheduledMessageIds;
+    2: map<i64, ScheduledMessageFailureCode> failedScheduledMessageIds;
+}
+
+struct unregister_result {
+    0: ScheduledMessageUnregisterResponse success;
+    1: TalkException e;
+}
+
+struct ScheduledMessageUpdateRequest {
+    1: i32 reqSeq;
+    2: i64 scheduledMessageId;
+    3: ScheduledMessageRequest scheduledMessage;
+}
+
+struct update_args {
+    1: ScheduledMessageUpdateRequest request;
+}
+
+struct ScheduledMessageUpdateResponse {
+    1: i64 scheduledMessageId;
+}
+
+struct update_result {
+    0: ScheduledMessageUpdateResponse success;
+    1: TalkException e;
+}
+
+enum UpdateAndGetBalanceSummaryEpiRequestUpdateBalanceDisplayOnEpiServer {
+    SHOW = 1,
+    HIDE = 2,
+    NO_CHANGE = 3
+}
+
+struct UpdateAndGetBalanceSummaryEpiRequest {
+    1: string balanceToken;
+    2: UpdateAndGetBalanceSummaryEpiRequestUpdateBalanceDisplayOnEpiServer updateBalanceDisplayOnEpiServer;
+}
+
+struct updateAndGetBalanceSummaryEpi_args {
+    1: UpdateAndGetBalanceSummaryEpiRequest request;
+}
+
+enum LinePayEpiInfoPayMemberGrade {
+    LV2 = 1,
+    LV3 = 2,
+    LV9 = 3,
+    UNKNOWN = 4
+}
+
+struct LinePayEpiInfo {
+    1: NZ0_EnumC12195p0 payMemberStatus;
+    2: LinePayEpiInfoPayMemberGrade payMemberGrade;
+    3: bool balanceTokenValid;
+    4: CurrencyProperty currencyProperty;
+    5: string balanceAmount;
+    6: string applicationUrl;
+}
+
+struct BalanceShortcutEpiInfo {
+    1: list<BalanceShortcut> balanceShortcuts;
+}
+
+struct UpdateAndGetBalanceSummaryEpiResponse {
+    1: LinePayEpiInfo payInfo;
+    2: LinePayPromotion payPromotion;
+    3: BalanceShortcutEpiInfo balanceShortcutInfo;
+    4: LinePointInfo pointInfo;
+}
+
+struct updateAndGetBalanceSummaryEpi_result {
+    0: UpdateAndGetBalanceSummaryEpiResponse success;
+    1: WalletException e;
+}
+
+struct UpdateFavoriteMiniAppsOrderRequest {
+    1: list<string> orderedLiffIds;
+}
+
+struct updateFavoriteMiniAppsOrder_args {
+    1: UpdateFavoriteMiniAppsOrderRequest request;
+}
+
+enum UpdateFavoriteMiniAppsOrderErrorType {
+    FAVORITES_CHANGED = 1
+}
+
+struct UpdateFavoriteMiniAppsOrderError {
+    1: UpdateFavoriteMiniAppsOrderErrorType type;
+}
+
+struct UpdateFavoriteMiniAppsOrderResponse {
+    1: UpdateFavoriteMiniAppsOrderError error;
+}
+
+struct updateFavoriteMiniAppsOrder_result {
+    0: UpdateFavoriteMiniAppsOrderResponse success;
+    1: WalletException e;
+}
+
+struct UpdateLifetimeKeyBackupHeaderRequest {
+    1: binary blobHeader;
+}
+
+struct updateLifetimeKeyBackupHeader_args {
+    2: UpdateLifetimeKeyBackupHeaderRequest request;
+}
+
+struct UpdateLifetimeKeyBackupHeaderResponse {
+
+}
+
+struct updateLifetimeKeyBackupHeader_result {
+    0: UpdateLifetimeKeyBackupHeaderResponse success;
+    1: E2EEKeyBackupException e;
+}
+
+struct UpdatePasskeyNameRequest {
+    1: string credentialId;
+    2: string passkeyName;
+}
+
+struct updatePasskeyName_args {
+    1: UpdatePasskeyNameRequest request;
+}
+
+struct UpdatePasskeyNameResponse {
+
+}
+
+struct updatePasskeyName_result {
+    0: UpdatePasskeyNameResponse success;
+    1: AccountPasskeyCommandException apce;
+    2: TokenAuthException tae;
+}
+
+struct ValidateLifetimeKeyBackupRequest {
+    1: i64 masterKeyTimestamp;
+    2: binary blobHeaderHash;
+    3: list<LifetimePayloadDataMetadata> metadataList;
+}
+
+struct validateLifetimeKeyBackup_args {
+    2: ValidateLifetimeKeyBackupRequest request;
+}
+
+struct ValidateLifetimeKeyBackupResponse {
+    1: list<LifetimePayloadDataMetadata> missingMetadataList;
+}
+
+struct validateLifetimeKeyBackup_result {
+    0: ValidateLifetimeKeyBackupResponse success;
+    1: E2EEKeyBackupException e;
+}
+
+struct PrivacyString {
+    1: string value;
+}
+
+struct VerifyAccountUsingPwdRequest {
+    1: string authSessionId;
+    2: PrivacyString v1HashedPassword;
+    3: PrivacyString clientHashedPassword;
+}
+
+struct verifyAccountUsingPwd_args {
+    1: VerifyAccountUsingPwdRequest request;
+}
+
+enum VerifyAccountUsingPwdResponseNextAccountVerifMethod {
+    EMAIL = 0,
+    PASSWORD = 1
+}
+
+struct VerifyAccountUsingPwdResponse {
+    1: VerifyAccountUsingPwdResponseNextAccountVerifMethod nextAccountVerifMethod;
+}
+
+struct verifyAccountUsingPwd_result {
+    0: VerifyAccountUsingPwdResponse success;
+    1: AccountReloginException e;
+}
+
+struct VerifyCertificateRequest {
+    1: string authSessionId;
+    2: string certificate;
+}
+
+struct verifyCertificate_args {
+    1: VerifyCertificateRequest request;
+}
+
+struct VerifyCertificateResponse {
+
+}
+
+struct verifyCertificate_result {
+    0: VerifyCertificateResponse success;
+    1: SecondaryQrCodeException e;
+}
+
+struct VerifyEmailRequest {
+    1: string authSessionId;
+    2: PrivacyString email;
+}
+
+struct verifyEmail_args {
+    1: VerifyEmailRequest request;
+}
+
+struct VerifyEmailResponse {
+    1: VerifyAccountUsingPwdResponseNextAccountVerifMethod nextAccountVerifMethod;
+}
+
+struct verifyEmail_result {
+    0: VerifyEmailResponse success;
+    1: AccountReloginException e;
+}
+
+struct VerifyPasswordRequest {
+    1: string v1HashedPassword;
+    2: string clientHashedPassword;
+}
+
+struct verifyPassword_args {
+    1: VerifyPasswordRequest request;
+}
+
+struct VerifyPasswordResponse {
+    1: bool success;
+}
+
+enum SecureBackupPasswordVerificationExceptionErrorCode {
+    INTERNAL_ERROR = 0,
+    ILLEGAL_ARGUMENT = 1
+}
+
+exception SecureBackupPasswordVerificationException {
+    1: SecureBackupPasswordVerificationExceptionErrorCode errorCode;
+    2: string errorMessage;
+}
+
+struct verifyPassword_result {
+    0: VerifyPasswordResponse success;
+    1: SecureBackupPasswordVerificationException sbpve;
+    2: TokenAuthException tae;
 }
