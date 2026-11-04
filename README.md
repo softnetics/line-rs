@@ -160,7 +160,8 @@ the live server:
 - The message request box, accepting or rejecting request chats, and
   muting a chat.
 - LINE Calendar over gRPC (`client::calendar`): list calendars and their
-  events.
+  events, and create, update and delete events (no recurrence, invitees,
+  reminders or RSVP yet).
 
 ## Compatibility with LINEJS
 
