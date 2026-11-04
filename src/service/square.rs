@@ -349,6 +349,24 @@ impl SquareService<'_> {
     }
 }
 
+// --- Methods recovered by static RE of LINE Android 26.x (unverified). ---
+impl SquareService<'_> {
+    /// Ask LINE to delete a paid OpenChat (paid squares cannot be deleted
+    /// directly). Returns the `Square` as it stands after the request.
+    pub async fn request_delete_paid_square(&self, square_mid: &str) -> Result<Value> {
+        self.call(
+            "requestDeletePaidSquare",
+            crate::tv!({"request": {"squareMid": square_mid}}),
+        )
+        .await
+    }
+
+    /// `searchSquareChatMentionables(request: SearchSquareChatMentionablesRequest)`.
+    pub async fn search_square_chat_mentionables(&self, args: impl Into<Value>) -> Result<Value> {
+        self.call("searchSquareChatMentionables", args).await
+    }
+}
+
 // <generated pass-through>
 impl SquareService<'_> {
     /// `approveSquareMembers(request: ApproveSquareMembersRequest)`.

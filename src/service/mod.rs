@@ -12,6 +12,7 @@
 
 pub mod access_token_refresh;
 pub mod account_auth_factor_eap_connect;
+pub mod account_passkey_command;
 pub mod auth;
 pub mod bot_external;
 pub mod buddy;
@@ -28,6 +29,7 @@ pub mod moa;
 pub mod multi_profile;
 pub mod oa_chat;
 pub mod oa_membership;
+pub mod passkey_account_migration;
 pub mod password_update;
 pub mod premium_font;
 pub mod premium_product_definition;
@@ -140,6 +142,7 @@ macro_rules! services {
 services! {
     AccessTokenRefreshService => access_token_refresh, "/EXT/auth/tokenrefresh/v1", Compact;
     AccountAuthFactorEapConnectService => account_auth_factor_eap_connect, "/ACCT/authfactor/eap/v1", Compact;
+    AccountPasskeyCommandService => account_passkey_command, "/EXT/auth/feature-user/thrift/account/passkey/v1/command", Compact;
     AuthService => auth, "/AS4", Compact;
     BotExternalService => bot_external, "/BOTE", Compact;
     BuddyService => buddy, "/BUDDY4", Compact;
@@ -154,6 +157,7 @@ services! {
     MultiProfileService => multi_profile, "/PFS4", Compact;
     OaChatService => oa_chat, "/ext/oachat/api/", Compact;
     OaMembershipService => oa_membership, "/EXT/bot/oafan", Compact;
+    PasskeyAccountMigrationService => passkey_account_migration, "/ext/auth/feature-guest/thrift/account/v1/migrate/passkey", Compact;
     PasswordUpdateService => password_update, "/EXT/auth/feature-user/api/primary/password/update", Compact;
     PremiumFontService => premium_font, "/EXT/talk/asset-meta-server/thrift/fontService", Compact;
     PremiumProductDefinitionService => premium_product_definition, "/EXT/line-premium/common/thrift/product-definition", Compact;

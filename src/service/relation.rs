@@ -272,6 +272,112 @@ impl RelationService<'_> {
     }
 }
 
+/// Wraps a request struct as the single `request` argument.
+fn request_arg(req: Value) -> Value {
+    let mut args = Value::object();
+    args.insert("request", req);
+    args
+}
+
+/// A paged id-list request: `{page_field: token}` (omitted on the first page).
+fn page_request(page_field: &str, page_token: Option<&str>) -> Value {
+    let mut req = Value::object();
+    req.insert(page_field, page_token);
+    request_arg(req)
+}
+
+// --- Methods recovered by static RE of LINE Android 26.x (unverified). ---
+impl RelationService<'_> {
+    async fn friend_request(&self, friend_mid: &str) -> Result<Value> {
+        let seq = self.client.get_reqseq("talk").await?;
+        Ok(crate::tv!({"reqSeq": seq, "friendMid": friend_mid}))
+    }
+
+    /// Remove a friend. `reqSeq` is filled automatically.
+    pub async fn delete_friend(&self, friend_mid: &str) -> Result<Value> {
+        let req = self.friend_request(friend_mid).await?;
+        self.call("deleteFriend", request_arg(req)).await
+    }
+
+    /// Mark a friend as a favorite (or not). `reqSeq` auto.
+    pub async fn update_friend_favorite(&self, friend_mid: &str, favorite: bool) -> Result<Value> {
+        let mut req = self.friend_request(friend_mid).await?;
+        req.insert("favorite", favorite);
+        self.call("updateFriendFavorite", request_arg(req)).await
+    }
+
+    /// Hide a friend from the friend list (or unhide). `reqSeq` auto.
+    pub async fn update_friend_hidden(&self, friend_mid: &str, hidden: bool) -> Result<Value> {
+        let mut req = self.friend_request(friend_mid).await?;
+        req.insert("hidden", hidden);
+        self.call("updateFriendHidden", request_arg(req)).await
+    }
+
+    /// Set the display name the caller sees for a friend; `""` clears it.
+    /// `reqSeq` auto. (LINE spells the method `updateUserFriendOverridenName`.)
+    pub async fn update_friend_overridden_name(
+        &self,
+        friend_mid: &str,
+        name: &str,
+    ) -> Result<Value> {
+        let mut req = self.friend_request(friend_mid).await?;
+        req.insert("overridenName", name);
+        self.call("updateUserFriendOverridenName", request_arg(req))
+            .await
+    }
+
+    /// Look up a user by invitation ticket (the ticket variant of
+    /// [`find_contact_by_search_id_or_ticket_v3`](Self::find_contact_by_search_id_or_ticket_v3)).
+    pub async fn find_contact_by_ticket_v3(&self, ticket: &str) -> Result<Value> {
+        let args = vec![(
+            1,
+            TValue::Struct(vec![(1, TValue::Struct(vec![(2, TValue::string(ticket))]))]),
+        )];
+        self.request(
+            "findContactBySearchIdOrTicketV3",
+            args,
+            Parse::Struct("Contact"),
+        )
+        .await
+    }
+
+    /// Upload address-book changes. `local_contacts` is a list of
+    /// `ContactModificationV3` (`{type, luid, phones}`). `reqSeq` auto.
+    pub async fn sync_contacts_v3(&self, local_contacts: impl Into<Value>) -> Result<Value> {
+        let seq = self.client.get_reqseq("talk").await?;
+        let mut req = crate::tv!({"reqSeq": seq});
+        req.insert("localContacts", local_contacts.into());
+        self.call("syncContactsV3", request_arg(req)).await
+    }
+
+    /// Mids of blocked users, one page at a time (`None` for the first page).
+    pub async fn get_user_block_ids(&self, page_token: Option<&str>) -> Result<Value> {
+        self.call("getUserBlockIds", page_request("userPageToken", page_token))
+            .await
+    }
+
+    /// Mids of blocked bots / official accounts, one page at a time.
+    pub async fn get_bot_block_ids(&self, page_token: Option<&str>) -> Result<Value> {
+        self.call("getBotBlockIds", page_request("botPageToken", page_token))
+            .await
+    }
+
+    /// Mids of recommended users ("people you may know"), one page at a time.
+    pub async fn get_user_recommend_ids(&self, page_token: Option<&str>) -> Result<Value> {
+        self.call(
+            "getUserRecommendIds",
+            page_request("userPageToken", page_token),
+        )
+        .await
+    }
+
+    /// Mids of bots / official accounts the caller has added, one page at a time.
+    pub async fn get_bot_friend_ids(&self, page_token: Option<&str>) -> Result<Value> {
+        self.call("getBotFriendIds", page_request("botPageToken", page_token))
+            .await
+    }
+}
+
 // <generated pass-through>
 impl RelationService<'_> {
     /// `getContactCalendarEvents(request: GetContactCalendarEventsRequest)`.
@@ -306,6 +412,32 @@ mod tests {
     use super::*;
     use crate::service::test_util::{encode, path, s};
     use crate::thrift::{Schema, TType, decode_struct};
+
+    #[test]
+    fn friend_update_requests() {
+        let args = encode(
+            "updateFriendHidden_args",
+            &crate::tv!({"request": {"reqSeq": 2, "friendMid": "u1", "hidden": true}}),
+        );
+        assert_eq!(path(&args, &[1, 2]), Some(&s("u1")));
+        assert!(matches!(path(&args, &[1, 3]), Some(TValue::Bool(true))));
+        let args = encode(
+            "updateUserFriendOverridenName_args",
+            &crate::tv!({"request": {"reqSeq": 2, "friendMid": "u1", "overridenName": "Bob"}}),
+        );
+        assert_eq!(path(&args, &[1, 3]), Some(&s("Bob")));
+    }
+
+    #[test]
+    fn block_ids_page_request() {
+        let args = encode(
+            "getBotBlockIds_args",
+            &page_request("botPageToken", Some("t")),
+        );
+        assert_eq!(path(&args, &[1, 1]), Some(&s("t")));
+        let first = encode("getUserBlockIds_args", &page_request("userPageToken", None));
+        assert_eq!(path(&first, &[1, 1]), None);
+    }
 
     #[test]
     fn add_friend_by_mid_envelope() {

@@ -66,7 +66,7 @@ a local dashboard for the live tests (see
 | `base` | `@evex/linejs/base` | `BaseClient`: config, token, storage, events, request pipeline |
 | `login` | `base/login` | QR (SQR v1, ForSecure v2), email and password (v1 `loginZ`, v3 `loginV2`), auth token |
 | `e2ee` | `base/e2ee` | Letter Sealing keys, crypto for text, location and data messages, file crypto |
-| `service` | `base/service` | 40 services and 380+ typed methods; any IDL method through `Service::call` |
+| `service` | `base/service` | 42 services and 400+ typed methods; any IDL method through `Service::call` |
 | `push`, `polling` | `base/push`, `base/polling` | LEGY HTTP/2 push connection; `sync` and `fetchMyEvents` polling |
 | `obs` | `base/obs` | media upload and download, plain and E2EE |
 | `timeline` | `base/timeline` | posts, likes, comments |
@@ -149,6 +149,17 @@ live server:
   every Keep path with 404.
 - Album writes: create, rename, delete and share albums, upload and delete
   photos, like photos. LINEJS can only download album photos.
+
+Reverse engineered from LINE for Android 26.x, and not yet checked against
+the live server:
+
+- Friends and contacts: delete, favorite, hide and rename friends, look up
+  by ticket, sync the address book, and list blocked users and bots,
+  recommended users and added bots.
+- The message request box, accepting or rejecting request chats, and
+  muting a chat.
+- Passkeys: register, rename and delete them, and move an account to a new
+  device with one.
 
 ## Compatibility with LINEJS
 
