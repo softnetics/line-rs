@@ -647,6 +647,53 @@ impl TalkService<'_> {
     }
 }
 
+// --- Methods recovered by static RE of LINE Android 26.x (unverified). ---
+impl TalkService<'_> {
+    /// Chats in the message request box (messages from people who are not
+    /// friends). `chat_type` is a `Pb1_Z2` name (`"PEER"`, `"GROUP"`,
+    /// `"ROOM"`); `page_token` is `None` for the first page. The response
+    /// maps chat mid to the time of its latest request.
+    pub async fn get_message_request_box_list(
+        &self,
+        chat_type: &str,
+        page_token: Option<&str>,
+    ) -> Result<Value> {
+        let mut req = crate::tv!({"chatType": chat_type});
+        req.insert("pageToken", page_token);
+        let mut args = Value::object();
+        args.insert("request", req);
+        self.call("getMessageRequestBoxList", args).await
+    }
+
+    /// Accept (`trusted = true`) or reject message-request chats in bulk.
+    pub async fn update_chat_status_bulk(
+        &self,
+        chat_mids: &[String],
+        trusted: bool,
+    ) -> Result<Value> {
+        self.call(
+            "updateChatStatusBulk",
+            crate::tv!({"request": {"chatMids": chat_mids, "trusted": trusted}}),
+        )
+        .await
+    }
+
+    /// Mute or unmute notifications for a 1:1 chat. `reqSeq` auto.
+    pub async fn update_notification_setting(&self, user_mid: &str, mute: bool) -> Result<Value> {
+        let seq = self.client.get_reqseq("talk").await?;
+        self.call(
+            "updateNotificationSetting",
+            crate::tv!({"request": {"reqSeq": seq, "userMid": user_mid, "mute": mute}}),
+        )
+        .await
+    }
+
+    /// `registerE2EEPublicKeyV2(request: Pb1_W6)`.
+    pub async fn register_e2ee_public_key_v2(&self, args: impl Into<Value>) -> Result<Value> {
+        self.call("registerE2EEPublicKeyV2", args).await
+    }
+}
+
 // <generated pass-through>
 impl TalkService<'_> {
     /// `acceptChatInvitation(request: AcceptChatInvitationRequest)`.
@@ -1174,6 +1221,21 @@ impl TalkService<'_> {
 mod tests {
     use super::*;
     use crate::service::test_util::{client, encode, field, path, s};
+
+    #[test]
+    fn message_request_box_and_mute_layout() {
+        let args = encode(
+            "getMessageRequestBoxList_args",
+            &crate::tv!({"request": {"chatType": "PEER"}}),
+        );
+        assert!(matches!(path(&args, &[1, 1]), Some(TValue::I32(2))));
+        let args = encode(
+            "updateNotificationSetting_args",
+            &crate::tv!({"request": {"reqSeq": 1, "userMid": "u1", "mute": true}}),
+        );
+        assert_eq!(path(&args, &[1, 2]), Some(&s("u1")));
+        assert!(matches!(path(&args, &[1, 3]), Some(TValue::Bool(true))));
+    }
 
     #[test]
     fn sync_args_defaults() {

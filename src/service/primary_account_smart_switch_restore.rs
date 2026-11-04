@@ -6,6 +6,15 @@ use super::PrimaryAccountSmartSwitchRestoreService;
 use crate::error::Result;
 use crate::thrift::Value;
 
+// --- Methods recovered by static RE of LINE Android 26.x (unverified). ---
+impl PrimaryAccountSmartSwitchRestoreService<'_> {
+    /// `getSSEncryptionKey(request: GetSSEncryptionKeyRequest)`: the key the
+    /// old device registered for a smart-switch restore.
+    pub async fn get_ss_encryption_key(&self, args: impl Into<Value>) -> Result<Value> {
+        self.call("getSSEncryptionKey", args).await
+    }
+}
+
 // <generated pass-through>
 impl PrimaryAccountSmartSwitchRestoreService<'_> {
     /// `checkEmailAssigned(authSessionId: string, accountIdentifier: AccountIdentifier)`.

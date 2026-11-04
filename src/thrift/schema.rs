@@ -358,6 +358,99 @@ mod tests {
         ));
     }
 
+    const PREEXISTING_HOLES: &[&str] = &["TermsType"];
+
+    /// Types reachable from `ty` that the schema does not define.
+    fn collect_unresolved(
+        s: &Schema,
+        ty: &TypeRef,
+        seen: &mut std::collections::HashSet<String>,
+        missing: &mut Vec<String>,
+    ) {
+        match ty {
+            TypeRef::Base(_) => {}
+            TypeRef::List(t) | TypeRef::Set(t) => collect_unresolved(s, t, seen, missing),
+            TypeRef::Map(k, v) => {
+                collect_unresolved(s, k, seen, missing);
+                collect_unresolved(s, v, seen, missing);
+            }
+            TypeRef::Named(name) => {
+                if !seen.insert(name.clone()) {
+                    return;
+                }
+                match s.resolve(name) {
+                    Some(Named::Struct(def)) => {
+                        for f in &def.fields {
+                            collect_unresolved(s, &f.ty, seen, missing);
+                        }
+                    }
+                    Some(_) => {}
+                    None => missing.push(name.clone()),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn android_26_methods_resolve() {
+        let s = Schema::line();
+        let mut seen = std::collections::HashSet::new();
+        let mut missing = Vec::new();
+        for m in [
+            "deleteFriend",
+            "updateFriendFavorite",
+            "updateFriendHidden",
+            "updateUserFriendOverridenName",
+            "findContactByPhoneV3",
+            "findContactBySearchIdOrTicketV3",
+            "syncContactsV3",
+            "getUserBlockIds",
+            "getBotBlockIds",
+            "getUserRecommendIds",
+            "getBotFriendIds",
+            "getMessageRequestBoxList",
+            "updateChatStatusBulk",
+            "updateNotificationSetting",
+            "doRegister",
+            "getByPagination",
+            "update",
+            "unregister",
+            "sendNow",
+            "e2eeReencrypt",
+            "openSessionForPasskeyRegistration",
+            "getPasskeyRegistrationOptions",
+            "registerPasskey",
+            "updatePasskeyName",
+            "deletePasskey",
+            "getPasskeys",
+            "getPasskeyAuthenticationOptions",
+            "authenticatePasskey",
+            "migratePrimaryUsingPasskey",
+            "createSessionV2",
+            "getSSEncryptionKey",
+            "registerSSEncryptionKey",
+            "SquareService_requestDeletePaidSquare",
+        ] {
+            for suffix in ["_args", "_result"] {
+                let name = format!("{m}{suffix}");
+                assert!(s.get_struct(&name).is_some(), "missing {name}");
+                collect_unresolved(s, &TypeRef::Named(name), &mut seen, &mut missing);
+            }
+        }
+        // Holes that predate these additions, reached through existing structs.
+        missing.retain(|n| !PREEXISTING_HOLES.contains(&n.as_str()));
+        assert!(missing.is_empty(), "unresolved types: {missing:?}");
+        // Appending must not have replaced the older pwless WebAuthn structs.
+        let old = s.get_struct("PublicKeyCredentialCreationOptions").unwrap();
+        assert_eq!(old.field_by_id(8).unwrap().name, "attestation");
+        let new = s
+            .get_struct("PasskeyPublicKeyCredentialCreationOptions")
+            .unwrap();
+        assert_eq!(new.field_by_id(8).unwrap().name, "hints");
+        let msg = s.get_struct("Message").unwrap();
+        assert_eq!(msg.field_by_id(28).unwrap().name, "updatedTime");
+    }
+
     #[test]
     fn enum_without_values() {
         let s = Schema::parse("enum E { A, B = 5, C }").unwrap();

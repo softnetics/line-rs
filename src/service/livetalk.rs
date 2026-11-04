@@ -6,6 +6,14 @@ use super::SquareLiveTalkService;
 use crate::error::Result;
 use crate::thrift::Value;
 
+// --- Methods recovered by static RE of LINE Android 26.x (unverified). ---
+impl SquareLiveTalkService<'_> {
+    /// `removeLiveTalkSubscription(request: RemoveLiveTalkSubscriptionRequest)`.
+    pub async fn remove_live_talk_subscription(&self, args: impl Into<Value>) -> Result<Value> {
+        self.call("removeLiveTalkSubscription", args).await
+    }
+}
+
 // <generated pass-through>
 impl SquareLiveTalkService<'_> {
     /// `acceptSpeakers(request: AcceptSpeakersRequest)`.

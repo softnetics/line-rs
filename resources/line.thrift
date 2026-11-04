@@ -7622,6 +7622,7 @@ struct Message {
     24: Pb1_E7 relatedMessageServiceCode;
     25: Pb1_B appExtensionType;
     27: list<Reaction> reactions;
+    28: i64 updatedTime;
 }
 
 struct MessageBoxList {
@@ -17499,4 +17500,883 @@ struct getProductTiersForClient_args {
 // derived from static RE of LINE macOS 26.5.0; unverified against live server
 struct GetProductTiersRequest {
     1: string region;
+}
+
+// ---------------------------------------------------------------------------
+// Derived from static RE of the LINE Android app (26.x); unverified against a
+// live server. Contacts/friends (RelationService /RE4), message request box and
+// per-chat mute (TalkService /S4), scheduled messages (/SCHD4), passkeys
+// (account passkey command, auth-factor query and passkey migration services)
+// and account re-login / smart-switch restore helpers.
+// ---------------------------------------------------------------------------
+
+struct DeleteFriendRequest {
+    1: i32 reqSeq;
+    2: string friendMid;
+}
+
+struct deleteFriend_args {
+    1: DeleteFriendRequest request;
+}
+
+struct DeleteFriendResponse {
+
+}
+
+struct deleteFriend_result {
+    0: DeleteFriendResponse success;
+    1: RejectedException re;
+    2: ServerFailureException sfe;
+    3: TalkException te;
+}
+
+struct UpdateFriendFavoriteRequest {
+    1: i32 reqSeq;
+    2: string friendMid;
+    3: bool favorite;
+}
+
+struct updateFriendFavorite_args {
+    1: UpdateFriendFavoriteRequest request;
+}
+
+struct UpdateFriendFavoriteResponse {
+
+}
+
+struct updateFriendFavorite_result {
+    0: UpdateFriendFavoriteResponse success;
+    1: RejectedException re;
+    2: ServerFailureException sfe;
+    3: TalkException te;
+}
+
+struct UpdateFriendHiddenRequest {
+    1: i32 reqSeq;
+    2: string friendMid;
+    3: bool hidden;
+}
+
+struct updateFriendHidden_args {
+    1: UpdateFriendHiddenRequest request;
+}
+
+struct UpdateFriendHiddenResponse {
+
+}
+
+struct updateFriendHidden_result {
+    0: UpdateFriendHiddenResponse success;
+    1: RejectedException re;
+    2: ServerFailureException sfe;
+    3: TalkException te;
+}
+
+struct UpdateUserFriendOverridenNameRequest {
+    1: i32 reqSeq;
+    2: string friendMid;
+    3: string overridenName;
+}
+
+struct updateUserFriendOverridenName_args {
+    1: UpdateUserFriendOverridenNameRequest request;
+}
+
+struct UpdateUserFriendOverridenNameResponse {
+
+}
+
+struct updateUserFriendOverridenName_result {
+    0: UpdateUserFriendOverridenNameResponse success;
+    1: RejectedException re;
+    2: ServerFailureException sfe;
+    3: TalkException te;
+}
+
+struct FindContactByPhoneV3Request {
+    1: string phone;
+}
+
+struct findContactByPhoneV3_args {
+    1: FindContactByPhoneV3Request request;
+}
+
+exception MessageDefinedRejectedException {
+    1: string message;
+    2: string hint;
+}
+
+struct findContactByPhoneV3_result {
+    0: GetContactV3Response success;
+    1: RejectedException re;
+    2: ServerFailureException sfe;
+    3: TalkException te;
+    4: MessageDefinedRejectedException mdre;
+}
+
+struct FindContactBySearchIdOrTicketV3RequestIdentifier {
+    1: string searchId;
+    2: string ticket;
+}
+
+struct FindContactBySearchIdOrTicketV3Request {
+    1: FindContactBySearchIdOrTicketV3RequestIdentifier identifier;
+}
+
+struct findContactBySearchIdOrTicketV3_args {
+    1: FindContactBySearchIdOrTicketV3Request request;
+}
+
+struct findContactBySearchIdOrTicketV3_result {
+    0: GetContactV3Response success;
+    1: RejectedException re;
+    2: ServerFailureException sfe;
+    3: TalkException te;
+    4: MessageDefinedRejectedException mdre;
+}
+
+struct ContactModificationV3 {
+    1: Pb1_EnumC13029i6 type;
+    2: string luid;
+    3: list<string> phones;
+}
+
+struct SyncContactsV3Request {
+    1: i32 reqSeq;
+    2: list<ContactModificationV3> localContacts;
+}
+
+struct syncContactsV3_args {
+    1: SyncContactsV3Request request;
+}
+
+struct ContactRegistrationV3Identifier {
+    1: string phone;
+}
+
+struct ContactRegistrationV3 {
+    1: GetContactV3Response contact;
+    2: ContactRegistrationV3Identifier identifier;
+    3: string luid;
+}
+
+struct SyncContactsV3Response {
+    1: list<ContactRegistrationV3> contactRegistrations;
+}
+
+struct syncContactsV3_result {
+    0: SyncContactsV3Response success;
+    1: RejectedException re;
+    2: ServerFailureException sfe;
+    3: TalkException te;
+    4: ExcessiveRequestItemException ere;
+}
+
+enum BlockIdsDeleteFilter {
+    ALL = 0,
+    DELETED = 1,
+    NOT_DELETED = 2
+}
+
+struct GetUserBlockIdsRequest {
+    1: string userPageToken;
+    2: BlockIdsDeleteFilter deleteFilter;
+}
+
+struct getUserBlockIds_args {
+    1: GetUserBlockIdsRequest request;
+}
+
+struct GetUserBlockIdsResponse {
+    1: set<string> userMids;
+    2: string nextUserPageToken;
+}
+
+struct getUserBlockIds_result {
+    0: GetUserBlockIdsResponse success;
+    1: RejectedException re;
+    2: ServerFailureException sfe;
+    3: TalkException te;
+}
+
+struct GetBotBlockIdsRequest {
+    1: string botPageToken;
+    2: BlockIdsDeleteFilter deleteFilter;
+}
+
+struct getBotBlockIds_args {
+    1: GetBotBlockIdsRequest request;
+}
+
+struct GetBotBlockIdsResponse {
+    1: set<string> botMids;
+    2: string nextBotPageToken;
+}
+
+struct getBotBlockIds_result {
+    0: GetBotBlockIdsResponse success;
+    1: RejectedException re;
+    2: ServerFailureException sfe;
+    3: TalkException te;
+}
+
+struct GetUserRecommendIdsRequest {
+    1: string userPageToken;
+    2: F61_EnumC10204a0 blockStatus;
+}
+
+struct getUserRecommendIds_args {
+    1: GetUserRecommendIdsRequest request;
+}
+
+struct GetUserRecommendIdsResponse {
+    1: set<string> userMids;
+    2: string nextUserPageToken;
+}
+
+struct getUserRecommendIds_result {
+    0: GetUserRecommendIdsResponse success;
+    1: RejectedException re;
+    2: ServerFailureException sfe;
+    3: TalkException te;
+}
+
+struct GetBotFriendIdsRequest {
+    1: string botPageToken;
+    2: F61_EnumC10204a0 blockStatus;
+}
+
+struct getBotFriendIds_args {
+    1: GetBotFriendIdsRequest request;
+}
+
+struct GetBotFriendIdsResponse {
+    1: set<string> botFriendMids;
+    2: string nextBotPageToken;
+}
+
+struct getBotFriendIds_result {
+    0: GetBotFriendIdsResponse success;
+    1: RejectedException re;
+    2: ServerFailureException sfe;
+    3: TalkException te;
+}
+
+struct GetMessageRequestBoxListRequest {
+    1: Pb1_Z2 chatType;
+    2: string pageToken;
+}
+
+struct getMessageRequestBoxList_args {
+    1: GetMessageRequestBoxListRequest request;
+}
+
+struct GetMessageRequestBoxListResponse {
+    1: map<string, i64> chatMids;
+    2: string nextPageToken;
+}
+
+struct getMessageRequestBoxList_result {
+    0: GetMessageRequestBoxListResponse success;
+    1: TalkException e;
+}
+
+struct BulkUpdateChatStatusRequest {
+    1: list<string> chatMids;
+    2: bool trusted;
+}
+
+struct updateChatStatusBulk_args {
+    1: BulkUpdateChatStatusRequest request;
+}
+
+struct BulkUpdateChatStatusResponse {
+
+}
+
+struct updateChatStatusBulk_result {
+    0: BulkUpdateChatStatusResponse success;
+    1: TalkException e;
+}
+
+struct UpdateNotificationSettingRequest {
+    1: i32 reqSeq;
+    2: string userMid;
+    3: bool mute;
+}
+
+struct updateNotificationSetting_args {
+    1: UpdateNotificationSettingRequest request;
+}
+
+struct UpdateNotificationSettingResponse {
+
+}
+
+struct updateNotificationSetting_result {
+    0: UpdateNotificationSettingResponse success;
+    1: TalkException e;
+}
+
+struct ScheduledMessageSchedule {
+    1: i64 initialScheduledTime;
+}
+
+struct ScheduledMessageRequest {
+    1: Message message;
+    2: ScheduledMessageSchedule schedule;
+}
+
+struct ScheduledMessageRegisterRequest {
+    1: i32 reqSeq;
+    2: ScheduledMessageRequest scheduledMessage;
+}
+
+struct doRegister_args {
+    1: ScheduledMessageRegisterRequest request;
+}
+
+struct ScheduledMessageRegisterResponse {
+    1: i64 scheduledMessageId;
+    2: i64 registeredTime;
+}
+
+struct doRegister_result {
+    0: ScheduledMessageRegisterResponse success;
+    1: TalkException e;
+}
+
+struct ScheduledMessageGetByPaginationRequest {
+    1: i64 startScheduledMessageId;
+    2: i32 pageSize;
+}
+
+struct getByPagination_args {
+    1: ScheduledMessageGetByPaginationRequest request;
+}
+
+struct ScheduledMessage {
+    1: i64 scheduledMessageId;
+    2: Message message;
+    3: ScheduledMessageSchedule schedule;
+    4: i64 version;
+    5: i64 registeredTime;
+}
+
+struct ScheduledMessageGetByPaginationResponse {
+    1: list<ScheduledMessage> scheduledMessages;
+    2: i64 nextScheduledMessageId;
+    3: map<string, i32> lastE2EEKeyIds;
+}
+
+struct getByPagination_result {
+    0: ScheduledMessageGetByPaginationResponse success;
+    1: TalkException e;
+}
+
+struct ScheduledMessageUpdateRequest {
+    1: i32 reqSeq;
+    2: i64 scheduledMessageId;
+    3: ScheduledMessageRequest scheduledMessage;
+}
+
+struct update_args {
+    1: ScheduledMessageUpdateRequest request;
+}
+
+struct ScheduledMessageUpdateResponse {
+    1: i64 scheduledMessageId;
+}
+
+struct update_result {
+    0: ScheduledMessageUpdateResponse success;
+    1: TalkException e;
+}
+
+struct ScheduledMessageUnregisterRequest {
+    1: set<i64> scheduledMessageIds;
+}
+
+struct unregister_args {
+    1: ScheduledMessageUnregisterRequest request;
+}
+
+enum ScheduledMessageFailureCode {
+    INTERNAL_ERROR = 0
+}
+
+struct ScheduledMessageUnregisterResponse {
+    1: set<i64> succeededScheduledMessageIds;
+    2: map<i64, ScheduledMessageFailureCode> failedScheduledMessageIds;
+}
+
+struct unregister_result {
+    0: ScheduledMessageUnregisterResponse success;
+    1: TalkException e;
+}
+
+struct ScheduledMessageSendNowRequest {
+    1: i64 scheduledMessageId;
+    2: Message message;
+}
+
+struct sendNow_args {
+    1: ScheduledMessageSendNowRequest request;
+}
+
+struct ScheduledMessageSendNowResponse {
+
+}
+
+struct sendNow_result {
+    0: ScheduledMessageSendNowResponse success;
+    1: TalkException e;
+}
+
+struct ScheduledMessageE2eeReencryptRequest {
+    1: map<i64, Message> messages;
+}
+
+struct e2eeReencrypt_args {
+    1: ScheduledMessageE2eeReencryptRequest request;
+}
+
+struct ScheduledMessageE2eeReencryptResponse {
+
+}
+
+struct e2eeReencrypt_result {
+    0: ScheduledMessageE2eeReencryptResponse success;
+    1: TalkException e;
+}
+
+struct OpenSessionForPasskeyRegistrationRequest {
+
+}
+
+struct openSessionForPasskeyRegistration_args {
+    1: OpenSessionForPasskeyRegistrationRequest request;
+}
+
+struct OpenSessionForPasskeyRegistrationResponse {
+    1: string sessionId;
+}
+
+enum AccountPasskeyCommandExceptionCode {
+    INTERNAL_ERROR = 0,
+    ILLEGAL_ARGUMENT = 1,
+    INVALID_SESSION = 2,
+    FORBIDDEN = 3,
+    RETRY_LATER = 4,
+    MAX_PASSKEY_REGISTERED = 5,
+    EMAIL_NOT_REGISTERED = 6,
+    INVALID_CONTEXT = 100,
+    APP_UPGRADE_REQUIRED = 101
+}
+
+exception AccountPasskeyCommandException {
+    1: AccountPasskeyCommandExceptionCode code;
+    2: string alertMessage;
+}
+
+struct openSessionForPasskeyRegistration_result {
+    0: OpenSessionForPasskeyRegistrationResponse success;
+    1: AccountPasskeyCommandException apce;
+    2: TokenAuthException tae;
+}
+
+struct GetPasskeyRegistrationOptionsRequest {
+    1: string sessionId;
+}
+
+struct getPasskeyRegistrationOptions_args {
+    1: GetPasskeyRegistrationOptionsRequest request;
+}
+
+struct PasskeyPublicKeyCredentialRpEntity {
+    1: string id;
+    2: string name;
+}
+
+struct PasskeyPublicKeyCredentialUserEntity {
+    1: string id;
+    2: string name;
+    3: string displayName;
+}
+
+struct PasskeyAuthenticatorSelectionCriteria {
+    1: string authenticatorAttachment;
+    2: string residentKey;
+    3: bool requireResidentKey;
+    4: string userVerification;
+}
+
+struct AuthenticationExtensionsPRFValues {
+    1: string first;
+    2: string second;
+}
+
+struct AuthenticationExtensionsPRFInputs {
+    1: AuthenticationExtensionsPRFValues eval;
+    2: map<string, AuthenticationExtensionsPRFValues> evalByCredential;
+}
+
+struct PasskeyAuthenticationExtensionsClientInputs {
+    1: bool credProps;
+    2: string credentialProtectionPolicy;
+    3: bool enforceCredentialProtectionPolicy;
+    4: AuthenticationExtensionsPRFInputs prf;
+}
+
+struct PasskeyPublicKeyCredentialCreationOptions {
+    1: PasskeyPublicKeyCredentialRpEntity rp;
+    2: PasskeyPublicKeyCredentialUserEntity user;
+    3: string challenge;
+    4: list<PublicKeyCredentialParameters> pubKeyCredParams;
+    5: i64 timeout;
+    6: list<PublicKeyCredentialDescriptor> excludeCredentials;
+    7: PasskeyAuthenticatorSelectionCriteria authenticatorSelection;
+    8: list<string> hints;
+    9: string attestation;
+    10: list<string> attestationFormats;
+    11: PasskeyAuthenticationExtensionsClientInputs extensions;
+}
+
+struct CredentialCreationOptions {
+    1: string mediation;
+    2: PasskeyPublicKeyCredentialCreationOptions publicKey;
+}
+
+struct GetPasskeyRegistrationOptionsResponse {
+    1: CredentialCreationOptions credentialCreationOptions;
+}
+
+struct getPasskeyRegistrationOptions_result {
+    0: GetPasskeyRegistrationOptionsResponse success;
+    1: AccountPasskeyCommandException apce;
+    2: TokenAuthException tae;
+}
+
+struct PasskeyAuthenticatorAttestationResponse {
+    1: string clientDataJson;
+    2: string attestationObject;
+    3: list<string> transports;
+}
+
+struct CredentialPropertiesOutput {
+    1: bool rk;
+}
+
+struct AuthenticationExtensionsPRFOutputs {
+    1: bool enabled;
+}
+
+struct PasskeyAuthenticationExtensionsClientOutputs {
+    1: CredentialPropertiesOutput credProps;
+    2: AuthenticationExtensionsPRFOutputs prf;
+}
+
+struct RegistrationPublicKeyCredential {
+    1: string id;
+    2: string type;
+    3: PasskeyAuthenticatorAttestationResponse response;
+    4: string authenticatorAttachment;
+    5: PasskeyAuthenticationExtensionsClientOutputs clientExtensionResults;
+}
+
+struct RegisterPasskeyRequest {
+    1: string sessionId;
+    2: string passkeyName;
+    3: RegistrationPublicKeyCredential registrationPublicKeyCredential;
+}
+
+struct registerPasskey_args {
+    1: RegisterPasskeyRequest request;
+}
+
+struct RegisterPasskeyResponse {
+
+}
+
+struct registerPasskey_result {
+    0: RegisterPasskeyResponse success;
+    1: AccountPasskeyCommandException apce;
+    2: TokenAuthException tae;
+}
+
+struct UpdatePasskeyNameRequest {
+    1: string credentialId;
+    2: string passkeyName;
+}
+
+struct updatePasskeyName_args {
+    1: UpdatePasskeyNameRequest request;
+}
+
+struct UpdatePasskeyNameResponse {
+
+}
+
+struct updatePasskeyName_result {
+    0: UpdatePasskeyNameResponse success;
+    1: AccountPasskeyCommandException apce;
+    2: TokenAuthException tae;
+}
+
+struct DeletePasskeyRequest {
+    1: string credentialId;
+}
+
+struct deletePasskey_args {
+    1: DeletePasskeyRequest request;
+}
+
+struct DeletePasskeyResponse {
+
+}
+
+struct deletePasskey_result {
+    0: DeletePasskeyResponse success;
+    1: AccountPasskeyCommandException apce;
+    2: TokenAuthException tae;
+}
+
+struct GetPasskeysRequest {
+
+}
+
+struct getPasskeys_args {
+    1: GetPasskeysRequest request;
+}
+
+struct PasskeyCredential {
+    1: string credentialId;
+    2: string passkeyName;
+    3: i64 registeredAt;
+    4: i64 authenticatedAt;
+}
+
+struct GetPasskeysResponse {
+    1: list<PasskeyCredential> passkeys;
+}
+
+enum AccountAuthFactorQueryExceptionCode {
+    INTERNAL_ERROR = 0,
+    RETRY_LATER = 1,
+    INVALID_CONTEXT = 100,
+    APP_UPGRADE_REQUIRED = 101
+}
+
+exception AccountAuthFactorQueryException {
+    1: AccountAuthFactorQueryExceptionCode code;
+    2: string alertMessage;
+}
+
+struct getPasskeys_result {
+    0: GetPasskeysResponse success;
+    1: AccountAuthFactorQueryException aafqe;
+    2: TokenAuthException tae;
+}
+
+struct GetPasskeyAuthenticationOptionsRequest {
+    1: string sessionId;
+}
+
+struct getPasskeyAuthenticationOptions_args {
+    1: GetPasskeyAuthenticationOptionsRequest request;
+}
+
+struct PasskeyPublicKeyCredentialRequestOptions {
+    1: string challenge;
+    2: i64 timeout;
+    3: string rpId;
+    4: list<PublicKeyCredentialDescriptor> allowCredentials;
+    5: string userVerification;
+    6: list<string> hints;
+    7: PasskeyAuthenticationExtensionsClientInputs extensions;
+}
+
+struct CredentialRequestOptions {
+    1: string mediation;
+    2: PasskeyPublicKeyCredentialRequestOptions publicKey;
+}
+
+struct GetPasskeyAuthenticationOptionsResponse {
+    1: CredentialRequestOptions credentialRequestOptions;
+}
+
+enum PasskeyAccountMigrationExceptionCode {
+    INTERNAL_ERROR = 0,
+    ILLEGAL_ARGUMENT = 1,
+    INVALID_SESSION = 2,
+    FORBIDDEN = 3,
+    RETRY_LATER = 4,
+    VERIFICATION_FAILED = 5,
+    INVALID_CONTEXT = 100,
+    APP_UPGRADE_REQUIRED = 101
+}
+
+exception PasskeyAccountMigrationException {
+    1: PasskeyAccountMigrationExceptionCode code;
+    2: string alertMessage;
+}
+
+struct getPasskeyAuthenticationOptions_result {
+    0: GetPasskeyAuthenticationOptionsResponse success;
+    1: PasskeyAccountMigrationException e;
+}
+
+struct PasskeyAuthenticatorAssertionResponse {
+    1: string clientDataJson;
+    2: string authenticatorData;
+    3: string signature;
+    4: string userHandle;
+}
+
+struct AuthenticationPublicKeyCredential {
+    1: string id;
+    2: string type;
+    3: PasskeyAuthenticatorAssertionResponse response;
+    4: string authenticatorAttachment;
+    5: PasskeyAuthenticationExtensionsClientOutputs clientExtensionResults;
+}
+
+struct AuthenticatePasskeyRequest {
+    1: string sessionId;
+    2: AuthenticationPublicKeyCredential authenticationPublicKeyCredential;
+}
+
+struct authenticatePasskey_args {
+    1: AuthenticatePasskeyRequest request;
+}
+
+struct AuthenticatePasskeyResponse {
+    1: bool sameUdidFromAccount;
+}
+
+struct authenticatePasskey_result {
+    0: AuthenticatePasskeyResponse success;
+    1: PasskeyAccountMigrationException e;
+}
+
+struct MigratePrimaryUsingPasskeyRequest {
+    1: string sessionId;
+}
+
+struct migratePrimaryUsingPasskey_args {
+    1: MigratePrimaryUsingPasskeyRequest request;
+}
+
+struct MigratePrimaryUsingPasskeyResponse {
+    1: string mid;
+    2: TokenV3IssueResult tokenV3IssueResult;
+    3: TokenV1IssueResult tokenV1IssueResult;
+    4: CountryCode accountCountryCode;
+    5: FormattedPhoneNumbers formattedPhoneNumbers;
+}
+
+struct migratePrimaryUsingPasskey_result {
+    0: MigratePrimaryUsingPasskeyResponse success;
+    1: PasskeyAccountMigrationException e;
+}
+
+struct CreateSessionV2Request {
+    1: string mid;
+    2: string modelName;
+    3: string deviceUid;
+}
+
+struct createSessionV2_args {
+    1: CreateSessionV2Request request;
+}
+
+struct CreateSessionV2Response {
+    1: string authSessionId;
+    2: UserProfile userProfile;
+    3: list<I80_EnumC26394c> availableAuthFactors;
+    4: set<string> phoneVerifSupportedCountries;
+}
+
+enum AccountReloginExceptionCode {
+    INTERNAL_ERROR = 0,
+    ILLEGAL_ARGUMENT = 1,
+    VERIFICATION_FAILED = 2,
+    NOT_FOUND = 3,
+    RETRY_LATER = 4,
+    NO_AUTHENTICATION_METHOD_LEFT = 5,
+    INVALID_CONTEXT = 100,
+    APP_UPGRADE_REQUIRED = 101
+}
+
+exception AccountReloginException {
+    1: AccountReloginExceptionCode code;
+    2: string alertMessage;
+}
+
+struct createSessionV2_result {
+    0: CreateSessionV2Response success;
+    1: AccountReloginException e;
+}
+
+struct GetSSEncryptionKeyRequest {
+    1: string authSessionId;
+}
+
+struct getSSEncryptionKey_args {
+    1: GetSSEncryptionKeyRequest request;
+}
+
+struct SSEncryptionKey {
+    1: string keyMaterial;
+}
+
+struct GetSSEncryptionKeyResponse {
+    1: SSEncryptionKey encryptionKey;
+}
+
+exception AccountSSRestoreException {
+    1: T70_EnumC14406j code;
+    2: string alertMessage;
+    11: WebAuthDetails webAuthDetails;
+}
+
+struct getSSEncryptionKey_result {
+    0: GetSSEncryptionKeyResponse success;
+    1: AccountSSRestoreException e;
+}
+
+struct RegisterSSEncryptionKeyRequest {
+    1: string authSessionId;
+    2: SSEncryptionKey encryptionKey;
+}
+
+struct registerSSEncryptionKey_args {
+    1: RegisterSSEncryptionKeyRequest request;
+}
+
+struct RegisterSSEncryptionKeyResponse {
+
+}
+
+struct registerSSEncryptionKey_result {
+    0: RegisterSSEncryptionKeyResponse success;
+    1: AccountSSRestoreException e;
+    2: TokenAuthException tae;
+}
+
+struct RequestDeletePaidSquareRequest {
+    1: string squareMid;
+}
+
+struct RequestDeletePaidSquareResponse {
+    1: Square square;
+}
+
+struct SquareService_requestDeletePaidSquare_args {
+    1: RequestDeletePaidSquareRequest request;
+}
+
+struct SquareService_requestDeletePaidSquare_result {
+    0: RequestDeletePaidSquareResponse success;
+    1: SquareException e;
 }

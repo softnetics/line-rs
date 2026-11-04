@@ -12,6 +12,8 @@
 
 pub mod access_token_refresh;
 pub mod account_auth_factor_eap_connect;
+pub mod account_auth_factor_query;
+pub mod account_passkey_command;
 pub mod auth;
 pub mod bot_external;
 pub mod buddy;
@@ -28,6 +30,7 @@ pub mod moa;
 pub mod multi_profile;
 pub mod oa_chat;
 pub mod oa_membership;
+pub mod passkey_account_migration;
 pub mod password_update;
 pub mod premium_font;
 pub mod premium_product_definition;
@@ -41,6 +44,7 @@ pub mod primary_qr_code_migration_preparation;
 pub mod primary_seamless_login;
 pub mod pwless_primary_registration;
 pub mod relation;
+pub mod scheduled_message;
 pub mod secondary_pwless_login;
 pub mod secondary_seamless_login;
 pub mod settings;
@@ -140,6 +144,8 @@ macro_rules! services {
 services! {
     AccessTokenRefreshService => access_token_refresh, "/EXT/auth/tokenrefresh/v1", Compact;
     AccountAuthFactorEapConnectService => account_auth_factor_eap_connect, "/ACCT/authfactor/eap/v1", Compact;
+    AccountAuthFactorQueryService => account_auth_factor_query, "/EXT/auth/feature-user/thrift/account/auth-factor/v1/query", Compact;
+    AccountPasskeyCommandService => account_passkey_command, "/EXT/auth/feature-user/thrift/account/passkey/v1/command", Compact;
     AuthService => auth, "/AS4", Compact;
     BotExternalService => bot_external, "/BOTE", Compact;
     BuddyService => buddy, "/BUDDY4", Compact;
@@ -154,6 +160,7 @@ services! {
     MultiProfileService => multi_profile, "/PFS4", Compact;
     OaChatService => oa_chat, "/ext/oachat/api/", Compact;
     OaMembershipService => oa_membership, "/EXT/bot/oafan", Compact;
+    PasskeyAccountMigrationService => passkey_account_migration, "/ext/auth/feature-guest/thrift/account/v1/migrate/passkey", Compact;
     PasswordUpdateService => password_update, "/EXT/auth/feature-user/api/primary/password/update", Compact;
     PremiumFontService => premium_font, "/EXT/talk/asset-meta-server/thrift/fontService", Compact;
     PremiumProductDefinitionService => premium_product_definition, "/EXT/line-premium/common/thrift/product-definition", Compact;
@@ -167,6 +174,7 @@ services! {
     PrimarySeamlessLoginService => primary_seamless_login, "/EXT/auth/feature-user/api/secondary/login/seamless", Compact;
     PwlessPrimaryRegistrationService => pwless_primary_registration, "/ACCT/authfactor/pwless/v1", Compact;
     RelationService => relation, "/RE4", Compact;
+    ScheduledMessageService => scheduled_message, "/SCHD4", Compact;
     SecondaryPwlessLoginService => secondary_pwless_login, "/acct/lgn/secpwless/v1", Compact;
     SecondarySeamlessLoginService => secondary_seamless_login, "/ext/auth/feature-guest/api/secondary/login/seamless", Compact;
     SettingsService => settings, "/US4", Compact;
