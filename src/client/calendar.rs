@@ -74,7 +74,7 @@ impl Calendar {
 pub struct Event {
     pub id: String,
     pub calendar_id: String,
-    /// Start/end as epoch milliseconds.
+    /// Start/end as epoch seconds.
     pub start_time: i64,
     pub end_time: i64,
     pub timezone: String,
@@ -328,7 +328,7 @@ impl BaseClient {
 /// The fields of an event to create, or to replace on update. LINE's
 /// update takes the whole event, not a diff.
 ///
-/// Times are epoch milliseconds. An all-day event starts at midnight of its
+/// Times are epoch seconds. An all-day event starts at midnight of its
 /// first day in `timezone` and ends at midnight after its last day.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EventInput {
@@ -397,12 +397,14 @@ pub fn new_event_id() -> String {
     )
 }
 
-/// A `client_updated_at` the server accepts: now, but always later than the
-/// event's previous value (older ones fail with `CLIENT_UPDATED_AT_OUTDATED`).
+/// A `client_updated_at` the server accepts: now in epoch seconds, but always
+/// later than the event's previous value (older ones fail with
+/// `CLIENT_UPDATED_AT_OUTDATED`, and over a day ahead with
+/// `INVALID_CLIENT_UPDATED_AT`).
 fn next_client_updated_at(previous: i64) -> i64 {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
+        .map(|d| d.as_secs() as i64)
         .unwrap_or_default();
     now.max(previous + 1)
 }
@@ -622,9 +624,11 @@ mod tests {
 
     #[test]
     fn next_client_updated_at_is_always_later() {
-        let far = 10_i64.pow(15);
+        let far = 10_i64.pow(12);
         assert_eq!(next_client_updated_at(far), far + 1);
-        assert!(next_client_updated_at(0) > 1_700_000_000_000);
+        let now = next_client_updated_at(0);
+        // Seconds, not milliseconds: the server rejects a value over a day ahead.
+        assert!(now > 1_700_000_000 && now < 10_000_000_000, "{now}");
     }
 
     #[test]
