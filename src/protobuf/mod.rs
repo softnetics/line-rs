@@ -95,6 +95,13 @@ impl Writer {
         }
     }
 
+    /// A bool written even when false, for `optional` fields whose presence
+    /// matters.
+    pub fn bool_always(&mut self, field: u32, v: bool) {
+        self.tag(field, wire::VARINT);
+        self.put_varint(v as u64);
+    }
+
     pub fn string_always(&mut self, field: u32, v: &str) {
         self.bytes_always(field, v.as_bytes());
     }

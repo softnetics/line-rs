@@ -58,6 +58,10 @@ pub struct Config {
     /// [`crate::e2ee::send_recovery`]). Off by default: linejs only retries
     /// once with encryption when `e2ee` was unset.
     pub e2ee_send_recovery: bool,
+    /// `x-lal` on every request, e.g. `th_TH`. LINE writes the text it
+    /// generates (event cards, system messages, errors) in this language.
+    /// Default `th_TH`.
+    pub language: String,
 }
 
 impl Default for Config {
@@ -72,6 +76,7 @@ impl Default for Config {
             report_refreshed_token: false,
             apply_next_access: false,
             e2ee_send_recovery: false,
+            language: "th_TH".to_string(),
         }
     }
 }

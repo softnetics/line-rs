@@ -549,7 +549,7 @@ impl BaseClient {
                 self.device_details.application(),
             ),
             ("x-line-access".into(), verifier.to_string()),
-            ("x-lal".into(), "ja_JP".into()),
+            ("x-lal".into(), self.config.language.clone()),
             ("x-lpv".into(), "1".into()),
             ("x-lhm".into(), "GET".into()),
             ("accept-encoding".into(), "gzip".into()),

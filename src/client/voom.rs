@@ -168,7 +168,7 @@ impl Client {
             .header("X-Line-Application", base.device_details.application())
             .header("user-agent", base.device_details.user_agent())
             .header("X-Line-Mid", base.mid().unwrap_or_default())
-            .header("x-lal", "ja-JP")
+            .header("x-lal", base.config.language.replace('_', "-"))
             .header("X-Line-BDBTemplateVersion", "v1");
         req = match &opts.channel_token {
             Some(t) => req.header("X-Line-ChannelToken", t),

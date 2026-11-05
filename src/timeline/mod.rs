@@ -376,7 +376,7 @@ impl Timeline {
                         "application/json; charset=UTF-8".to_string(),
                     ),
                     ("x-line-application", d.application()),
-                    ("x-lal", "ja_JP".to_string()),
+                    ("x-lal", self.client.config.language.clone()),
                     ("x-lpv", "1".to_string()),
                 ])
             })

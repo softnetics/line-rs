@@ -123,7 +123,7 @@ impl BaseClient {
                 "content-type".to_string(),
                 "application/x-thrift".to_string(),
             ),
-            ("x-lal".to_string(), "ja_JP".to_string()),
+            ("x-lal".to_string(), self.config.language.clone()),
             ("x-lpv".to_string(), "1".to_string()),
             ("x-lhm".to_string(), method.to_string()),
             ("accept-encoding".to_string(), "gzip".to_string()),
@@ -431,6 +431,7 @@ impl BaseClient {
             for (k, v) in transport.outer_headers(
                 &self.device_details.application(),
                 &self.device_details.user_agent(),
+                &self.config.language,
                 method,
             ) {
                 req = req.header(k, v);
