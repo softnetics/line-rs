@@ -303,3 +303,24 @@ async fn fails_over_to_backup_host_on_connect_error() {
     get_profile(&c).await.unwrap();
     assert_eq!(seen.lock().unwrap().len(), 2);
 }
+
+#[test]
+fn x_lal_follows_the_configured_language() {
+    let lal = |c: &BaseClient| {
+        c.line_headers("getProfile")
+            .into_iter()
+            .find(|(k, _)| k == "x-lal")
+            .map(|(_, v)| v)
+    };
+    let storage = || Arc::new(MemoryStorage::new());
+    let default = client_with("legy.example", storage(), crate::base::Config::default());
+    assert_eq!(lal(&default).as_deref(), Some("th_TH"));
+    let japanese = crate::base::Config {
+        language: "ja_JP".into(),
+        ..Default::default()
+    };
+    assert_eq!(
+        lal(&client_with("legy.example", storage(), japanese)).as_deref(),
+        Some("ja_JP")
+    );
+}

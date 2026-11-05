@@ -99,7 +99,7 @@ pub struct LiffViewOptions {
     pub chat_mid: Option<String>,
     /// Defaults to the client's default LIFF id.
     pub liff_id: Option<String>,
-    /// Defaults to `ja_JP`.
+    /// Defaults to the client's [`Config::language`](crate::base::Config::language).
     pub lang: Option<String>,
 }
 
@@ -162,7 +162,9 @@ impl Liff<'_> {
         let args = issue_liff_view_args(
             &liff_id,
             opts.chat_mid.as_deref(),
-            opts.lang.as_deref().unwrap_or("ja_JP"),
+            opts.lang
+                .as_deref()
+                .unwrap_or(&self.client.base.config.language),
         );
         self.client
             .base

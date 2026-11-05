@@ -175,7 +175,7 @@ impl BaseClient {
                 "x-line-system-version".to_string(),
                 d.system_version.clone(),
             ),
-            ("x-lal".to_string(), "ja_JP".to_string()),
+            ("x-lal".to_string(), self.config.language.clone()),
         ];
         if let Some(token) = self.auth_token() {
             h.push(("x-line-access".to_string(), token));

@@ -127,6 +127,7 @@ impl LegyEncryptedTransport {
         &self,
         application: &str,
         user_agent: &str,
+        language: &str,
         method: &str,
     ) -> Vec<(&'static str, String)> {
         vec![
@@ -137,7 +138,7 @@ impl LegyEncryptedTransport {
             ("x-lcs", self.x_lcs().to_string()),
             ("user-agent", user_agent.to_string()),
             ("content-type", "application/x-thrift".to_string()),
-            ("x-lal", "ja_JP".to_string()),
+            ("x-lal", language.to_string()),
             ("x-lhm", method.to_string()),
             ("accept", "application/x-thrift".to_string()),
             ("accept-encoding", "gzip, deflate".to_string()),

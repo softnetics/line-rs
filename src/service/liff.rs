@@ -24,7 +24,7 @@ pub struct LiffViewOptions {
     pub liff_id: String,
     /// Chat (`u`/`c`/`r`) or square chat mid to open the view in.
     pub chat_mid: Option<String>,
-    /// Default `ja_JP`.
+    /// Default: the client's [`Config::language`](crate::base::Config::language).
     pub lang: Option<String>,
     /// Try to grant consent on `CONSENT_REQUIRED` (default `true`; token only).
     pub try_consent: Option<bool>,
@@ -142,7 +142,10 @@ impl LiffService<'_> {
         let args = issue_liff_view_args(
             &options.liff_id,
             options.chat_mid.as_deref(),
-            options.lang.as_deref().unwrap_or("ja_JP"),
+            options
+                .lang
+                .as_deref()
+                .unwrap_or(&self.0.client.config.language),
         );
         self.request("issueLiffView", args, Parse::Result).await
     }
