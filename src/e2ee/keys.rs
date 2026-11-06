@@ -486,7 +486,11 @@ impl<'a> E2ee<'a> {
 
     /// ECDH against the key creator's public key, then AES-256-CBC over the
     /// wrapped shared key; the result is cached under both group slots.
-    async fn unwrap_group_shared_key(&self, chat_mid: &str, shared: &Value) -> Result<GroupKey> {
+    pub(super) async fn unwrap_group_shared_key(
+        &self,
+        chat_mid: &str,
+        shared: &Value,
+    ) -> Result<GroupKey> {
         let group_key_id = key_id_of(&shared["groupKeyId"])
             .ok_or_else(|| Error::internal("NoE2EEKey", format!("no group key for {chat_mid}")))?;
         let creator = shared["creator"].as_str().unwrap_or_default();

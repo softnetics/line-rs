@@ -274,14 +274,3 @@ pub(crate) fn enum_name(v: &Value, enum_name: &str) -> Option<String> {
         _ => None,
     }
 }
-
-/// Numeric value of an enum given by name or number.
-pub(crate) fn enum_value(v: &Value, enum_name: &str) -> Option<i32> {
-    match v {
-        Value::String(s) => Schema::line()
-            .get_enum(enum_name)
-            .and_then(|e| e.value_of(s))
-            .or_else(|| s.parse().ok()),
-        other => other.as_i64().map(|i| i as i32),
-    }
-}
