@@ -30,7 +30,7 @@ pub mod timeline;
 pub use base::{BaseClient, ClientEvent, LegyMode};
 pub use client::Client;
 pub use device::Device;
-pub use error::{Error, Result};
+pub use error::{Error, ErrorCode, Result};
 pub use link::LineLink;
 pub use thrift::Value;
 

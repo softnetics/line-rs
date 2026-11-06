@@ -1047,6 +1047,7 @@ dependencies = [
  "hmac",
  "http",
  "indexmap",
+ "libc",
  "md5",
  "num-bigint-dig",
  "qrcode",
