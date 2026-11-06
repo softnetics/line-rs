@@ -7,10 +7,36 @@ use super::types::{
 };
 use super::utils::{Content, MessageInput, fetch_bytes, reply_target, type_error};
 use crate::client::Client;
-use crate::e2ee::E2eeContent;
+use crate::e2ee::{E2eeContent, E2eeSendOptions};
 use crate::error::Result;
 use crate::thrift::Value;
 use crate::tv;
+
+/// The `Message` for an edit of `raw`: no text or chunks yet, `toType`
+/// filled in (the `sendMessage` echo can omit it, and `editMessage` requires
+/// it), and the metadata without the E2EE keys and empty values (as
+/// `i31/c.java#d` drops `e2eeVersion`). `MENTION` and the rest stay.
+fn edit_base(raw: &Value, to: &str) -> Value {
+    let mut edited = raw.clone();
+    if edited["toType"].is_null()
+        && let Some(t) = crate::base::BaseClient::get_to_type(to)
+    {
+        edited.insert("toType", t);
+    }
+    edited.insert("text", Value::Null);
+    edited.insert("chunks", Value::Null);
+    let metadata: crate::thrift::Map = raw["contentMetadata"]
+        .entries()
+        .into_iter()
+        .filter(|(k, v)| {
+            !matches!(k.as_str(), "e2eeVersion" | "contentType" | "e2eeMark")
+                && v.as_str().is_some_and(|s| !s.is_empty())
+        })
+        .map(|(k, v)| (k, v.clone()))
+        .collect();
+    edited.insert("contentMetadata", Value::Struct(metadata));
+    edited
+}
 
 /// A talk message. `raw` is the (decrypted) thrift `Message`.
 #[derive(Clone)]
@@ -235,36 +261,66 @@ impl TalkMessage {
     }
 
     /// Replace the text of one of our text messages (`editMessage`; gated by
-    /// LINE/LYP Premium server-side). An E2EE message is re-encrypted for the
-    /// same recipient: plaintext edits of Letter Sealing messages are refused
-    /// like plain sends (`E2EE_RETRY_ENCRYPT`).
+    /// LINE/LYP Premium server-side), as LINE for Android's
+    /// `EditMessageSender` does (`i31/c.java`): the old metadata is kept
+    /// (`MENTION` included) without the E2EE keys, and the text is encrypted
+    /// again when the original was, or when the chat now uses Letter Sealing
+    /// for text. `E2EE_*` errors are recovered like sends, with one
+    /// `reqSeq`, for at most [`crate::e2ee::MAX_E2EE_SEND_ATTEMPTS`]
+    /// attempts.
     pub async fn edit(&self, text: &str) -> Result<Value> {
         if !self.is_my_message() {
             return Err(type_error("Cannot edit the message which is not yours."));
         }
-        let mut edited = self.raw.clone();
-        // The sendMessage echo can omit `toType`, which editMessage requires
-        // ("toType field is required").
-        if edited["toType"].is_null()
-            && let Some(t) = crate::base::BaseClient::get_to_type(&self.to().id)
-        {
-            edited.insert("toType", t);
-        }
-        if self.raw["chunks"].as_list().is_some_and(|c| !c.is_empty()) {
-            let chunks = self
-                .client
-                .base
-                .encrypt_e2ee_message(&self.to().id, E2eeContent::Text(text.to_string()), 0, 2)
-                .await?;
-            edited.insert(
-                "chunks",
-                Value::List(chunks.into_iter().map(Value::Binary).collect()),
-            );
-            edited.insert("text", Value::Null);
-        } else {
-            edited.insert("text", text);
-        }
-        self.client.base.talk().edit_message(edited).await
+        let to = self.to().id;
+        let base = &self.client.base;
+        let edited = edit_base(&self.raw, &to);
+        let was_sealed = self.raw["chunks"].as_list().is_some_and(|c| !c.is_empty());
+        let options = E2eeSendOptions {
+            content_type: 0,
+            e2ee: was_sealed.then_some(true),
+            req_seq: None,
+        };
+        let (edited, to_ref) = (&edited, to.as_str());
+        base.run_with_e2ee_recovery(
+            to_ref,
+            options,
+            |attempt| async move {
+                let mut message = edited.clone();
+                if attempt.encrypt {
+                    let chunks = base
+                        .encrypt_e2ee_message_for(
+                            to_ref,
+                            E2eeContent::Text(text.to_string()),
+                            0,
+                            &attempt.state,
+                        )
+                        .await?;
+                    message.insert(
+                        "chunks",
+                        Value::List(chunks.into_iter().map(Value::Binary).collect()),
+                    );
+                    if let Some(Value::Struct(meta)) = message.get_mut("contentMetadata") {
+                        meta.insert(
+                            "e2eeVersion".into(),
+                            attempt.state.spec_version.max(1).to_string().into(),
+                        );
+                        meta.insert("contentType".into(), "0".into());
+                    }
+                } else {
+                    message.insert("text", text);
+                }
+                Ok(message)
+            },
+            |req_seq, message| async move {
+                let mut req = tv!({ "reqSeq": req_seq });
+                req.insert("message", message);
+                let mut args = Value::object();
+                args.insert("req", req);
+                base.talk().call("editMessage", args).await
+            },
+        )
+        .await
     }
 
     /// Unsend the message (must be ours).
@@ -272,10 +328,11 @@ impl TalkMessage {
         if !self.is_my_message() {
             return Err(type_error("Cannot unsend the message which is not yours."));
         }
+        let seq = self.client.base.get_reqseq("talk").await?;
         self.client
             .base
             .talk()
-            .call("unsendMessage", tv!({"messageId": self.id()}))
+            .call("unsendMessage", tv!({"seq": seq, "messageId": self.id()}))
             .await?;
         Ok(())
     }
@@ -380,6 +437,29 @@ mod tests {
 
     fn message(raw: Value) -> TalkMessage {
         TalkMessage::new(client(), raw)
+    }
+
+    #[test]
+    fn edit_drops_e2ee_keys_and_keeps_mentions() {
+        let mention = r#"{"MENTIONEES":[{"S":"0","E":"3","M":"u-them"}]}"#;
+        let mut raw = tv!({"id": "1", "from": "u-self", "to": "c-group", "text": "old"});
+        raw.insert(
+            "contentMetadata",
+            Value::Map(vec![
+                ("e2eeVersion".into(), "2".into()),
+                ("contentType".into(), "0".into()),
+                ("e2eeMark".into(), "2".into()),
+                ("MENTION".into(), mention.into()),
+                ("EMPTY".into(), "".into()),
+            ]),
+        );
+        raw.insert("chunks", Value::List(vec![Value::Binary(vec![1])]));
+        let edited = edit_base(&raw, "c-group");
+        assert_eq!(edited["toType"].as_i64(), Some(2));
+        assert!(edited["text"].is_null() && edited["chunks"].is_null());
+        let meta = edited["contentMetadata"].string_map();
+        assert_eq!(meta.keys().collect::<Vec<_>>(), ["MENTION"]);
+        assert_eq!(meta["MENTION"], mention);
     }
 
     #[test]
