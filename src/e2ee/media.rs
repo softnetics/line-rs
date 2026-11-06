@@ -12,6 +12,9 @@
 //!   then be checked on its own against a separate *hash object*
 //!   `SHA256(c0) ‖ SHA256(c1) ‖ … ‖ HMAC`, stored next to the media as
 //!   `<oid>__ud-hash`, so a download can be validated while it streams.
+//!   LINE for Android reads that object as the digests alone and takes the
+//!   HMAC from the media file's trailer; [`ChunkHashes::parse`] accepts
+//!   both.
 //!
 //! Derived from static RE of LINE macOS 26.5.0 (`CommLib::E2EEHMACHelper`,
 //! `E2EEChunkedHMACValidator`, `E2EEChunkValidator`, the `FileEncryption`
@@ -296,10 +299,39 @@ pub struct ChunkHashes {
 }
 
 impl ChunkHashes {
-    /// Parse `SHA256(c0) ‖ … ‖ HMAC` and check its HMAC
-    /// (`E2EEHMACHelper` over everything but the last 32 bytes).
-    pub fn parse(object: &[u8], mac_key: &[u8]) -> Result<Self> {
-        if object.len() < MEDIA_HMAC_LEN || !object.len().is_multiple_of(MEDIA_HMAC_LEN) {
+    /// Parse a `__ud-hash` object and check it against `mac_key`. Two
+    /// layouts are accepted:
+    ///
+    /// * `SHA256(c0) ‖ SHA256(c1) ‖ …`, as LINE for Android reads it: the
+    ///   HMAC of the whole object must equal the media file's own trailing
+    ///   HMAC, `file_hmac`, which the app fetches with a Range request for
+    ///   the last 32 bytes (`kc8/d`, `kc8/j`, `zx3/a` → `xx3/g.a`).
+    /// * `SHA256(c0) ‖ … ‖ HMAC`, as read from LINE for macOS
+    ///   (`E2EEHMACHelper` over everything but the last 32 bytes); when
+    ///   `file_hmac` is given it must match that trailer too.
+    pub fn parse(object: &[u8], mac_key: &[u8], file_hmac: Option<&[u8]>) -> Result<Self> {
+        if !object.len().is_multiple_of(MEDIA_HMAC_LEN) {
+            return Err(media_error(format!(
+                "invalid chunk hash object length {}",
+                object.len()
+            )));
+        }
+        let digests = |body: &[u8]| -> Vec<[u8; 32]> {
+            body.chunks(MEDIA_HMAC_LEN)
+                .map(|h| h.try_into().expect("exact 32-byte chunks"))
+                .collect()
+        };
+        if let Some(file_hmac) = file_hmac {
+            let mut mac = hmac(mac_key);
+            mac.update(object);
+            if mac.verify_slice(file_hmac).is_ok() {
+                return Ok(Self {
+                    hashes: digests(object),
+                    hmac: file_hmac.to_vec(),
+                });
+            }
+        }
+        if object.len() < MEDIA_HMAC_LEN {
             return Err(media_error(format!(
                 "invalid chunk hash object length {}",
                 object.len()
@@ -308,14 +340,11 @@ impl ChunkHashes {
         let (body, tag) = object.split_at(object.len() - MEDIA_HMAC_LEN);
         let mut mac = hmac(mac_key);
         mac.update(body);
-        mac.verify_slice(tag)
-            .map_err(|_| media_error("chunk hash object HMAC verification failed"))?;
-        let hashes = body
-            .chunks(MEDIA_HMAC_LEN)
-            .map(|h| h.try_into().expect("exact 32-byte chunks"))
-            .collect();
+        if mac.verify_slice(tag).is_err() || file_hmac.is_some_and(|f| f != tag) {
+            return Err(media_error("chunk hash object HMAC verification failed"));
+        }
         Ok(Self {
-            hashes,
+            hashes: digests(body),
             hmac: tag.to_vec(),
         })
     }
@@ -532,7 +561,7 @@ mod tests {
         let enc = encrypt_media(&raw, Some(&km), MediaHmacVersion::V2);
         let mac_key = derive_key_material(&km).mac_key;
         let object = enc.hash_object.clone().unwrap();
-        let hashes = ChunkHashes::parse(&object, &mac_key).unwrap();
+        let hashes = ChunkHashes::parse(&object, &mac_key, None).unwrap();
         assert_eq!(hashes.len(), 4);
         assert_eq!(hashes.hmac(), &enc.data[enc.data.len() - 32..]);
         assert!(hashes.check_chunk(0, &enc.data[..MEDIA_CHUNK_SIZE]));
@@ -552,8 +581,35 @@ mod tests {
 
         let mut bad_object = object.clone();
         bad_object[0] ^= 1;
-        assert!(ChunkHashes::parse(&bad_object, &mac_key).is_err());
-        assert!(ChunkHashes::parse(&object[..40], &mac_key).is_err());
-        assert!(ChunkHashes::parse(&object, &[0; 32]).is_err());
+        assert!(ChunkHashes::parse(&bad_object, &mac_key, None).is_err());
+        assert!(ChunkHashes::parse(&object[..40], &mac_key, None).is_err());
+        assert!(ChunkHashes::parse(&object, &[0; 32], None).is_err());
+    }
+
+    #[test]
+    fn chunk_hash_object_in_the_android_layout() {
+        // LINE for Android stores the digests only; the HMAC is the media
+        // file's trailer.
+        let raw = sample(2 * MEDIA_CHUNK_SIZE + 9);
+        let km = [8u8; 32];
+        let enc = encrypt_media(&raw, Some(&km), MediaHmacVersion::V2);
+        let mac_key = derive_key_material(&km).mac_key;
+        let object = enc.hash_object.unwrap();
+        let digests = &object[..object.len() - MEDIA_HMAC_LEN];
+        let trailer = &enc.data[enc.data.len() - MEDIA_HMAC_LEN..];
+
+        let hashes = ChunkHashes::parse(digests, &mac_key, Some(trailer)).unwrap();
+        assert_eq!(hashes.len(), 3);
+        assert_eq!(hashes.hmac(), trailer);
+        hashes.check_file(&enc.data).unwrap();
+        // The combined layout still parses, and must agree with the file.
+        assert_eq!(
+            ChunkHashes::parse(&object, &mac_key, Some(trailer)).unwrap(),
+            hashes
+        );
+        assert!(ChunkHashes::parse(&object, &mac_key, Some(&[0; 32])).is_err());
+        // Without the file's HMAC the digests alone cannot be checked.
+        assert!(ChunkHashes::parse(digests, &mac_key, None).is_err());
+        assert!(ChunkHashes::parse(digests, &[1; 32], Some(trailer)).is_err());
     }
 }
