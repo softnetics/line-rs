@@ -249,6 +249,28 @@ impl Client {
             .collect())
     }
 
+    /// Groups we are invited to but have not joined
+    /// (`getAllChatMids` with `withInvitedChats`, as `wf3/e.java` asks).
+    pub async fn fetch_invited_chats(&self) -> Result<Vec<Chat>> {
+        let res = self
+            .base
+            .talk()
+            .call(
+                "getAllChatMids",
+                tv!({"request": {"withMemberChats": false, "withInvitedChats": true}, "syncReason": "INTERNAL"}),
+            )
+            .await?;
+        let mids: Vec<Value> = list(&res["invitedChatMids"]);
+        if mids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let res = self.get_chats(Value::List(mids)).await?;
+        Ok(list(&res["chats"])
+            .into_iter()
+            .map(|raw| Chat::new(self.clone(), raw))
+            .collect())
+    }
+
     async fn get_chats(&self, mids: Value) -> Result<Value> {
         let mut request = tv!({"withInvitees": true, "withMembers": true});
         request.insert("chatMids", mids);

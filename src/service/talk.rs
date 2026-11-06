@@ -419,15 +419,16 @@ impl TalkService<'_> {
         }
     }
 
-    /// Invite users into a group chat.
+    /// Invite users into a group chat. `reqSeq` auto.
     pub async fn invite_into_chat(
         &self,
         chat_mid: &str,
         target_user_mids: &[String],
     ) -> Result<Value> {
+        let seq = self.client.get_reqseq("talk").await?;
         self.call(
             "inviteIntoChat",
-            crate::tv!({"request": {"targetUserMids": target_user_mids, "chatMid": chat_mid}}),
+            crate::tv!({"request": {"reqSeq": seq, "targetUserMids": target_user_mids, "chatMid": chat_mid}}),
         )
         .await
     }

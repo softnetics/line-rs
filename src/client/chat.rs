@@ -25,6 +25,56 @@ pub(crate) fn chat_marker_args(seq: i64, chat_mid: &str, last_message_id: &str) 
     tv!({"seq": seq, "chatMid": chat_mid, "lastMessageId": last_message_id, "sessionId": 0})
 }
 
+/// The link an announcement of a message points at, as LINE for Android
+/// builds it (`qk8/a.java`).
+pub fn announcement_link(chat_mid: &str, message_id: &str) -> String {
+    format!("line://nv/chatMsg?chatId={chat_mid}&messageId={message_id}")
+}
+
+/// `createChatRoomAnnouncement` arguments for announcing a message: type
+/// `MESSAGE`, `displayFields` 5 and a link to the message, as `sk8/a.java`
+/// and `ts8/r6.java` set them.
+pub(crate) fn announce_args(req_seq: i64, chat_mid: &str, message_id: &str, text: &str) -> Value {
+    tv!({
+        "reqSeq": req_seq,
+        "chatRoomMid": chat_mid,
+        "type": "MESSAGE",
+        "contents": {
+            "displayFields": 5,
+            "text": text,
+            "link": announcement_link(chat_mid, message_id),
+        },
+    })
+}
+
+/// A group write request (`inviteIntoChat`, `deleteOtherFromChat`,
+/// `cancelChatInvitation`, `acceptChatInvitation`, `rejectChatInvitation`,
+/// `deleteSelfFromChat`): LINE for Android sends a `reqSeq` with each
+/// (`wf3/e.java`). `targets` is left out when `None`.
+pub(crate) fn group_request_args(req_seq: i64, chat_mid: &str, targets: Option<&[&str]>) -> Value {
+    let mut request = tv!({"reqSeq": req_seq, "chatMid": chat_mid});
+    if let Some(t) = targets {
+        request.insert("targetUserMids", mid_list(t));
+    }
+    let mut args = Value::object();
+    args.insert("request", request);
+    args
+}
+
+fn mid_list(mids: &[&str]) -> Value {
+    Value::List(mids.iter().map(|m| Value::from(*m)).collect())
+}
+
+/// `createChat` arguments for a group (`type` GROUP) with `name` and the
+/// users to invite.
+pub(crate) fn create_group_args(req_seq: i64, name: &str, targets: &[&str]) -> Value {
+    let mut request = tv!({"reqSeq": req_seq, "type": "GROUP", "name": name});
+    request.insert("targetUserMids", mid_list(targets));
+    let mut args = Value::object();
+    args.insert("request", request);
+    args
+}
+
 /// A talk chat (group), not an OpenChat. `raw` is the thrift `Chat`.
 #[derive(Clone)]
 pub struct Chat {
@@ -261,6 +311,20 @@ impl Chat {
         Ok(list(&res))
     }
 
+    /// Announce a message: pin `text` at the top of the chat with a link
+    /// back to `message_id`, as LINE's apps do on a long-pressed message.
+    pub async fn announce(&self, message_id: &str, text: &str) -> Result<Value> {
+        let seq = self.client.base.get_reqseq("talk").await?;
+        self.client
+            .base
+            .talk()
+            .call(
+                "createChatRoomAnnouncement",
+                announce_args(seq, self.mid(), message_id, text),
+            )
+            .await
+    }
+
     /// Remove an announcement by its `announcementSeq`.
     pub async fn remove_announcement(&self, announcement_seq: i64) -> Result<Value> {
         let seq = self.client.base.get_reqseq("talk").await?;
@@ -291,37 +355,57 @@ impl Chat {
             .find(|r| r["chatId"].as_str() == Some(self.mid())))
     }
 
+    async fn group_call(&self, method: &str, targets: Option<&[&str]>) -> Result<Value> {
+        let seq = self.client.base.get_reqseq("talk").await?;
+        self.client
+            .base
+            .talk()
+            .call(method, group_request_args(seq, self.mid(), targets))
+            .await
+    }
+
+    /// Invite users into the group (`inviteIntoChat`).
     pub async fn invite(&self, mids: &[&str]) -> Result<Value> {
-        self.client
-            .base
-            .talk()
-            .call(
-                "inviteIntoChat",
-                tv!({"request": {"targetUserMids": mids, "chatMid": self.mid()}}),
-            )
-            .await
+        self.group_call("inviteIntoChat", Some(mids)).await
     }
 
+    /// Remove a member from the group (`deleteOtherFromChat`).
     pub async fn kick(&self, mid: &str) -> Result<Value> {
-        self.client
-            .base
-            .talk()
-            .call(
-                "deleteOtherFromChat",
-                tv!({"request": {"targetUserMids": [mid], "chatMid": self.mid()}}),
-            )
-            .await
+        self.kick_many(&[mid]).await
     }
 
+    /// Remove several members at once (`deleteOtherFromChat`).
+    pub async fn kick_many(&self, mids: &[&str]) -> Result<Value> {
+        self.group_call("deleteOtherFromChat", Some(mids)).await
+    }
+
+    /// Withdraw invitations that were not accepted yet
+    /// (`cancelChatInvitation`).
+    pub async fn cancel_invitation(&self, mids: &[&str]) -> Result<Value> {
+        self.group_call("cancelChatInvitation", Some(mids)).await
+    }
+
+    /// Join a group we were invited to (`acceptChatInvitation`).
+    pub async fn accept_invitation(&self) -> Result<Value> {
+        self.group_call("acceptChatInvitation", None).await
+    }
+
+    /// Decline an invitation (`rejectChatInvitation`).
+    pub async fn reject_invitation(&self) -> Result<Value> {
+        self.group_call("rejectChatInvitation", None).await
+    }
+
+    /// Leave the group (`deleteSelfFromChat` with only `reqSeq` and
+    /// `chatMid`, as the Android app sends it).
     pub async fn leave(&self) -> Result<Value> {
-        self.client
-            .base
-            .talk()
-            .call(
-                "deleteSelfFromChat",
-                tv!({"request": {"chatMid": self.mid()}}),
-            )
-            .await
+        self.group_call("deleteSelfFromChat", None).await
+    }
+
+    /// Whether we are only invited (we are in `inviteeMids`, not
+    /// `memberMids`). Needs the chat fetched with invitees.
+    pub fn is_invitation(&self, my_mid: &str) -> bool {
+        let extra = &self.raw["extra"]["groupExtra"];
+        extra["memberMids"].get(my_mid).is_none() && extra["inviteeMids"].get(my_mid).is_some()
     }
 
     /// The latest `limit` messages.
@@ -402,6 +486,18 @@ fn now_ms() -> i64 {
 }
 
 impl Client {
+    /// Create a group named `name` and invite `mids` to it
+    /// (`createChat` with type GROUP).
+    pub async fn create_group(&self, name: &str, mids: &[&str]) -> Result<Chat> {
+        let seq = self.base.get_reqseq("talk").await?;
+        let res = self
+            .base
+            .talk()
+            .call("createChat", create_group_args(seq, name, mids))
+            .await?;
+        Ok(Chat::new(self.clone(), res["chat"].clone()))
+    }
+
     /// Send a `linepostback://` URL to a chat's bot without a message, as a
     /// rich-menu tap does (see [`postback`](crate::client::postback)).
     pub async fn send_postback(&self, chat_mid: &str, url: &str) -> Result<Value> {
@@ -494,6 +590,7 @@ mod tests {
     use super::*;
     use crate::base::BaseClient;
     use crate::device::Device;
+    use crate::thrift::TValue;
 
     #[test]
     fn marker_args() {
@@ -515,6 +612,72 @@ mod tests {
             ),
             (Some(4), Some("c1"), Some("77"))
         );
+    }
+
+    #[test]
+    fn announce_args_match_the_app() {
+        use crate::service::test_util::{encode, path, s};
+        let a = encode(
+            "createChatRoomAnnouncement_args",
+            &announce_args(7, "c1", "9007199254740993", "hi"),
+        );
+        assert_eq!(path(&a, &[1]), Some(&TValue::I32(7)));
+        assert_eq!(path(&a, &[2]), Some(&s("c1")));
+        assert_eq!(path(&a, &[3]), Some(&TValue::I32(0)));
+        assert_eq!(path(&a, &[4, 1]), Some(&TValue::I32(5)));
+        assert_eq!(path(&a, &[4, 2]), Some(&s("hi")));
+        assert_eq!(
+            path(&a, &[4, 3]),
+            Some(&s("line://nv/chatMsg?chatId=c1&messageId=9007199254740993"))
+        );
+    }
+
+    #[test]
+    fn group_writes_carry_req_seq() {
+        use crate::service::test_util::{encode, path, s};
+        for method in [
+            "inviteIntoChat",
+            "deleteOtherFromChat",
+            "cancelChatInvitation",
+        ] {
+            let a = encode(
+                &format!("{method}_args"),
+                &group_request_args(3, "c1", Some(&["u1", "u2"])),
+            );
+            assert_eq!(path(&a, &[1, 1]), Some(&TValue::I32(3)), "{method}");
+            assert_eq!(path(&a, &[1, 2]), Some(&s("c1")));
+            assert!(
+                matches!(path(&a, &[1, 3]), Some(TValue::Set(_, v)) if v.len() == 2),
+                "{method}"
+            );
+        }
+        for method in [
+            "acceptChatInvitation",
+            "rejectChatInvitation",
+            "deleteSelfFromChat",
+        ] {
+            let a = encode(
+                &format!("{method}_args"),
+                &group_request_args(4, "c1", None),
+            );
+            assert_eq!(path(&a, &[1, 1]), Some(&TValue::I32(4)), "{method}");
+            assert_eq!(path(&a, &[1, 3]), None);
+        }
+        let c = encode("createChat_args", &create_group_args(5, "team", &["u1"]));
+        assert_eq!(path(&c, &[1, 2]), Some(&TValue::I32(0)));
+        assert_eq!(path(&c, &[1, 3]), Some(&s("team")));
+        assert!(matches!(path(&c, &[1, 4]), Some(TValue::Set(_, v)) if v.len() == 1));
+    }
+
+    #[test]
+    fn invitation_is_read_from_group_extra() {
+        let client = Client::new(BaseClient::new(Device::Android).unwrap());
+        let invited = Chat::new(
+            client.clone(),
+            tv!({"chatMid": "c1", "extra": {"groupExtra": {"memberMids": {"u2": 1}, "inviteeMids": {"u1": 2}}}}),
+        );
+        assert!(invited.is_invitation("u1"));
+        assert!(!invited.is_invitation("u2"));
     }
 
     // 2^53 + 1 is not representable as an f64; the cursor must stay exact and
