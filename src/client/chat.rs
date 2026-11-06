@@ -523,14 +523,15 @@ impl Client {
 
     /// Chats in the message request box (messages from people who are not
     /// friends), with the time of each one's latest request: every page of
-    /// `getMessageRequestBoxList` for PEER, GROUP and ROOM chats, as the
-    /// app's full sync reads them (`zd2/l.java`). LINE's chat list leaves
+    /// `getMessageRequestBoxList` for PEER and GROUP chats, as the app's
+    /// full sync reads them (`zd2/l.java`; the server refuses ROOM with
+    /// "unexpected chat type"). LINE's chat list leaves
     /// these chats out until the user accepts them
     /// (`updateChatStatusBulk` with `trusted`).
     pub async fn message_request_chats(&self) -> Result<Vec<(String, i64)>> {
         let talk = self.base.talk();
         let mut out = Vec::new();
-        for kind in ["PEER", "GROUP", "ROOM"] {
+        for kind in ["PEER", "GROUP"] {
             let mut token: Option<String> = None;
             for _ in 0..50 {
                 let res = talk
