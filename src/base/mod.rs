@@ -381,9 +381,10 @@ impl BaseClient {
     }
 
     /// Whether a server error made with this client's token means the
-    /// session is gone (see [`LogoutReason::from_error`]).
+    /// session is gone ([`LogoutReason::from_error_for`], with the extra
+    /// codes for secondary devices when this client is one).
     pub fn logout_reason(&self, e: &Error) -> Option<LogoutReason> {
-        LogoutReason::from_error(e)
+        LogoutReason::from_error_for(e, session::is_secondary_device(self.device))
     }
 
     /// Host requests currently go to (primary or a backup after failover).

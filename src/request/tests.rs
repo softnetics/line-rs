@@ -469,6 +469,21 @@ async fn kicked_out_session_stops_the_client() {
 }
 
 #[tokio::test]
+async fn authentication_failed_ends_a_secondary_session() {
+    // TalkException { code: AUTHENTICATION_FAILED (1) }
+    let (endpoint, _seen) = serve(vec![reply(
+        "getProfile",
+        vec![(1, TValue::Struct(vec![(1, TValue::I32(1))]))],
+    )])
+    .await;
+    let c = client(&endpoint, Arc::new(MemoryStorage::new()));
+    let err = get_profile(&c).await.unwrap_err();
+    assert_eq!(err.code(), Some("AUTHENTICATION_FAILED"));
+    assert_eq!(c.kicked_out(), Some(LogoutReason::AuthenticationFailed));
+    assert!(c.is_disabled());
+}
+
+#[tokio::test]
 async fn fails_over_to_backup_host_on_connect_error() {
     // A port nothing listens on.
     let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
