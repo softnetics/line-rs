@@ -102,7 +102,12 @@ fn rest(base: &str) -> RestClient {
     c.set_auth_token(Some("ACCESS".into()));
     c.set_profile(Some(crate::tv!({"mid": "u-self", "regionCode": "TH"})));
     let r = c.rest().with_base_url(base);
-    for ch in [channels::KEEP, channels::MYHOME, channels::TIMELINE] {
+    for ch in [
+        channels::KEEP,
+        channels::MYHOME,
+        channels::TIMELINE,
+        channels::TRANSLATE,
+    ] {
         r.set_channel_token(ch, format!("TOKEN-{ch}"));
     }
     r
@@ -314,7 +319,31 @@ async fn translate_request() {
         ("POST", "/ds/translate/legyTransAPI.nhn")
     );
     assert_eq!(s[0].header("x-line-translate-from"), Some("line_desktop"));
-    assert_eq!(s[0].header("x-line-channeltoken"), Some("TOKEN-1341209950"));
+    assert_eq!(s[0].header("x-line-channeltoken"), Some("TOKEN-1627632136"));
     assert_eq!(s[0].header("x-line-access"), Some("ACCESS"));
     assert_eq!(s[0].json()["originalText"], "hello");
+}
+
+#[tokio::test]
+async fn translate_falls_back_to_the_timeline_token() {
+    let (base, seen) = serve(vec![
+        (401, r#"{"code":401,"message":"UNAUTHORIZED"}"#),
+        (200, r#"{"translatedText":"a"}"#),
+        (200, r#"{"translatedText":"b"}"#),
+    ])
+    .await;
+    let r = rest(&base);
+    let t = TranslateText::new("x", "th");
+    assert_eq!(r.translate(&t, None).await.unwrap()["translatedText"], "a");
+    assert_eq!(r.translate(&t, None).await.unwrap()["translatedText"], "b");
+    let s = seen.lock().unwrap();
+    let tokens: Vec<_> = s.iter().map(|x| x.header("x-line-channeltoken")).collect();
+    assert_eq!(
+        tokens,
+        [
+            Some("TOKEN-1627632136"),
+            Some("TOKEN-1341209950"),
+            Some("TOKEN-1341209950")
+        ]
+    );
 }
