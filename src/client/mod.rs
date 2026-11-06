@@ -28,6 +28,7 @@ pub mod message;
 pub mod postback;
 mod premium;
 mod profile;
+pub mod settings;
 mod square;
 mod user;
 pub mod voom;

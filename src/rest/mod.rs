@@ -106,6 +106,8 @@ pub mod channels {
     pub const PRIVATE_NOTE: &str = "1655599932";
     /// Square note (`opennote`).
     pub const OPEN_NOTE: &str = "1657618623";
+    /// Translation, as LINE for Android uses it (`ds3/b.java`).
+    pub const TRANSLATE: &str = "1627632136";
 }
 
 /// How a request authenticates (on top of `X-Line-Access`).
@@ -200,6 +202,8 @@ pub struct RestClient {
     client: BaseClient,
     base_url: Option<String>,
     tokens: Mutex<HashMap<String, String>>,
+    /// The translate channel failed once; translate with the timeline token.
+    translate_fallback: std::sync::atomic::AtomicBool,
 }
 
 impl BaseClient {
@@ -215,6 +219,7 @@ impl RestClient {
             client,
             base_url: None,
             tokens: Mutex::new(HashMap::new()),
+            translate_fallback: Default::default(),
         }
     }
 

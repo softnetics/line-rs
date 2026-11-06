@@ -155,6 +155,10 @@ pub enum TalkEvent {
     ContactAdded { mid: String, by_me: bool },
     /// `BLOCK_CONTACT` (`blocked`) / `UNBLOCK_CONTACT`, done by us.
     ContactBlocked { mid: String, blocked: bool },
+    /// `UPDATE_SETTINGS`: account settings changed (on any device). The
+    /// `SettingsAttributeEx` ids to fetch again; see
+    /// [`settings::NOTIFICATION_ATTRIBUTES`](super::settings::NOTIFICATION_ATTRIBUTES).
+    SettingsUpdated { attributes: Vec<i32> },
 }
 
 fn split_mids(s: &str) -> Vec<String> {
@@ -240,6 +244,9 @@ impl TalkEvent {
             },
             // The Android app ignores the op unless param3 is "0" or "1"
             // (`SEND_CHAT_HIDDEN.kt`).
+            "UPDATE_SETTINGS" => TalkEvent::SettingsUpdated {
+                attributes: super::settings::updated_setting_attributes(&p(3)),
+            },
             "SEND_CHAT_HIDDEN" => TalkEvent::ChatHidden {
                 chat_mid: p(1),
                 last_message_id: p(2),
@@ -524,6 +531,12 @@ mod tests {
                 chat_mid: s("c1"),
                 reader_mid: s("u1"),
                 message_id: s("100")
+            })
+        );
+        assert_eq!(
+            ev(tv!({"type": 36, "param3": "0\u{1e}40"})),
+            Some(TalkEvent::SettingsUpdated {
+                attributes: vec![0, 40]
             })
         );
         assert_eq!(

@@ -5,18 +5,21 @@
 //! [`crate::protobuf`]; see that module for why there is no codegen.
 //!
 //! Covers listing calendars and events, and creating, updating and deleting
-//! events (`EventService/CreateEvents`, `UpdateEvents`, `DeleteEvents`).
-//! Recurrence, invitees, reminders and RSVP (`InvitationService`) are not
-//! done yet.
+//! events (`EventService/CreateEvents`, `UpdateEvents`, `DeleteEvents`),
+//! with their recurrence, changed occurrences, invitees and reminders;
+//! getting or making a chat's calendar (`CalendarService/GetChatCalendar`,
+//! `CreateChatCalendar`); and answering an invitation
+//! (`InvitationService/RespondToInvitation`).
 
 use crate::base::BaseClient;
 use crate::error::{Error, Result};
 use crate::grpc::{self, GrpcRequest};
-use crate::protobuf::{Reader, Writer};
+use crate::protobuf::{Reader, Value, Writer, repeated_varints};
 use crate::tv;
 
 const CALENDAR_SERVICE: &str = "/line.calendar.bff.CalendarService";
 const EVENT_SERVICE: &str = "/line.calendar.bff.EventService";
+const INVITATION_SERVICE: &str = "/line.calendar.bff.InvitationService";
 
 /// The LINE Calendar internal channel id (the production `realId` from the
 /// app's channel table). The gRPC services authenticate with a channel access
@@ -31,7 +34,8 @@ pub struct Calendar {
     pub name: String,
     pub is_visible: bool,
     pub is_favorite: bool,
-    /// Raw `type` enum value (0 = personal, chat types are non-zero).
+    /// Raw `CalendarType`: [`CALENDAR_PERSONAL`] (1) or
+    /// [`CALENDAR_CHATROOM`] (2); 0 is unspecified.
     pub kind: i32,
     pub color_id: i32,
     /// Group/room/user mid for a chat calendar; empty for a personal one.
@@ -40,8 +44,17 @@ pub struct Calendar {
     pub client_updated_at: i64,
     pub created_at: i64,
     pub is_reminder_enabled: bool,
+    /// The calendar the app made for the user on first use.
+    pub is_initial: bool,
+    /// False for a calendar the user has hidden from the calendar list.
     pub is_shown_in_calendar_list: bool,
+    pub to_app_id: String,
 }
+
+/// [`Calendar::kind`] of the user's own calendars.
+pub const CALENDAR_PERSONAL: i32 = 1;
+/// [`Calendar::kind`] of a chat's calendar.
+pub const CALENDAR_CHATROOM: i32 = 2;
 
 impl Calendar {
     /// Decodes a `line.calendar.bff.Calendar` message.
@@ -61,7 +74,267 @@ impl Calendar {
                 11 => c.client_updated_at = f.value.as_i64()?,
                 12 => c.created_at = f.value.as_i64()?,
                 13 => c.is_reminder_enabled = f.value.as_bool()?,
+                14 => c.is_initial = f.value.as_bool()?,
                 15 => c.is_shown_in_calendar_list = f.value.as_bool()?,
+                16 => c.to_app_id = f.value.as_str()?.to_string(),
+                _ => {}
+            }
+        }
+        Ok(c)
+    }
+}
+
+/// How often a recurring event repeats (`Recurrence.frequency`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Frequency {
+    #[default]
+    Unspecified,
+    Daily,
+    Weekly,
+    Monthly,
+    Yearly,
+    /// A value this library doesn't know.
+    Other(i32),
+}
+
+impl Frequency {
+    pub fn from_raw(v: i32) -> Self {
+        match v {
+            0 => Self::Unspecified,
+            1 => Self::Daily,
+            2 => Self::Weekly,
+            3 => Self::Monthly,
+            4 => Self::Yearly,
+            v => Self::Other(v),
+        }
+    }
+
+    pub fn raw(self) -> i32 {
+        match self {
+            Self::Unspecified => 0,
+            Self::Daily => 1,
+            Self::Weekly => 2,
+            Self::Monthly => 3,
+            Self::Yearly => 4,
+            Self::Other(v) => v,
+        }
+    }
+}
+
+/// How an event repeats (`line.calendar.bff.Recurrence`), an iCalendar
+/// RRULE in parts: the app turns it into `FREQ=…;INTERVAL=…;UNTIL=…;BYDAY=…`
+/// and expands it with ical4j.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Recurrence {
+    pub frequency: Frequency,
+    /// Every `interval` days/weeks/months/years; 0 or 1 is every one.
+    pub interval: u32,
+    /// The last moment an occurrence may start, epoch seconds (UTC).
+    pub until: Option<i64>,
+    /// iCalendar weekdays: `MO`…`SU` for a weekly event, or an ordinal and a
+    /// day such as `2TU` or `-1FR` for "the second Tuesday" / "the last
+    /// Friday" of a monthly one. Empty means the start's own day.
+    pub by_day: Vec<String>,
+    /// Occurrences left out of the series, by their original start (epoch
+    /// seconds, the same value as [`ChildEvent::recur_id`]).
+    pub except_ids: Vec<i64>,
+}
+
+impl Recurrence {
+    fn decode(buf: &[u8]) -> Result<Self> {
+        let mut out = Recurrence::default();
+        let mut r = Reader::new(buf);
+        while let Some(f) = r.next_field()? {
+            match f.number {
+                1 => out.frequency = Frequency::from_raw(f.value.as_i32()?),
+                2 => out.interval = f.value.as_u64()? as u32,
+                3 => out.until = Some(f.value.as_i64()?),
+                4 => out.by_day.push(f.value.as_str()?.to_string()),
+                5 => out
+                    .except_ids
+                    .extend(repeated_varints(f.value)?.into_iter().map(|v| v as i64)),
+                _ => {}
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// When LINE reminds the user of an event (`line.calendar.bff.Reminder`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reminder {
+    OneHourBefore,
+    TwoHoursBefore,
+    OneDayBefore,
+    TwoDaysBefore,
+    /// At 12:00 on the day before.
+    NoonTheDayBefore,
+    /// At 12:00 two days before.
+    NoonTwoDaysBefore,
+    /// A value this library doesn't know (kept so an edit sends it back).
+    Other(i32),
+}
+
+impl Reminder {
+    pub fn from_raw(v: i32) -> Self {
+        match v {
+            1 => Self::OneHourBefore,
+            2 => Self::NoonTheDayBefore,
+            3 => Self::TwoHoursBefore,
+            4 => Self::OneDayBefore,
+            5 => Self::TwoDaysBefore,
+            6 => Self::NoonTwoDaysBefore,
+            v => Self::Other(v),
+        }
+    }
+
+    pub fn raw(self) -> i32 {
+        match self {
+            Self::OneHourBefore => 1,
+            Self::NoonTheDayBefore => 2,
+            Self::TwoHoursBefore => 3,
+            Self::OneDayBefore => 4,
+            Self::TwoDaysBefore => 5,
+            Self::NoonTwoDaysBefore => 6,
+            Self::Other(v) => v,
+        }
+    }
+}
+
+/// An invitee's answer (`line.calendar.bff.InvitationStatus`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum InvitationStatus {
+    #[default]
+    Unspecified,
+    NeedsAction,
+    Accepted,
+    Declined,
+    Other(i32),
+}
+
+impl InvitationStatus {
+    pub fn from_raw(v: i32) -> Self {
+        match v {
+            0 => Self::Unspecified,
+            1 => Self::NeedsAction,
+            2 => Self::Accepted,
+            3 => Self::Declined,
+            v => Self::Other(v),
+        }
+    }
+
+    pub fn raw(self) -> i32 {
+        match self {
+            Self::Unspecified => 0,
+            Self::NeedsAction => 1,
+            Self::Accepted => 2,
+            Self::Declined => 3,
+            Self::Other(v) => v,
+        }
+    }
+}
+
+/// Someone invited to an event, and their answer.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Invitee {
+    /// The invitee's mid.
+    pub invitee_id: String,
+    pub status: InvitationStatus,
+    pub client_updated_at: i64,
+}
+
+impl Invitee {
+    fn decode(buf: &[u8]) -> Result<Self> {
+        let mut out = Invitee::default();
+        let mut r = Reader::new(buf);
+        while let Some(f) = r.next_field()? {
+            match f.number {
+                1 => out.invitee_id = f.value.as_str()?.to_string(),
+                3 => out.status = InvitationStatus::from_raw(f.value.as_i32()?),
+                4 => out.client_updated_at = f.value.as_i64()?,
+                _ => {}
+            }
+        }
+        Ok(out)
+    }
+}
+
+fn reminders(value: Value<'_>) -> Result<Vec<Reminder>> {
+    Ok(repeated_varints(value)?
+        .into_iter()
+        .map(|v| Reminder::from_raw(v as i32))
+        .collect())
+}
+
+/// `AppReminder { offset = 1 (packed int32) }`: the app's own reminder
+/// offsets. The unit is not known (minutes, probably); they are kept only
+/// so that an edit sends them back unchanged.
+fn app_reminders(buf: &[u8]) -> Result<Vec<i32>> {
+    let mut out = Vec::new();
+    let mut r = Reader::new(buf);
+    while let Some(f) = r.next_field()? {
+        if f.number == 1 {
+            out.extend(repeated_varints(f.value)?.into_iter().map(|v| v as i32));
+        }
+    }
+    Ok(out)
+}
+
+/// One occurrence of a recurring event that was changed on its own
+/// (`line.calendar.bff.RecurrenceChildEvent`). It replaces the occurrence
+/// that would have started at [`recur_id`](Self::recur_id).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ChildEvent {
+    /// The original start of the occurrence it replaces, epoch seconds.
+    pub recur_id: i64,
+    pub start_time: i64,
+    pub end_time: i64,
+    pub timezone: String,
+    pub title: String,
+    pub is_all_day: bool,
+    pub location: String,
+    pub url: String,
+    pub description: String,
+    pub invitees: Vec<Invitee>,
+    pub reminders: Vec<Reminder>,
+    /// The occurrence was deleted.
+    pub is_deleted: bool,
+    pub message_id: Option<String>,
+    pub client_updated_at: i64,
+    pub is_editable_in_line_calendar: bool,
+    pub creator_id: String,
+    pub color_id: i32,
+    pub app_reminders: Option<Vec<i32>>,
+    pub stamp_id: String,
+    pub created_at: i64,
+}
+
+impl ChildEvent {
+    fn decode(buf: &[u8]) -> Result<Self> {
+        let mut c = ChildEvent::default();
+        let mut r = Reader::new(buf);
+        while let Some(f) = r.next_field()? {
+            match f.number {
+                1 => c.start_time = f.value.as_i64()?,
+                2 => c.end_time = f.value.as_i64()?,
+                3 => c.timezone = f.value.as_str()?.to_string(),
+                4 => c.title = f.value.as_str()?.to_string(),
+                5 => c.is_all_day = f.value.as_bool()?,
+                6 => c.location = f.value.as_str()?.to_string(),
+                7 => c.url = f.value.as_str()?.to_string(),
+                8 => c.description = f.value.as_str()?.to_string(),
+                9 => c.invitees.push(Invitee::decode(f.value.as_bytes()?)?),
+                10 => c.reminders.extend(reminders(f.value)?),
+                11 => c.is_deleted = f.value.as_bool()?,
+                12 => c.message_id = Some(f.value.as_str()?.to_string()),
+                13 => c.recur_id = f.value.as_i64()?,
+                14 => c.client_updated_at = f.value.as_i64()?,
+                15 => c.is_editable_in_line_calendar = f.value.as_bool()?,
+                16 => c.creator_id = f.value.as_str()?.to_string(),
+                17 => c.color_id = f.value.as_i32()?,
+                18 => c.app_reminders = Some(app_reminders(f.value.as_bytes()?)?),
+                19 => c.stamp_id = f.value.as_str()?.to_string(),
+                20 => c.created_at = f.value.as_i64()?,
                 _ => {}
             }
         }
@@ -74,7 +347,8 @@ impl Calendar {
 pub struct Event {
     pub id: String,
     pub calendar_id: String,
-    /// Start/end as epoch seconds.
+    /// Start/end as epoch seconds. For a recurring event, the first
+    /// occurrence.
     pub start_time: i64,
     pub end_time: i64,
     pub timezone: String,
@@ -83,13 +357,22 @@ pub struct Event {
     pub location: String,
     pub url: String,
     pub description: String,
+    /// How the event repeats; `None` for a one-off.
+    pub recurrence: Option<Recurrence>,
+    pub invitees: Vec<Invitee>,
+    pub reminders: Vec<Reminder>,
     pub is_deleted: bool,
     /// The chat message this event was created from, if any.
-    pub message_id: String,
+    pub message_id: Option<String>,
+    /// Occurrences of a recurring event changed or deleted on their own.
+    pub recurrence_child_events: Vec<ChildEvent>,
     pub client_updated_at: i64,
     pub is_editable_in_line_calendar: bool,
     pub creator_id: String,
     pub color_id: i32,
+    /// See [`ChildEvent::app_reminders`].
+    pub app_reminders: Option<Vec<i32>>,
+    pub stamp_id: String,
     pub created_at: i64,
 }
 
@@ -110,12 +393,20 @@ impl Event {
                 8 => e.location = f.value.as_str()?.to_string(),
                 9 => e.url = f.value.as_str()?.to_string(),
                 10 => e.description = f.value.as_str()?.to_string(),
+                11 => e.recurrence = Some(Recurrence::decode(f.value.as_bytes()?)?),
+                12 => e.invitees.push(Invitee::decode(f.value.as_bytes()?)?),
+                13 => e.reminders.extend(reminders(f.value)?),
                 14 => e.is_deleted = f.value.as_bool()?,
-                15 => e.message_id = f.value.as_str()?.to_string(),
+                15 => e.message_id = Some(f.value.as_str()?.to_string()),
+                16 => e
+                    .recurrence_child_events
+                    .push(ChildEvent::decode(f.value.as_bytes()?)?),
                 17 => e.client_updated_at = f.value.as_i64()?,
                 18 => e.is_editable_in_line_calendar = f.value.as_bool()?,
                 19 => e.creator_id = f.value.as_str()?.to_string(),
                 20 => e.color_id = f.value.as_i32()?,
+                21 => e.app_reminders = Some(app_reminders(f.value.as_bytes()?)?),
+                22 => e.stamp_id = f.value.as_str()?.to_string(),
                 23 => e.created_at = f.value.as_i64()?,
                 _ => {}
             }
@@ -126,10 +417,23 @@ impl Event {
 
 impl BaseClient {
     /// A channel access token for the LINE Calendar channel, for the
-    /// `x-line-channeltoken` header. Tries `issueChannelToken` and falls back
-    /// to `approveChannelAndIssueChannelToken` (first use grants consent, as
+    /// `x-line-channeltoken` header. Kept until its `expiration`, as the app
+    /// keeps it (`ak8/m`); `fresh` issues a new one regardless. Issuing
+    /// tries `issueChannelToken` and falls back to
+    /// `approveChannelAndIssueChannelToken` (first use grants consent, as
     /// the app does automatically for this first-party channel).
-    async fn calendar_channel_token(&self) -> Result<String> {
+    ///
+    /// The cache lock is held while issuing, so calls made at once (every
+    /// calendar of the all-calendars view) share one token.
+    async fn calendar_channel_token(&self, fresh: bool) -> Result<String> {
+        let mut cache = self.calendar_token.lock().await;
+        let now = now_ms();
+        if !fresh
+            && let Some((token, expires)) = cache.as_ref()
+            && token_usable(*expires, now)
+        {
+            return Ok(token.clone());
+        }
         let args = tv!({ "channelId": CALENDAR_CHANNEL_ID });
         let token = match self.channel().issue_channel_token(args.clone()).await {
             Ok(t) => t,
@@ -145,14 +449,17 @@ impl BaseClient {
             .as_str()
             .filter(|s| !s.is_empty())
             .or_else(|| token["token"].as_str())
-            .unwrap_or_default();
-        Ok(value.to_string())
+            .unwrap_or_default()
+            .to_string();
+        let expires = token["expiration"].as_i64().unwrap_or_default();
+        *cache = (!value.is_empty()).then(|| (value.clone(), cache_until(expires, now)));
+        Ok(value)
     }
 
     /// gRPC metadata headers: the same identity headers as a Thrift call, but
     /// split out the way the app sends them for gRPC (not the tab-joined
     /// `x-line-application`), plus the LINE Calendar channel token.
-    async fn grpc_headers(&self) -> Result<Vec<(String, String)>> {
+    async fn grpc_headers(&self, fresh_token: bool) -> Result<Vec<(String, String)>> {
         let d = &self.device_details;
         let mut h = vec![
             ("user-agent".to_string(), d.user_agent()),
@@ -182,37 +489,140 @@ impl BaseClient {
         }
         h.push((
             "x-line-channeltoken".to_string(),
-            self.calendar_channel_token().await?,
+            self.calendar_channel_token(fresh_token).await?,
         ));
         Ok(h)
     }
 
-    async fn grpc_unary(&self, path: &str, body: &[u8]) -> Result<bytes::Bytes> {
-        let headers = self.grpc_headers().await?;
-        let mut msgs = grpc::call(GrpcRequest {
-            host: self.current_endpoint(),
-            path,
-            headers: &headers,
-            body,
+    /// One LINE Calendar call, decoded by `decode`. When the server turns
+    /// down the channel token (`AUTHENTICATION_REQUIRED`, or gRPC
+    /// `UNAUTHENTICATED`), the token is issued again and the call made once
+    /// more.
+    async fn calendar_call<T>(
+        &self,
+        path: &str,
+        body: &[u8],
+        decode: impl Fn(Vec<bytes::Bytes>) -> Result<T>,
+    ) -> Result<T> {
+        let mut fresh = false;
+        loop {
+            let headers = self.grpc_headers(fresh).await?;
+            let result = grpc::call(GrpcRequest {
+                host: self.current_endpoint(),
+                path,
+                headers: &headers,
+                body,
+            })
+            .await
+            .and_then(&decode);
+            match result {
+                Err(e) if !fresh && is_token_error(&e) => fresh = true,
+                other => return other,
+            }
+        }
+    }
+
+    async fn grpc_unary<T>(
+        &self,
+        path: &str,
+        body: &[u8],
+        decode: impl Fn(&[u8]) -> Result<T>,
+    ) -> Result<T> {
+        self.calendar_call(path, body, |mut msgs| {
+            decode(&msgs.drain(..).next().unwrap_or_default())
         })
-        .await?;
-        Ok(msgs.drain(..).next().unwrap_or_default())
+        .await
     }
 
     /// `CalendarService/ListAllCalendars`: every calendar the user can see.
     pub async fn list_all_calendars(&self) -> Result<Vec<Calendar>> {
         let path = format!("{CALENDAR_SERVICE}/ListAllCalendars");
         // Request is empty (a bare ListAllCalendarsRequest).
-        let resp = self.grpc_unary(&path, &[]).await?;
         // Response: { meta = 1, calendars = repeated 2 }.
-        let mut out = Vec::new();
-        let mut r = Reader::new(&resp);
-        while let Some(f) = r.next_field()? {
-            if f.number == 2 {
-                out.push(Calendar::decode(f.value.as_bytes()?)?);
+        self.grpc_unary(&path, &[], |resp| {
+            let mut out = Vec::new();
+            let mut r = Reader::new(resp);
+            while let Some(f) = r.next_field()? {
+                if f.number == 2 {
+                    out.push(Calendar::decode(f.value.as_bytes()?)?);
+                }
             }
+            Ok(out)
+        })
+        .await
+    }
+
+    /// `CalendarService/GetChatCalendar`: the calendar of chat
+    /// `chatroom_id` (`{ chatroom_id = 1 }` → `{ meta = 1, calendar = 2 }`),
+    /// or `None` when the chat has none yet.
+    pub async fn get_chat_calendar(&self, chatroom_id: &str) -> Result<Option<Calendar>> {
+        let mut w = Writer::new();
+        w.string_always(1, chatroom_id);
+        let path = format!("{CALENDAR_SERVICE}/GetChatCalendar");
+        let result = self
+            .grpc_unary(&path, w.as_bytes(), |resp| calendar_field(resp, 2))
+            .await;
+        match result {
+            Err(e) if is_not_found(&e) => Ok(None),
+            other => other,
         }
-        Ok(out)
+    }
+
+    /// `CalendarService/CreateChatCalendar`: makes chat `chatroom_id`'s
+    /// calendar (`{ chatroom_id = 1 }` → `{ calendar = 1 }`).
+    pub async fn create_chat_calendar(&self, chatroom_id: &str) -> Result<Calendar> {
+        let mut w = Writer::new();
+        w.string_always(1, chatroom_id);
+        let path = format!("{CALENDAR_SERVICE}/CreateChatCalendar");
+        self.grpc_unary(&path, w.as_bytes(), |resp| calendar_field(resp, 1))
+            .await?
+            .ok_or_else(|| Error::internal("CalendarCreateChatCalendar", "no calendar returned"))
+    }
+
+    /// Chat `chatroom_id`'s calendar, made first if the chat has none. Call
+    /// it before the first write to a chat's calendar, as the app gets or
+    /// creates the calendar before it adds an event.
+    pub async fn ensure_chat_calendar(&self, chatroom_id: &str) -> Result<Calendar> {
+        match self.get_chat_calendar(chatroom_id).await? {
+            Some(c) => Ok(c),
+            None => self.create_chat_calendar(chatroom_id).await,
+        }
+    }
+
+    /// `InvitationService/RespondToInvitation`: answer an invitation to
+    /// event `event_id` in chat `chatroom_id`. `recur_id` picks one
+    /// occurrence of a recurring event ([`ChildEvent::recur_id`]); `None`
+    /// answers for the event. `previous_updated_at` is the user's
+    /// [`Invitee::client_updated_at`]. Returns the calendar's new
+    /// `event_updated_at`.
+    pub async fn respond_to_invitation(
+        &self,
+        chatroom_id: &str,
+        event_id: &str,
+        recur_id: Option<i64>,
+        status: InvitationStatus,
+        previous_updated_at: i64,
+    ) -> Result<i64> {
+        let body = respond_request(
+            chatroom_id,
+            event_id,
+            recur_id,
+            status,
+            next_client_updated_at(previous_updated_at),
+        );
+        let path = format!("{INVITATION_SERVICE}/RespondToInvitation");
+        self.grpc_unary(&path, &body, |resp| {
+            // { event_updated_at = 1 }
+            let mut r = Reader::new(resp);
+            let mut at = 0;
+            while let Some(f) = r.next_field()? {
+                if f.number == 1 {
+                    at = f.value.as_i64()?;
+                }
+            }
+            Ok(at)
+        })
+        .await
     }
 
     /// `EventService/CreateEvents` with one event. `id` comes from
@@ -228,10 +638,10 @@ impl BaseClient {
     ) -> Result<i64> {
         let body = event.encode(id, Write::Create, next_client_updated_at(0), notify_chat);
         let path = format!("{EVENT_SERVICE}/CreateEvents");
-        let resp = self
-            .grpc_unary(&path, &write_request(target, &[body]))
-            .await?;
-        write_response("CreateEvents", &resp)
+        self.grpc_unary(&path, &write_request(target, &[body]), |resp| {
+            write_response("CreateEvents", resp)
+        })
+        .await
     }
 
     /// `EventService/UpdateEvents`: replaces event `id` with `event`.
@@ -251,10 +661,10 @@ impl BaseClient {
             notify_chat,
         );
         let path = format!("{EVENT_SERVICE}/UpdateEvents");
-        let resp = self
-            .grpc_unary(&path, &write_request(target, &[body]))
-            .await?;
-        write_response("UpdateEvents", &resp)
+        self.grpc_unary(&path, &write_request(target, &[body]), |resp| {
+            write_response("UpdateEvents", resp)
+        })
+        .await
     }
 
     /// `EventService/DeleteEvents` with one event:
@@ -273,10 +683,10 @@ impl BaseClient {
             w.bool_always(3, n);
         }
         let path = format!("{EVENT_SERVICE}/DeleteEvents");
-        let resp = self
-            .grpc_unary(&path, &write_request(target, &[w.into_bytes()]))
-            .await?;
-        write_response("DeleteEvents", &resp)
+        self.grpc_unary(&path, &write_request(target, &[w.into_bytes()]), |resp| {
+            write_response("DeleteEvents", resp)
+        })
+        .await
     }
 
     /// `EventService/ListEventsStream`: events for one calendar (by calendar
@@ -296,37 +706,33 @@ impl BaseClient {
         }
         w.int64(3, client_last_get_time);
 
-        let headers = self.grpc_headers().await?;
         let path = format!("{EVENT_SERVICE}/ListEventsStream");
-        let chunks = grpc::call(GrpcRequest {
-            host: self.current_endpoint(),
-            path: &path,
-            headers: &headers,
-            body: w.as_bytes(),
-        })
-        .await?;
-
-        // Each streamed message: { meta = 1, chunk = 2 { events = repeated 1 } }.
-        let mut out = Vec::new();
-        for msg in chunks {
-            let mut r = Reader::new(&msg);
-            while let Some(f) = r.next_field()? {
-                if f.number == 2 {
-                    let mut chunk = f.value.as_message()?;
-                    while let Some(cf) = chunk.next_field()? {
-                        if cf.number == 1 {
-                            out.push(Event::decode(cf.value.as_bytes()?)?);
+        self.calendar_call(&path, w.as_bytes(), |chunks| {
+            // Each streamed message: { meta = 1, chunk = 2 { events = repeated 1 } }.
+            let mut out = Vec::new();
+            for msg in chunks {
+                let mut r = Reader::new(&msg);
+                while let Some(f) = r.next_field()? {
+                    if f.number == 2 {
+                        let mut chunk = f.value.as_message()?;
+                        while let Some(cf) = chunk.next_field()? {
+                            if cf.number == 1 {
+                                out.push(Event::decode(cf.value.as_bytes()?)?);
+                            }
                         }
                     }
                 }
             }
-        }
-        Ok(out)
+            Ok(out)
+        })
+        .await
     }
 }
 
 /// The fields of an event to create, or to replace on update. LINE's
-/// update takes the whole event, not a diff.
+/// update takes the whole event, not a diff: build an edit with
+/// [`EventInput::from_event`] so the fields you don't touch go back as they
+/// were.
 ///
 /// Times are epoch seconds. An all-day event starts at midnight of its
 /// first day in `timezone` and ends at midnight after its last day.
@@ -342,12 +748,52 @@ pub struct EventInput {
     pub url: String,
     pub description: String,
     pub color_id: i32,
+    /// How the event repeats. On update, LINE for Android sends the rule
+    /// without `except_ids` (the server keeps the series' exceptions), and
+    /// so does this.
+    pub recurrence: Option<Recurrence>,
+    pub reminders: Vec<Reminder>,
+    /// Invitee mids the event should have.
+    pub invitees: Vec<String>,
+    /// The invitees the event had when fetched. An update sends what was
+    /// added to and removed from this list (`add_invitees`,
+    /// `remove_invitees`); a create ignores it.
+    pub original_invitees: Vec<String>,
+    /// The chat message the event was made from.
+    pub message_id: Option<String>,
+    pub stamp_id: String,
+    /// See [`Event::app_reminders`].
+    pub app_reminders: Option<Vec<i32>>,
 }
 
 impl EventInput {
-    /// The `line.calendar.bff` create/update event message. Both share
-    /// fields 1 to 9; client_updated_at and the notify flag differ (create:
-    /// 15 and 16, update: 16 and 17) and colour too (create 17, update 18).
+    /// The event as it is, ready to change and send back with
+    /// [`BaseClient::update_event`].
+    pub fn from_event(e: &Event) -> Self {
+        let invitees: Vec<String> = e.invitees.iter().map(|i| i.invitee_id.clone()).collect();
+        EventInput {
+            title: e.title.clone(),
+            start_time: e.start_time,
+            end_time: e.end_time,
+            timezone: e.timezone.clone(),
+            is_all_day: e.is_all_day,
+            location: e.location.clone(),
+            url: e.url.clone(),
+            description: e.description.clone(),
+            color_id: e.color_id,
+            recurrence: e.recurrence.clone(),
+            reminders: e.reminders.clone(),
+            original_invitees: invitees.clone(),
+            invitees,
+            message_id: e.message_id.clone(),
+            stamp_id: e.stamp_id.clone(),
+            app_reminders: e.app_reminders.clone(),
+        }
+    }
+
+    /// The `line.calendar.bff` create (`CreateEvent`) or update
+    /// (`UpdateEvent`) message. Both share fields 1 to 10; from there the
+    /// update has one more invitee list, so the rest sit one number later.
     fn encode(
         &self,
         id: &str,
@@ -355,10 +801,6 @@ impl EventInput {
         client_updated_at: i64,
         notify: Option<bool>,
     ) -> Vec<u8> {
-        let (updated_at, notify_field, color) = match write {
-            Write::Create => (15, 16, 17),
-            Write::Update => (16, 17, 18),
-        };
         let mut w = Writer::new();
         w.string_always(1, id);
         w.int64(2, self.start_time);
@@ -369,11 +811,80 @@ impl EventInput {
         w.string(7, &self.location);
         w.string(8, &self.url);
         w.string(9, &self.description);
-        w.int64(updated_at, client_updated_at);
-        if let Some(n) = notify {
-            w.bool_always(notify_field, n);
+        if let Some(r) = &self.recurrence {
+            w.message(10, &r.encode(matches!(write, Write::Create)));
         }
-        w.uint32(color, self.color_id.max(0) as u32);
+        let reminders = self.reminders.iter().map(|r| r.raw() as i64 as u64);
+        let next = match write {
+            Write::Create => {
+                for id in &self.invitees {
+                    // `{ invitee_id = 1, status = 3 }`
+                    let mut i = Writer::new();
+                    i.string_always(1, id);
+                    i.enumeration(3, InvitationStatus::NeedsAction.raw());
+                    w.message(11, i.as_bytes());
+                }
+                w.packed_varints(12, reminders);
+                13
+            }
+            Write::Update => {
+                let added = self
+                    .invitees
+                    .iter()
+                    .filter(|i| !self.original_invitees.contains(i));
+                let removed = self
+                    .original_invitees
+                    .iter()
+                    .filter(|i| !self.invitees.contains(i));
+                for (field, ids) in [(11, added.collect::<Vec<_>>()), (12, removed.collect())] {
+                    for id in ids {
+                        let mut i = Writer::new();
+                        i.string_always(1, id);
+                        w.message(field, i.as_bytes());
+                    }
+                }
+                w.packed_varints(13, reminders);
+                14
+            }
+        };
+        // Then: message_id, recurrence_child_events (not sent; the app
+        // leaves them out of an update too), client_updated_at,
+        // notify_to_chatroom, color_id, app_reminders, stamp_id.
+        if let Some(m) = &self.message_id {
+            w.string_always(next, m);
+        }
+        w.int64(next + 2, client_updated_at);
+        if let Some(n) = notify {
+            w.bool_always(next + 3, n);
+        }
+        w.uint32(next + 4, self.color_id.max(0) as u32);
+        if let Some(offsets) = &self.app_reminders {
+            let mut a = Writer::new();
+            a.packed_varints(1, offsets.iter().map(|o| *o as i64 as u64));
+            w.message(next + 5, a.as_bytes());
+        }
+        if !self.stamp_id.is_empty() {
+            w.string_always(next + 6, &self.stamp_id);
+        }
+        w.into_bytes()
+    }
+}
+
+impl Recurrence {
+    /// `Recurrence`, with `except_ids` only when `with_except_ids`.
+    fn encode(&self, with_except_ids: bool) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.enumeration(1, self.frequency.raw());
+        w.uint32(2, self.interval);
+        if let Some(until) = self.until.filter(|u| *u > 0) {
+            w.int64_always(3, until);
+        }
+        for d in &self.by_day {
+            w.string_always(4, d);
+        }
+        if with_except_ids {
+            w.packed_varints(5, self.except_ids.iter().map(|v| *v as u64));
+        }
         w.into_bytes()
     }
 }
@@ -407,6 +918,81 @@ fn next_client_updated_at(previous: i64) -> i64 {
         .map(|d| d.as_secs() as i64)
         .unwrap_or_default();
     now.max(previous + 1)
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or_default()
+}
+
+/// How long to keep a token whose answer had no `expiration`.
+const TOKEN_FALLBACK_TTL_MS: i64 = 10 * 60 * 1000;
+/// A token this close to its expiry is issued again rather than sent.
+const TOKEN_MARGIN_MS: i64 = 60 * 1000;
+
+/// When to stop using a token the server said expires at `expiration`
+/// (epoch ms; 0 when it didn't say).
+fn cache_until(expiration: i64, now: i64) -> i64 {
+    if expiration > 0 {
+        expiration
+    } else {
+        now + TOKEN_FALLBACK_TTL_MS
+    }
+}
+
+/// The app sends a cached token while `expiration >= now` (`ak8/m` `e()`);
+/// this stops a minute early so a call doesn't race the expiry.
+fn token_usable(expires: i64, now: i64) -> bool {
+    expires - TOKEN_MARGIN_MS >= now
+}
+
+/// Whether LINE Calendar turned down the channel token: the BFF's
+/// `AUTHENTICATION_REQUIRED` (71) in a write's errors, or gRPC status 16
+/// (`UNAUTHENTICATED`).
+fn is_token_error(e: &Error) -> bool {
+    let text = e.to_string();
+    text.contains("AUTHENTICATION_REQUIRED") || text.contains("gRPC status 16")
+}
+
+/// The `Calendar` in field `field` of a response, if there is one.
+fn calendar_field(resp: &[u8], field: u32) -> Result<Option<Calendar>> {
+    let mut r = Reader::new(resp);
+    while let Some(f) = r.next_field()? {
+        if f.number == field {
+            return Calendar::decode(f.value.as_bytes()?).map(Some);
+        }
+    }
+    Ok(None)
+}
+
+/// Whether an error says the chat has no calendar. How the server answers
+/// that is not known (gRPC NOT_FOUND, status 5, or a BFF NOT_FOUND code are
+/// all taken to mean it).
+fn is_not_found(e: &Error) -> bool {
+    let text = e.to_string();
+    text.contains("gRPC status 5:") || text.ends_with("gRPC status 5") || text.contains("NOT_FOUND")
+}
+
+/// `RespondToInvitationRequest { chatroom_id = 1, event_id = 2,
+/// recur_id = 3 (optional), status = 4, client_updated_at = 5 }`.
+fn respond_request(
+    chatroom_id: &str,
+    event_id: &str,
+    recur_id: Option<i64>,
+    status: InvitationStatus,
+    client_updated_at: i64,
+) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.string_always(1, chatroom_id);
+    w.string_always(2, event_id);
+    if let Some(r) = recur_id {
+        w.int64_always(3, r);
+    }
+    w.enumeration(4, status.raw());
+    w.int64(5, client_updated_at);
+    w.into_bytes()
 }
 
 /// Name of a `line.calendar.bff.ErrorCode`.
@@ -553,6 +1139,78 @@ mod tests {
     }
 
     #[test]
+    fn decodes_recurrence_children_invitees_and_reminders() {
+        let mut rec = Writer::new();
+        rec.enumeration(1, 2);
+        rec.uint32(2, 2);
+        rec.int64(3, 1_800_000_000);
+        rec.string(4, "MO");
+        rec.string(4, "WE");
+        rec.packed_varints(5, [1_700_604_800, 1_701_209_600]);
+
+        let mut inv = Writer::new();
+        inv.string(1, "u1");
+        inv.enumeration(3, 2);
+        inv.int64(4, 5);
+
+        let mut child = Writer::new();
+        child.int64(1, 1_700_608_400);
+        child.int64(2, 1_700_612_000);
+        child.string(4, "Moved");
+        child.bool(11, false);
+        child.int64(13, 1_700_604_800);
+        child.packed_varints(10, [4]);
+
+        let mut app = Writer::new();
+        app.packed_varints(1, [(-30_i64) as u64, 0]);
+
+        let mut ev = Writer::new();
+        ev.string(1, "evt-1");
+        ev.int64(3, 1_700_000_000);
+        ev.message(11, rec.as_bytes());
+        ev.message(12, inv.as_bytes());
+        ev.packed_varints(13, [1, 2]);
+        // A sender may also write a repeated enum unpacked.
+        ev.enumeration(13, 6);
+        ev.string(15, "msg-9");
+        ev.message(16, child.as_bytes());
+        ev.int32(20, 3);
+        ev.message(21, app.as_bytes());
+        ev.string(22, "stamp-1");
+
+        let e = Event::decode(ev.as_bytes()).unwrap();
+        let r = e.recurrence.as_ref().unwrap();
+        assert_eq!(r.frequency, Frequency::Weekly);
+        assert_eq!(r.interval, 2);
+        assert_eq!(r.until, Some(1_800_000_000));
+        assert_eq!(r.by_day, ["MO", "WE"]);
+        assert_eq!(r.except_ids, [1_700_604_800, 1_701_209_600]);
+        assert_eq!(e.invitees[0].invitee_id, "u1");
+        assert_eq!(e.invitees[0].status, InvitationStatus::Accepted);
+        assert_eq!(
+            e.reminders,
+            [
+                Reminder::OneHourBefore,
+                Reminder::NoonTheDayBefore,
+                Reminder::NoonTwoDaysBefore
+            ]
+        );
+        assert_eq!(e.message_id.as_deref(), Some("msg-9"));
+        assert_eq!(e.recurrence_child_events.len(), 1);
+        let c = &e.recurrence_child_events[0];
+        assert_eq!(
+            (c.recur_id, c.title.as_str(), c.reminders.as_slice()),
+            (1_700_604_800, "Moved", &[Reminder::OneDayBefore][..])
+        );
+        assert_eq!(e.color_id, 3);
+        assert_eq!(e.app_reminders.as_deref(), Some(&[-30, 0][..]));
+        assert_eq!(e.stamp_id, "stamp-1");
+
+        let plain = Event::decode(&[]).unwrap();
+        assert!(plain.recurrence.is_none() && plain.message_id.is_none());
+    }
+
+    #[test]
     fn event_ids_look_like_the_apps() {
         let id = new_event_id();
         assert!(id.starts_with("a-"));
@@ -566,6 +1224,15 @@ mod tests {
         assert_ne!(id, new_event_id());
     }
 
+    fn field_numbers(b: &[u8]) -> Vec<u32> {
+        let mut r = Reader::new(b);
+        let mut n = Vec::new();
+        while let Some(f) = r.next_field().unwrap() {
+            n.push(f.number);
+        }
+        n
+    }
+
     #[test]
     fn create_and_update_put_the_trailing_fields_in_different_places() {
         let e = EventInput {
@@ -576,26 +1243,107 @@ mod tests {
             color_id: 3,
             ..Default::default()
         };
-        let fields = |b: &[u8]| {
-            let mut r = Reader::new(b);
-            let mut n = Vec::new();
-            while let Some(f) = r.next_field().unwrap() {
-                n.push(f.number);
-            }
-            n
-        };
         assert_eq!(
-            fields(&e.encode("a-x", Write::Create, 9, Some(true))),
+            field_numbers(&e.encode("a-x", Write::Create, 9, Some(true))),
             [1, 2, 3, 4, 5, 15, 16, 17]
         );
         assert_eq!(
-            fields(&e.encode("a-x", Write::Update, 9, Some(false))),
+            field_numbers(&e.encode("a-x", Write::Update, 9, Some(false))),
             [1, 2, 3, 4, 5, 16, 17, 18]
         );
         assert_eq!(
-            fields(&e.encode("a-x", Write::Create, 9, None)),
+            field_numbers(&e.encode("a-x", Write::Create, 9, None)),
             [1, 2, 3, 4, 5, 15, 17]
         );
+    }
+
+    /// A fetched event, edited and sent back, keeps every field an update
+    /// can carry.
+    #[test]
+    fn an_update_sends_the_whole_fetched_event_back() {
+        let fetched = Event {
+            id: "a-1".into(),
+            start_time: 100,
+            end_time: 200,
+            timezone: "Asia/Tokyo".into(),
+            title: "Standup".into(),
+            recurrence: Some(Recurrence {
+                frequency: Frequency::Weekly,
+                interval: 1,
+                until: Some(9_000),
+                by_day: vec!["MO".into(), "TH".into()],
+                except_ids: vec![700],
+            }),
+            invitees: vec![
+                Invitee {
+                    invitee_id: "u1".into(),
+                    ..Default::default()
+                },
+                Invitee {
+                    invitee_id: "u2".into(),
+                    ..Default::default()
+                },
+            ],
+            reminders: vec![Reminder::OneHourBefore, Reminder::Other(9)],
+            message_id: Some("m1".into()),
+            color_id: 5,
+            app_reminders: Some(vec![-10]),
+            stamp_id: "s1".into(),
+            ..Default::default()
+        };
+        let mut input = EventInput::from_event(&fetched);
+        input.title = "Daily standup".into();
+        input.invitees.retain(|i| i != "u1");
+        input.invitees.push("u3".into());
+        let body = input.encode("a-1", Write::Update, 42, None);
+        assert_eq!(
+            field_numbers(&body),
+            [1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 16, 18, 19, 20]
+        );
+
+        let mut r = Reader::new(&body);
+        while let Some(f) = r.next_field().unwrap() {
+            match f.number {
+                5 => assert_eq!(f.value.as_str().unwrap(), "Daily standup"),
+                10 => {
+                    let rec = Recurrence::decode(f.value.as_bytes().unwrap()).unwrap();
+                    // Exceptions stay on the server; the rule goes back.
+                    assert_eq!(
+                        rec,
+                        Recurrence {
+                            except_ids: vec![],
+                            ..fetched.recurrence.clone().unwrap()
+                        }
+                    );
+                }
+                11 | 12 => {
+                    let mut i = f.value.as_message().unwrap();
+                    let id = i.next_field().unwrap().unwrap().value.as_str().unwrap();
+                    assert_eq!(id, if f.number == 11 { "u3" } else { "u1" });
+                }
+                13 => assert_eq!(repeated_varints(f.value).unwrap(), [1, 9]),
+                14 => assert_eq!(f.value.as_str().unwrap(), "m1"),
+                16 => assert_eq!(f.value.as_i64().unwrap(), 42),
+                18 => assert_eq!(f.value.as_i32().unwrap(), 5),
+                19 => assert_eq!(app_reminders(f.value.as_bytes().unwrap()).unwrap(), [-10]),
+                20 => assert_eq!(f.value.as_str().unwrap(), "s1"),
+                _ => {}
+            }
+        }
+
+        // A create sends the rule with its exceptions, and invitees whole.
+        let body = input.encode("a-2", Write::Create, 42, Some(true));
+        assert_eq!(
+            field_numbers(&body),
+            [1, 2, 3, 4, 5, 10, 11, 11, 12, 13, 15, 16, 17, 18, 19]
+        );
+        let mut r = Reader::new(&body);
+        while let Some(f) = r.next_field().unwrap() {
+            if f.number == 10 {
+                let rec = Recurrence::decode(f.value.as_bytes().unwrap()).unwrap();
+                assert_eq!(rec.except_ids, [700]);
+            }
+        }
     }
 
     #[test]
@@ -629,6 +1377,90 @@ mod tests {
         let now = next_client_updated_at(0);
         // Seconds, not milliseconds: the server rejects a value over a day ahead.
         assert!(now > 1_700_000_000 && now < 10_000_000_000, "{now}");
+    }
+
+    #[test]
+    fn channel_tokens_are_kept_until_they_expire() {
+        let now = 1_800_000_000_000;
+        // The server's expiry, in milliseconds.
+        let until = cache_until(now + 3_600_000, now);
+        assert!(token_usable(until, now));
+        assert!(token_usable(until, now + 3_500_000));
+        assert!(!token_usable(until, now + 3_590_000));
+        assert!(!token_usable(until, now + 3_600_000));
+        // No expiry given: kept for a while, not forever.
+        let until = cache_until(0, now);
+        assert!(token_usable(until, now + 60_000));
+        assert!(!token_usable(until, now + 3_600_000));
+    }
+
+    #[test]
+    fn token_errors_are_told_apart() {
+        let mut err = Writer::new();
+        err.enumeration(1, 71);
+        let mut resp = Writer::new();
+        resp.message(1, err.as_bytes());
+        let e = write_response("UpdateEvents", resp.as_bytes()).unwrap_err();
+        assert!(is_token_error(&e), "{e}");
+        assert!(is_token_error(&Error::internal(
+            "GrpcError",
+            "gRPC status 16: token expired"
+        )));
+        assert!(!is_token_error(&Error::internal(
+            "GrpcError",
+            "gRPC status 14"
+        )));
+        let mut err = Writer::new();
+        err.enumeration(1, 33);
+        let mut resp = Writer::new();
+        resp.message(1, err.as_bytes());
+        let e = write_response("UpdateEvents", resp.as_bytes()).unwrap_err();
+        assert!(!is_token_error(&e));
+    }
+
+    #[test]
+    fn rsvp_and_chat_calendar_messages() {
+        let body = respond_request(
+            "c1",
+            "a-1",
+            Some(1_700_000_000),
+            InvitationStatus::Declined,
+            9,
+        );
+        assert_eq!(field_numbers(&body), [1, 2, 3, 4, 5]);
+        let mut r = Reader::new(&body);
+        let vals: Vec<u64> = std::iter::from_fn(|| r.next_field().unwrap())
+            .filter_map(|f| f.value.as_u64().ok())
+            .collect();
+        assert_eq!(vals, [1_700_000_000, 3, 9]);
+        assert_eq!(
+            field_numbers(&respond_request(
+                "c1",
+                "a-1",
+                None,
+                InvitationStatus::Accepted,
+                9
+            )),
+            [1, 2, 4, 5]
+        );
+
+        let mut cal = Writer::new();
+        cal.string(2, "cal-1");
+        cal.enumeration(5, CALENDAR_CHATROOM);
+        let mut resp = Writer::new();
+        resp.message(1, &[]);
+        resp.message(2, cal.as_bytes());
+        let c = calendar_field(resp.as_bytes(), 2).unwrap().unwrap();
+        assert_eq!((c.id.as_str(), c.kind), ("cal-1", CALENDAR_CHATROOM));
+        assert!(calendar_field(&[], 2).unwrap().is_none());
+        assert!(is_not_found(&Error::internal(
+            "GrpcError",
+            "gRPC status 5: no calendar"
+        )));
+        assert!(!is_not_found(&Error::internal(
+            "GrpcError",
+            "gRPC status 50"
+        )));
     }
 
     #[test]
