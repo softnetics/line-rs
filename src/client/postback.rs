@@ -113,18 +113,126 @@ impl DateTimeMode {
             _ => None,
         }
     }
+
+    /// The query key the picked value goes under: `_date`, `_time` or
+    /// `_datetime` (`queryParamSendDateTimeKey` of `pt1/b`'s `DATE`, `TIME`
+    /// and `DATETIME`).
+    pub fn value_key(self) -> &'static str {
+        match self {
+            DateTimeMode::Date => "_date",
+            DateTimeMode::Time => "_time",
+            DateTimeMode::DateTime => "_datetime",
+        }
+    }
+
+    /// `value` in this mode's format, normalised as the app's
+    /// `SimpleDateFormat` reads it (upper-cased, so `t` reads as `T`);
+    /// `None` when it isn't one.
+    pub fn read(self, value: &str) -> Option<String> {
+        let v = value.trim().to_ascii_uppercase();
+        let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        let date = |s: &str| {
+            let p: Vec<&str> = s.split('-').collect();
+            p.len() == 3
+                && p[0].len() == 4
+                && p[1].len() == 2
+                && p[2].len() == 2
+                && p.iter().all(|x| digits(x))
+                && (1..=12).contains(&p[1].parse::<u32>().unwrap_or(0))
+                && (1..=31).contains(&p[2].parse::<u32>().unwrap_or(0))
+        };
+        let time = |s: &str| {
+            let p: Vec<&str> = s.split(':').collect();
+            p.len() == 2
+                && p.iter().all(|x| x.len() == 2 && digits(x))
+                && p[0].parse::<u32>().unwrap_or(99) < 24
+                && p[1].parse::<u32>().unwrap_or(99) < 60
+        };
+        let ok = match self {
+            DateTimeMode::Date => date(&v),
+            DateTimeMode::Time => time(&v),
+            DateTimeMode::DateTime => v.split_once('T').is_some_and(|(d, t)| date(d) && time(t)),
+        };
+        ok.then_some(v)
+    }
+}
+
+/// A flex or template `datetimepicker` action (`md2/b.java`
+/// `OpenDateTimePicker`). Values are in the mode's format.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DateTimePicker {
+    pub data: String,
+    pub mode: DateTimeMode,
+    pub initial: Option<String>,
+    pub max: Option<String>,
+    pub min: Option<String>,
+}
+
+impl DateTimePicker {
+    /// The action as the app turns it into a URL:
+    /// `linepostback://postback/datetimepicker?_data=…&_mode=…[&_initial=…]
+    /// [&_max=…][&_min=…]`, empty values left out.
+    pub fn action_url(&self) -> String {
+        let mut q = Query::default();
+        q.push("_data", &self.data);
+        q.push("_mode", self.mode.as_str());
+        q.push_opt("_initial", self.initial.as_deref());
+        q.push_opt("_max", self.max.as_deref());
+        q.push_opt("_min", self.min.as_deref());
+        format!("{SCHEME}://postback/datetimepicker?{}", q.0)
+    }
+
+    /// `initial`, `min` and `max` as the picker reads them: a value that
+    /// isn't in the mode's format counts as absent, as it does in the app
+    /// (`pt1/o.java`).
+    fn bounds(&self) -> [Option<String>; 3] {
+        let read = |v: &Option<String>| v.as_deref().and_then(|v| self.mode.read(v));
+        [read(&self.initial), read(&self.min), read(&self.max)]
+    }
+
+    /// Whether LINE for Android shows a picker for this action (`pt1/o.a`):
+    /// `data` isn't empty and `min <= initial <= max` for the bounds given.
+    /// For any other, it sends [`action_url`](Self::action_url) to
+    /// `sendPostback` as it is, with no picker.
+    pub fn shows_picker(&self) -> bool {
+        let [initial, min, max] = self.bounds();
+        let le = |a: &Option<String>, b: &Option<String>| match (a, b) {
+            (Some(a), Some(b)) => a <= b,
+            _ => true,
+        };
+        !self.data.is_empty() && le(&min, &initial) && le(&initial, &max) && le(&min, &max)
+    }
+
+    /// What the picker starts on: `initial`, or `now` when there is none,
+    /// moved into `min`…`max` (`pt1/b.chooseInitialInBoundary`). `now` is
+    /// in the mode's format.
+    pub fn starting_value(&self, now: &str) -> String {
+        let [initial, min, max] = self.bounds();
+        let mut v = initial.unwrap_or_else(|| now.to_string());
+        if let Some(min) = min.filter(|m| *m > v) {
+            v = min;
+        }
+        if let Some(max) = max.filter(|m| *m < v) {
+            v = max;
+        }
+        v
+    }
+
+    /// The URL sent when the user picks `value`.
+    pub fn result_url(&self, value: &str) -> String {
+        datetime_picker_url(&self.data, self.mode, value)
+    }
 }
 
 /// The URL sent when the user picks a value in a datetime picker action:
-/// `linepostback://postback/datetimepicker?_data=…&_mode=…&<mode>=<value>`
-/// (`ot1/o.java`). `value` is in the mode's format (see [`DateTimeMode`]).
-/// The value's key being the mode name is inferred from the picker enum
-/// (`pt1/b.java`) and unverified.
+/// `linepostback://postback/datetimepicker?_data=…&_mode=…&_<mode>=<value>`
+/// (`ot1/o.java`; the value's key is `pt1/b`'s `queryParamSendDateTimeKey`,
+/// see [`DateTimeMode::value_key`]). `value` is in the mode's format.
 pub fn datetime_picker_url(data: &str, mode: DateTimeMode, value: &str) -> String {
     let mut q = Query::default();
     q.push("_data", data);
     q.push("_mode", mode.as_str());
-    q.push(mode.as_str(), value);
+    q.push(mode.value_key(), value);
     format!("{SCHEME}://postback/datetimepicker?{}", q.0)
 }
 
@@ -206,9 +314,77 @@ mod tests {
         );
         assert_eq!(
             datetime_picker_url("d", DateTimeMode::DateTime, "2026-11-06T09:30"),
-            "linepostback://postback/datetimepicker?_data=d&_mode=datetime&datetime=2026-11-06T09%3A30"
+            "linepostback://postback/datetimepicker?_data=d&_mode=datetime&_datetime=2026-11-06T09%3A30"
+        );
+        assert_eq!(
+            datetime_picker_url("d", DateTimeMode::Date, "2026-11-06"),
+            "linepostback://postback/datetimepicker?_data=d&_mode=date&_date=2026-11-06"
         );
         assert_eq!(DateTimeMode::parse("time"), Some(DateTimeMode::Time));
+    }
+
+    fn picker(mode: DateTimeMode, initial: &str, min: &str, max: &str) -> DateTimePicker {
+        let opt = |s: &str| (!s.is_empty()).then(|| s.to_string());
+        DateTimePicker {
+            data: "d".into(),
+            mode,
+            initial: opt(initial),
+            min: opt(min),
+            max: opt(max),
+        }
+    }
+
+    #[test]
+    fn picker_action_url_leaves_out_missing_bounds() {
+        assert_eq!(
+            picker(DateTimeMode::Time, "10:00", "", "23:00").action_url(),
+            "linepostback://postback/datetimepicker?_data=d&_mode=time&_initial=10%3A00&_max=23%3A00"
+        );
+    }
+
+    #[test]
+    fn picker_shows_only_for_ordered_bounds() {
+        use DateTimeMode::*;
+        assert!(picker(Date, "2026-01-02", "2026-01-01", "2026-01-03").shows_picker());
+        assert!(picker(Date, "", "", "").shows_picker());
+        assert!(!picker(Date, "2026-01-05", "", "2026-01-03").shows_picker());
+        assert!(!picker(Time, "", "12:00", "11:00").shows_picker());
+        // A bound in the wrong format counts as absent.
+        assert!(picker(Date, "2026-01-05", "", "tomorrow").shows_picker());
+        assert!(picker(DateTime, "2026-01-01t10:00", "2026-01-01T09:00", "").shows_picker());
+        let mut empty = picker(Date, "", "", "");
+        empty.data.clear();
+        assert!(!empty.shows_picker());
+    }
+
+    #[test]
+    fn picker_starts_inside_its_bounds() {
+        use DateTimeMode::*;
+        assert_eq!(picker(Time, "", "", "").starting_value("09:30"), "09:30");
+        assert_eq!(
+            picker(Time, "", "10:00", "").starting_value("09:30"),
+            "10:00"
+        );
+        assert_eq!(
+            picker(Time, "", "", "08:00").starting_value("09:30"),
+            "08:00"
+        );
+        assert_eq!(
+            picker(Date, "2026-03-01", "", "").starting_value("2026-11-06"),
+            "2026-03-01"
+        );
+    }
+
+    #[test]
+    fn reads_values_in_the_modes_format() {
+        use DateTimeMode::*;
+        assert_eq!(
+            DateTime.read("2026-11-06t09:30").as_deref(),
+            Some("2026-11-06T09:30")
+        );
+        assert_eq!(Date.read("2026-13-01"), None);
+        assert_eq!(Time.read("24:00"), None);
+        assert_eq!(Time.read("9:30"), None);
     }
 
     #[test]

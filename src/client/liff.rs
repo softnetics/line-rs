@@ -101,6 +101,96 @@ pub struct LiffViewOptions {
     pub liff_id: Option<String>,
     /// Defaults to the client's [`Config::language`](crate::base::Config::language).
     pub lang: Option<String>,
+    /// `deviceSetting`: what the device allows. LINE for Android sends it
+    /// with every view it opens (`jd0/e.java`).
+    pub device_setting: Option<LiffDeviceSetting>,
+    /// `domain`: see [`LiffViewOptions::for_url`].
+    pub domain: Option<String>,
+    /// `requestedUrl`: see [`LiffViewOptions::for_url`].
+    pub requested_url: Option<String>,
+    /// `subsequentLiff`: the view replaces another LIFF app in the same
+    /// window. The app sets it when one LIFF app opens another in place
+    /// (`ie0/s.java`), and sends `false` otherwise.
+    pub subsequent_liff: bool,
+    /// `msit` and `interWindowSession`, which the app passes on when it
+    /// reissues a view it opened before (`ie0/s.java`); left out otherwise.
+    pub msit: Option<String>,
+    pub inter_window_session: Option<String>,
+}
+
+/// `LiffDeviceSetting` (`lf0/t.java`). `advertisingId` (field 2) is left
+/// out, as the app leaves it out when the device has no advertising id.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LiffDeviceSetting {
+    /// Videos may play on their own (the app's autoplay setting and network).
+    pub video_auto_play_allowed: bool,
+    /// In-app purchases can be made (Google Play billing on Android).
+    pub in_app_purchase_available: bool,
+}
+
+impl LiffViewOptions {
+    /// `domain` and `requestedUrl` for opening the LIFF URL `url`, as
+    /// `we0/r1.f` fills them: the domain is the `liff.domain` query value of
+    /// a `line://` or `lineb://` URL and the host of any other, and the
+    /// requested URL is `url` without its `liff.domain` value.
+    pub fn for_url(mut self, url: &str) -> Self {
+        let Ok(parsed) = url::Url::parse(url) else {
+            return self;
+        };
+        let liff_domain = parsed
+            .query_pairs()
+            .find(|(k, _)| k == "liff.domain")
+            .map(|(_, v)| v.into_owned());
+        self.domain = if matches!(parsed.scheme(), "line" | "lineb") {
+            liff_domain.clone()
+        } else {
+            parsed.host_str().map(str::to_string)
+        };
+        self.requested_url = Some(if liff_domain.is_some() {
+            let kept: Vec<(String, String)> = parsed
+                .query_pairs()
+                .filter(|(k, _)| k != "liff.domain")
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                .collect();
+            let mut out = parsed.clone();
+            out.set_query(None);
+            if !kept.is_empty() {
+                out.query_pairs_mut().extend_pairs(kept);
+            }
+            out.to_string()
+        } else {
+            url.to_string()
+        });
+        self
+    }
+
+    /// `LiffViewRequest` fields 4 to 9, in the order the app writes them.
+    fn extra_fields(&self) -> Vec<(i16, TValue)> {
+        let mut out = Vec::new();
+        if let Some(d) = &self.device_setting {
+            out.push((
+                4,
+                TValue::Struct(vec![
+                    (1, TValue::Bool(d.video_auto_play_allowed)),
+                    (3, TValue::Bool(d.in_app_purchase_available)),
+                ]),
+            ));
+        }
+        if let Some(m) = &self.msit {
+            out.push((5, TValue::string(m)));
+        }
+        out.push((6, TValue::Bool(self.subsequent_liff)));
+        if let Some(d) = &self.domain {
+            out.push((7, TValue::string(d)));
+        }
+        if let Some(s) = &self.inter_window_session {
+            out.push((8, TValue::string(s)));
+        }
+        if let Some(u) = &self.requested_url {
+            out.push((9, TValue::string(u)));
+        }
+        out
+    }
 }
 
 /// `issueLiffView` args, encoded by hand like linejs: the "no context"
@@ -129,6 +219,15 @@ pub(crate) fn issue_liff_view_args(
             (3, TValue::string(lang)),
         ]),
     )]
+}
+
+/// [`issue_liff_view_args`] with the request's other fields from `opts`.
+fn view_request(liff_id: &str, lang: &str, opts: &LiffViewOptions) -> Vec<(i16, TValue)> {
+    let mut args = issue_liff_view_args(liff_id, opts.chat_mid.as_deref(), lang);
+    if let TValue::Struct(req) = &mut args[0].1 {
+        req.extend(opts.extra_fields());
+    }
+    args
 }
 
 /// LINE's `CONSENT_REQUIRED` answer to `issueLiffView`: the LIFF app needs
@@ -270,12 +369,12 @@ impl Liff<'_> {
             .liff_id
             .clone()
             .unwrap_or_else(|| self.default_liff_id());
-        let args = issue_liff_view_args(
+        let args = view_request(
             &liff_id,
-            opts.chat_mid.as_deref(),
             opts.lang
                 .as_deref()
                 .unwrap_or(&self.client.base.config.language),
+            opts,
         );
         self.client
             .base
@@ -712,5 +811,47 @@ mod tests {
             panic!()
         };
         assert_eq!(req[1].1, TValue::Struct(vec![(1, TValue::Struct(vec![]))]));
+    }
+
+    #[test]
+    fn view_request_carries_device_setting_domain_and_url() {
+        let opts = LiffViewOptions {
+            device_setting: Some(LiffDeviceSetting {
+                video_auto_play_allowed: true,
+                in_app_purchase_available: false,
+            }),
+            ..Default::default()
+        }
+        .for_url("https://liff.line.me/123-abc/path?x=1");
+        let args = view_request("123-abc", "th_TH", &opts);
+        let TValue::Struct(req) = &args[0].1 else {
+            panic!()
+        };
+        assert_eq!(
+            &req[3..],
+            &[
+                (
+                    4,
+                    TValue::Struct(vec![(1, TValue::Bool(true)), (3, TValue::Bool(false))])
+                ),
+                (6, TValue::Bool(false)),
+                (7, TValue::string("liff.line.me")),
+                (9, TValue::string("https://liff.line.me/123-abc/path?x=1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn line_scheme_urls_take_the_domain_from_the_query() {
+        let opts =
+            LiffViewOptions::default().for_url("line://app/123-abc?liff.domain=example.com&a=b");
+        assert_eq!(opts.domain.as_deref(), Some("example.com"));
+        assert_eq!(
+            opts.requested_url.as_deref(),
+            Some("line://app/123-abc?a=b")
+        );
+        let plain = LiffViewOptions::default().for_url("line://app/123-abc");
+        assert_eq!(plain.domain, None);
+        assert_eq!(plain.requested_url.as_deref(), Some("line://app/123-abc"));
     }
 }
