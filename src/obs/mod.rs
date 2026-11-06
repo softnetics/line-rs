@@ -14,9 +14,18 @@
 
 pub mod crypto;
 mod e2ee;
+mod flow;
 pub mod mime;
+mod token;
 
-pub use e2ee::{E2eeMediaUpload, e2ee_content_metadata, e2ee_duration};
+pub use e2ee::{
+    E2eeMediaUpload, MAX_FILE_SIZE, MAX_MEDIA_SEND_ATTEMPTS, MAX_VIDEO_SIZE, MediaOptions,
+    SentMedia, check_media_size, e2ee_content_metadata, e2ee_duration,
+};
+pub use flow::{MediaFlow, MediaFlows};
+pub use token::{OBS_TOKEN_ATTEMPTS, parse_obs_token};
+
+use std::time::Instant;
 
 use bytes::Bytes;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -224,6 +233,14 @@ pub struct ObjectUpload {
     pub add_headers: Vec<(String, String)>,
 }
 
+/// Per-client OBS state: the OBS access token and the media flow of each
+/// chat.
+#[derive(Debug, Default)]
+pub(crate) struct ObsState {
+    pub(crate) token: token::ObsTokenCache,
+    pub(crate) flows: flow::MediaFlowCache,
+}
+
 /// OBS operations bound to a client.
 #[derive(Clone)]
 pub struct Obs<'a> {
@@ -238,6 +255,18 @@ impl BaseClient {
             client: self,
             prefix: OBS_PREFIX.to_string(),
         }
+    }
+
+    /// Forget the cached media flow of `chat_mid` (every chat with `None`),
+    /// so the next media send asks `determineMediaMessageFlow` again. Call
+    /// it when LINE says `REFRESH_MEDIA_FLOW`.
+    pub fn drop_media_flow(&self, chat_mid: Option<&str>) {
+        self.obs_state.flows.remove(chat_mid);
+    }
+
+    /// Forget the OBS access token so the next upload acquires a new one.
+    pub async fn clear_obs_token(&self) {
+        self.obs_state.token.clear().await;
     }
 }
 
@@ -404,7 +433,8 @@ impl<'a> Obs<'a> {
     /// Upload media for a talk (or square, for `m`/`t` mids) message. With
     /// `oid` the object is attached to an existing message id; otherwise LINE
     /// sends it to `to` itself. `duration_ms` (audio/video) is shown verbatim
-    /// as the clip length (default 1919).
+    /// as the clip length (default 1919). Talk uploads authenticate with the
+    /// OBS access token (see [`parse_obs_token`]).
     pub async fn upload_obj_talk(
         &self,
         to: &str,
@@ -414,12 +444,29 @@ impl<'a> Obs<'a> {
         duration_ms: Option<u64>,
     ) -> Result<ObsUpload> {
         self.client.require_token()?;
+        let reqseq = self.client.get_reqseq("talk").await?;
+        self.upload_obj_talk_with_seq(to, o_type, file, oid, duration_ms, reqseq, self.client)
+            .await
+    }
+
+    /// [`upload_obj_talk`](Self::upload_obj_talk) with a given `reqseq`, so
+    /// a media send keeps one request number across its retries.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn upload_obj_talk_with_seq(
+        &self,
+        to: &str,
+        o_type: ObjType,
+        file: ObsFile,
+        oid: Option<&str>,
+        duration_ms: Option<u64>,
+        reqseq: i64,
+        tokens: &dyn token::ObsTokenSource,
+    ) -> Result<ObsUpload> {
         let ext = file
             .mime
             .as_deref()
             .and_then(mime::extension)
             .unwrap_or("undefined");
-        let reqseq = self.client.get_reqseq("talk").await?;
         let name = file.name.clone().unwrap_or_else(|| format!("linejs.{ext}"));
         let mut params: Vec<(String, String)> = vec![
             ("ver".into(), "2.0".into()),
@@ -445,24 +492,81 @@ impl<'a> Obs<'a> {
             }
             ObjType::File => {}
         }
-        let to_type = if to.starts_with('m') || to.starts_with('t') {
-            "g2"
-        } else {
-            "talk"
-        };
-        self.upload_object_for_service(ObjectUpload {
+        let square = to.starts_with('m') || to.starts_with('t');
+        let opts = ObjectUpload {
             data: file.data,
             o_type,
-            obs_path: Some(format!("{to_type}/m/{}", oid.unwrap_or("reqseq"))),
+            obs_path: Some(format!(
+                "{}/m/{}",
+                if square { "g2" } else { "talk" },
+                oid.unwrap_or("reqseq")
+            )),
             params,
             filename: Some(name),
             add_headers: Vec::new(),
-        })
-        .await
+        };
+        if square {
+            // Square uploads keep the session token they have always used.
+            self.upload_object_for_service(opts).await
+        } else {
+            self.upload_with_obs_token(opts, tokens).await
+        }
     }
 
-    /// Raw upload to `/r/{obs_path}`.
+    /// Upload with the OBS access token; on HTTP 401 drop it, get a new
+    /// one and upload once more (`sx3/g.f`, `a41/p.c`). Without any OBS
+    /// token the session token is sent.
+    pub(crate) async fn upload_with_obs_token(
+        &self,
+        opts: ObjectUpload,
+        tokens: &dyn token::ObsTokenSource,
+    ) -> Result<ObsUpload> {
+        let cache = &self.client.obs_state.token;
+        let token = cache.get(tokens).await;
+        let (status, up) = self.post_object(opts.clone(), token.as_deref()).await?;
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            cache.clear().await;
+            let token = cache.get(tokens).await;
+            let (status, up) = self.post_object(opts, token.as_deref()).await?;
+            ensure_ok(status, "Object upload failed")?;
+            return Ok(up);
+        }
+        ensure_ok(status, "Object upload failed")?;
+        Ok(up)
+    }
+
+    /// Cached flows of `chat_mid`, or ask `determineMediaMessageFlow`.
+    pub async fn media_flows(&self, chat_mid: &str) -> Result<MediaFlows> {
+        let cache = &self.client.obs_state.flows;
+        if let Some(flows) = cache.get(chat_mid, Instant::now()) {
+            return Ok(flows);
+        }
+        let res = self
+            .client
+            .talk()
+            .determine_media_message_flow(crate::tv!({"request": {"chatMid": chat_mid}}))
+            .await?;
+        let (flows, ttl) = MediaFlows::from_response(&res);
+        cache.insert(chat_mid, flows, ttl, Instant::now());
+        Ok(flows)
+    }
+
+    /// Raw upload to `/r/{obs_path}` with the session token.
     pub async fn upload_object_for_service(&self, opts: ObjectUpload) -> Result<ObsUpload> {
+        let (status, up) = self.post_object(opts, None).await?;
+        // Without this a rejected upload came back with an empty object id,
+        // and the message sent with it failed with an unrelated error.
+        ensure_ok(status, "Object upload failed")?;
+        Ok(up)
+    }
+
+    /// POST an object; `token` replaces the session token in
+    /// `x-line-access`. The status is left to the caller.
+    async fn post_object(
+        &self,
+        opts: ObjectUpload,
+        token: Option<&str>,
+    ) -> Result<(reqwest::StatusCode, ObsUpload)> {
         let obs_path = opts.obs_path.as_deref().unwrap_or("myhome/h");
         self.client.log(
             "Obs.uploadObjectForService",
@@ -490,6 +594,12 @@ impl<'a> Obs<'a> {
                 ("x-obs-params".to_string(), obs_params_header(&params)),
             ],
         );
+        if let Some(token) = token {
+            merge_params(
+                &mut headers,
+                [("x-line-access".to_string(), token.to_string())],
+            );
+        }
         let headers = to_header_map(headers.into_iter().chain(opts.add_headers))?;
 
         let res = self
@@ -501,18 +611,22 @@ impl<'a> Obs<'a> {
             .body(opts.data)
             .send()
             .await?;
+        let status = res.status();
         let headers = res.headers().clone();
         let obj_id = header_str(&headers, "x-obs-oid");
         let obj_hash = header_str(&headers, "x-obs-hash");
         self.client.log(
             "Obs.uploadObjectForServiceResponse",
-            serde_json::json!({"objId": obj_id, "objHash": obj_hash, "status": res.status().as_u16()}),
+            serde_json::json!({"objId": obj_id, "objHash": obj_hash, "status": status.as_u16()}),
         );
-        Ok(ObsUpload {
-            obj_id,
-            obj_hash,
-            headers,
-        })
+        Ok((
+            status,
+            ObsUpload {
+                obj_id,
+                obj_hash,
+                headers,
+            },
+        ))
     }
 
     /// Raw download from `/r/{obs_path}/{oid}` (or `{oid}` substituted in

@@ -206,6 +206,7 @@ impl ClientBuilder {
             token_expire: RwLock::new(None),
             refresh_lock: Mutex::new(()),
             e2ee: E2eeState::default(),
+            obs_state: Default::default(),
             sync: Mutex::new(SyncData::default()),
             push: crate::push::PushState::default(),
         })))
@@ -245,6 +246,8 @@ pub struct Inner {
     token_expire: RwLock<Option<Option<i64>>>,
     pub(crate) refresh_lock: Mutex<()>,
     pub(crate) e2ee: E2eeState,
+    /// OBS access token and per-chat media flows.
+    pub(crate) obs_state: crate::obs::ObsState,
     pub(crate) sync: Mutex<SyncData>,
     pub(crate) push: crate::push::PushState,
 }

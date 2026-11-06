@@ -1,16 +1,105 @@
-//! E2EE ("Letter Sealing") media: encrypt, upload to `talk/em*`, and send
-//! the message carrying the key material; and the reverse for downloads.
+//! Sending media the way the Android app does, and E2EE ("Letter
+//! Sealing") media downloads.
+//!
+//! A send first asks which flow the chat uses (see [`MediaFlows`]):
+//!
+//! * **V1**: plain upload to `talk/m/reqseq`; LINE creates the message.
+//! * **V2**: encrypt, upload to `talk/{emi|emv|ema|emf}/reqid-<uuid>`, then
+//!   `sendMessage` with the key material in an E2EE payload. Images and
+//!   videos also get `{oid}__ud-preview`; videos are encrypted with the
+//!   chunked (v2) HMAC and get `{oid}__ud-hash`.
+//!
+//! When `sendMessage` fails with an E2EE code, the message is re-encrypted
+//! (or the group key recreated) and sent again with the same object and
+//! `reqSeq`; when LINE wants it plain (`E2EE_RETRY_PLAIN`,
+//! `E2EE_GROUP_TOO_MANY_MEMBERS`, `REFRESH_MEDIA_FLOW`, ...) the chat's
+//! flow is forgotten and the file goes through V1 instead.
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use indexmap::IndexMap;
 
 use super::crypto::{self, encrypt_by_key_material};
-use super::{ObjType, ObjectUpload, Obs, ObsFile};
+use super::flow::{MediaFlow, MediaFlows};
+use super::{ObjType, ObjectUpload, Obs, ObsFile, ObsUpload};
 use crate::base::BaseClient;
-use crate::e2ee::E2eeContent;
+use crate::e2ee::media::{MEDIA_HMAC_LEN, MediaHmacVersion, encrypt_media};
+use crate::e2ee::{E2eeContent, E2eeSendRecovery, send_recovery};
 use crate::error::{Error, Result};
 use crate::thrift::{self, Protocol, TType, TValue, Value};
+
+/// Largest file LINE accepts (`yq8/d.i`: 1 GiB).
+pub const MAX_FILE_SIZE: usize = 1_073_741_824;
+/// Largest video LINE accepts (`a41/m0.a`: 200 MiB).
+pub const MAX_VIDEO_SIZE: usize = 209_715_200;
+/// `sendMessage` attempts for one media message (`xn8/k.c`).
+pub const MAX_MEDIA_SEND_ATTEMPTS: u32 = 3;
+
+/// Result of sending media.
+#[derive(Debug, Clone)]
+pub enum SentMedia {
+    /// Plain OBS upload in "reqseq" mode: the server created the message.
+    Plain { obj_id: String, obj_hash: String },
+    /// Letter Sealing upload: the sent (still encrypted) `Message`.
+    E2ee(Value),
+}
+
+/// Optional details of a media message.
+///
+/// ```
+/// use line_rs::obs::MediaOptions;
+/// let opts = MediaOptions::new()
+///     .preview(vec![0xff, 0xd8])
+///     .duration_ms(4200)
+///     .size(1280, 720);
+/// # let _ = opts;
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct MediaOptions {
+    /// JPEG thumbnail of an image or video, uploaded as `__ud-preview`.
+    /// Without one an image is its own preview and a video has none.
+    pub preview: Option<Bytes>,
+    /// Length of a video or audio clip in milliseconds (`DURATION`).
+    pub duration_ms: Option<u64>,
+    /// Image width in pixels (`MEDIA_CONTENT_INFO`).
+    pub width: Option<u32>,
+    /// Image height in pixels (`MEDIA_CONTENT_INFO`).
+    pub height: Option<u32>,
+    /// Whether the image is animated. Defaults to true for
+    /// [`ObjType::Gif`].
+    pub animated: Option<bool>,
+    /// `None`: use the flow LINE picks for the chat. `Some(false)`: always
+    /// upload plain (V1). `Some(true)`: always encrypt (V2), and fail rather
+    /// than fall back to plain.
+    pub e2ee: Option<bool>,
+}
+
+impl MediaOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn preview(mut self, jpeg: impl Into<Bytes>) -> Self {
+        self.preview = Some(jpeg.into());
+        self
+    }
+    pub fn duration_ms(mut self, ms: u64) -> Self {
+        self.duration_ms = Some(ms);
+        self
+    }
+    pub fn size(mut self, width: u32, height: u32) -> Self {
+        self.width = Some(width);
+        self.height = Some(height);
+        self
+    }
+    pub fn animated(mut self, animated: bool) -> Self {
+        self.animated = Some(animated);
+        self
+    }
+    pub fn e2ee(mut self, e2ee: bool) -> Self {
+        self.e2ee = Some(e2ee);
+        self
+    }
+}
 
 /// Options for [`Obs::upload_media_by_e2ee`].
 #[derive(Debug, Clone, Default)]
@@ -20,12 +109,18 @@ pub struct E2eeMediaUpload {
     pub o_type: ObjType,
     /// User (`u`) or group (`c`) mid.
     pub to: String,
-    /// Optional thumbnail (image/gif/video), encrypted with the same key
-    /// material. Without it the full ciphertext is uploaded as the preview.
+    /// Optional JPEG thumbnail (image/gif/video), encrypted with the same
+    /// key material. Without it an image is uploaded as its own preview and
+    /// a video has none.
     pub preview: Option<Bytes>,
-    /// Video clip length in milliseconds, sent as `DURATION`. Rounded like
-    /// `Math.round`; dropped unless it is a positive safe integer.
+    /// Video or audio length in milliseconds, sent as `DURATION`. Rounded
+    /// like `Math.round`; dropped unless it is a positive safe integer.
     pub duration_ms: Option<f64>,
+    /// Image width and height for `MEDIA_CONTENT_INFO`.
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    /// Defaults to true for GIFs.
+    pub animated: Option<bool>,
 }
 
 /// `(obsNamespace, contentType)` for an E2EE media kind.
@@ -38,114 +133,249 @@ fn type_set(o_type: ObjType) -> (&'static str, i32) {
     }
 }
 
-fn has_preview(o_type: ObjType) -> bool {
-    matches!(o_type, ObjType::Image | ObjType::Gif | ObjType::Video)
+fn is_image(o_type: ObjType) -> bool {
+    matches!(o_type, ObjType::Image | ObjType::Gif)
 }
 
-/// `DURATION` value for a video: JS `Math.round`, then only positive safe
-/// integers survive.
-pub fn e2ee_duration(o_type: ObjType, duration_ms: Option<f64>) -> Option<String> {
+/// Whether `mid` can take V2 media: users and groups. Rooms and squares
+/// always go plain.
+fn v2_capable(mid: &str) -> bool {
+    mid.starts_with('u') || mid.starts_with('c')
+}
+
+/// Fail before uploading what LINE would refuse: files over 1 GiB, videos
+/// over 200 MiB. The error kind is `MediaTooLarge`.
+pub fn check_media_size(o_type: ObjType, len: usize) -> Result<()> {
+    let message = match o_type {
+        ObjType::Video if len > MAX_VIDEO_SIZE => "The video is larger than 200MB.",
+        _ if len > MAX_FILE_SIZE => "The file is larger than 1GB.",
+        _ => return Ok(()),
+    };
+    Err(Error::internal("MediaTooLarge", message))
+}
+
+fn round_duration(d: f64) -> Option<u64> {
     const MAX_SAFE: f64 = 9_007_199_254_740_991.0;
-    let d = duration_ms?;
-    if o_type != ObjType::Video || !d.is_finite() {
+    if !d.is_finite() {
         return None;
     }
     let floor = d.floor();
     let rounded = if d - floor >= 0.5 { floor + 1.0 } else { floor };
-    (rounded > 0.0 && rounded <= MAX_SAFE).then(|| format!("{}", rounded as u64))
+    (rounded > 0.0 && rounded <= MAX_SAFE).then_some(rounded as u64)
 }
 
-/// `contentMetadata` of the message announcing an uploaded E2EE object.
+/// `DURATION` value for a video or audio clip: JS `Math.round`, then only
+/// positive safe integers survive.
+pub fn e2ee_duration(o_type: ObjType, duration_ms: Option<f64>) -> Option<String> {
+    if !matches!(o_type, ObjType::Video | ObjType::Audio) {
+        return None;
+    }
+    round_duration(duration_ms?).map(|d| d.to_string())
+}
+
+/// `contentMetadata` of the message announcing an uploaded E2EE object,
+/// as the Android app writes it (`yq8/*`, `tq8/t1`): `FILE_SIZE` is the
+/// plaintext size; images carry `MEDIA_CONTENT_INFO`; videos and audio
+/// `DURATION`. The file name travels only in the encrypted payload.
 pub fn e2ee_content_metadata(
     o_type: ObjType,
     obj_id: &str,
-    encrypted_size: usize,
+    file_size: usize,
     extension: Option<&str>,
-    duration_ms: Option<f64>,
+    opts: &MediaOptions,
 ) -> IndexMap<String, String> {
     let (namespace, _) = type_set(o_type);
     let mut meta = IndexMap::new();
     meta.insert("SID".to_string(), namespace.to_string());
     meta.insert("OID".to_string(), obj_id.to_string());
-    meta.insert("FILE_SIZE".to_string(), encrypted_size.to_string());
+    if file_size > 0 {
+        meta.insert("FILE_SIZE".to_string(), file_size.to_string());
+    }
     meta.insert("e2eeVersion".to_string(), "2".to_string());
-    if has_preview(o_type) {
-        let ext = extension
-            .map(|e| format!(",\"extension\":{}", serde_json::Value::from(e)))
-            .unwrap_or_default();
+    if is_image(o_type) {
         meta.insert(
             "MEDIA_CONTENT_INFO".to_string(),
-            format!(
-                "{{\"category\":\"original\",\"fileSize\":{encrypted_size}{ext},\"animated\":{}}}",
-                o_type == ObjType::Gif
-            ),
+            media_content_info(o_type, file_size, extension, opts),
         );
     }
-    if let Some(d) = e2ee_duration(o_type, duration_ms) {
-        meta.insert("DURATION".to_string(), d);
+    if matches!(o_type, ObjType::Video | ObjType::Audio)
+        && let Some(d) = opts.duration_ms.filter(|d| *d > 0)
+    {
+        meta.insert("DURATION".to_string(), d.to_string());
     }
     meta
 }
 
-/// The side effects of an E2EE upload, split out so the flow can be tested
+/// `{"category":"original","fileSize":…,"extension":…,"animated":true,
+/// "width":…,"height":…}` (`tq8/t1.m`); `animated` only when true, the
+/// size only when known.
+fn media_content_info(
+    o_type: ObjType,
+    file_size: usize,
+    extension: Option<&str>,
+    opts: &MediaOptions,
+) -> String {
+    let animated = opts.animated.unwrap_or(o_type == ObjType::Gif);
+    let extension = if o_type == ObjType::Gif {
+        "gif".to_string()
+    } else {
+        extension
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_else(|| "jpg".to_string())
+    };
+    let mut info = format!(
+        "{{\"category\":\"original\",\"fileSize\":{file_size},\"extension\":{}",
+        serde_json::Value::from(extension)
+    );
+    if animated {
+        info.push_str(",\"animated\":true");
+    }
+    if let Some(w) = opts.width {
+        info.push_str(&format!(",\"width\":{w}"));
+    }
+    if let Some(h) = opts.height {
+        info.push_str(&format!(",\"height\":{h}"));
+    }
+    info.push('}');
+    info
+}
+
+/// `x-obs-params` of a V2 upload (`a41/p.a`, `tx3/a.a`): type is the enum
+/// name `FILE` for every kind, and `range` covers the whole body.
+pub(crate) fn v2_params(name: &str, len: usize) -> Vec<(String, String)> {
+    vec![
+        ("ver".to_string(), "2.0".to_string()),
+        ("name".to_string(), name.to_string()),
+        ("type".to_string(), "FILE".to_string()),
+        (
+            "range".to_string(),
+            format!("bytes 0-{}/{len}", len.saturating_sub(1)),
+        ),
+    ]
+}
+
+/// The side effects of a media send, split out so the flow can be tested
 /// without a server.
 #[async_trait]
-pub(crate) trait E2eeMediaBackend: Sync {
+pub(crate) trait MediaBackend: Sync {
+    async fn reqseq(&self) -> Result<i64>;
+    /// The chat's flows (cached until their TTL).
+    async fn media_flows(&self, chat: &str) -> Result<MediaFlows>;
+    fn drop_media_flow(&self, chat: &str);
+    /// V2 upload; returns the object id.
     async fn upload(
         &self,
         data: Bytes,
         obs_path: String,
         params: Vec<(String, String)>,
     ) -> Result<String>;
+    /// V1 upload in reqseq mode.
+    async fn upload_plain(
+        &self,
+        to: &str,
+        o_type: ObjType,
+        file: ObsFile,
+        duration_ms: Option<u64>,
+        reqseq: i64,
+    ) -> Result<ObsUpload>;
     async fn encrypt_message(
         &self,
         to: &str,
         key_material: &str,
-        file_name: &str,
+        file_name: Option<&str>,
         content_type: i32,
     ) -> Result<Vec<Vec<u8>>>;
+    async fn prepare_resend(&self, to: &str, recovery: E2eeSendRecovery) -> Result<()>;
     async fn send(
         &self,
         to: &str,
         chunks: Vec<Vec<u8>>,
         content_type: i32,
         metadata: IndexMap<String, String>,
+        seq: i64,
     ) -> Result<Value>;
 }
 
 #[async_trait]
-impl E2eeMediaBackend for Obs<'_> {
+impl MediaBackend for Obs<'_> {
+    async fn reqseq(&self) -> Result<i64> {
+        self.client.get_reqseq("talk").await
+    }
+
+    async fn media_flows(&self, chat: &str) -> Result<MediaFlows> {
+        Obs::media_flows(self, chat).await
+    }
+
+    fn drop_media_flow(&self, chat: &str) {
+        self.client.drop_media_flow(Some(chat));
+    }
+
     async fn upload(
         &self,
         data: Bytes,
         obs_path: String,
         params: Vec<(String, String)>,
     ) -> Result<String> {
+        let content_type = params
+            .iter()
+            .find(|(k, _)| k == "name")
+            .map(|(_, name)| super::mime::content_type_for_name(name))
+            .unwrap_or("");
         let up = self
-            .upload_object_for_service(ObjectUpload {
-                data,
-                o_type: ObjType::File,
-                obs_path: Some(obs_path),
-                params,
-                ..Default::default()
-            })
+            .upload_with_obs_token(
+                ObjectUpload {
+                    data,
+                    o_type: ObjType::File,
+                    obs_path: Some(obs_path),
+                    params,
+                    add_headers: vec![("content-type".into(), content_type.into())],
+                    ..Default::default()
+                },
+                self.client,
+            )
             .await?;
+        // The message refers to the object by this id, so it can't be sent
+        // without one.
+        if up.obj_id.is_empty() {
+            return Err(Error::internal(
+                "ObsError",
+                "Object upload failed: no object id",
+            ));
+        }
         Ok(up.obj_id)
+    }
+
+    async fn upload_plain(
+        &self,
+        to: &str,
+        o_type: ObjType,
+        file: ObsFile,
+        duration_ms: Option<u64>,
+        reqseq: i64,
+    ) -> Result<ObsUpload> {
+        self.client.require_token()?;
+        self.upload_obj_talk_with_seq(to, o_type, file, None, duration_ms, reqseq, self.client)
+            .await
     }
 
     async fn encrypt_message(
         &self,
         to: &str,
         key_material: &str,
-        file_name: &str,
+        file_name: Option<&str>,
         content_type: i32,
     ) -> Result<Vec<Vec<u8>>> {
-        let content = E2eeContent::Json(
-            serde_json::json!({"keyMaterial": key_material, "fileName": file_name}),
-        );
+        let mut payload = serde_json::json!({"keyMaterial": key_material});
+        if let Some(name) = file_name {
+            payload["fileName"] = name.into();
+        }
         self.client
-            .encrypt_e2ee_message(to, content, content_type, 2)
+            .encrypt_e2ee_message(to, E2eeContent::Json(payload), content_type, 2)
             .await
+    }
+
+    async fn prepare_resend(&self, to: &str, recovery: E2eeSendRecovery) -> Result<()> {
+        self.client.prepare_e2ee_resend(to, recovery).await
     }
 
     async fn send(
@@ -154,8 +384,9 @@ impl E2eeMediaBackend for Obs<'_> {
         chunks: Vec<Vec<u8>>,
         content_type: i32,
         metadata: IndexMap<String, String>,
+        seq: i64,
     ) -> Result<Value> {
-        send_chunked_message(self.client, to, chunks, content_type, metadata).await
+        send_chunked_message(self.client, to, chunks, content_type, metadata, seq).await
     }
 }
 
@@ -166,6 +397,7 @@ async fn send_chunked_message(
     chunks: Vec<Vec<u8>>,
     content_type: i32,
     metadata: IndexMap<String, String>,
+    seq: i64,
 ) -> Result<Value> {
     let mut message = crate::tv!({
         "to": to,
@@ -188,78 +420,202 @@ async fn send_chunked_message(
         "chunks",
         Value::List(chunks.into_iter().map(Value::Binary).collect()),
     );
-    let mut args = crate::tv!({"seq": client.get_reqseq("talk").await?});
+    let mut args = crate::tv!({"seq": seq});
     args.insert("message", message);
     client.talk().call("sendMessage", args).await
 }
 
-pub(crate) async fn upload_media_by_e2ee(
-    backend: &dyn E2eeMediaBackend,
-    opts: E2eeMediaUpload,
-) -> Result<Value> {
-    let E2eeMediaUpload {
-        file,
-        o_type,
-        to,
-        preview,
-        duration_ms,
-    } = opts;
+/// One media message to send.
+#[derive(Debug, Clone)]
+pub(crate) struct MediaSend {
+    pub to: String,
+    pub o_type: ObjType,
+    pub file: ObsFile,
+    pub opts: MediaOptions,
+}
+
+/// An uploaded V2 object and the key that opens it.
+struct V2Object {
+    obj_id: String,
+    key_material: String,
+}
+
+/// Send `m` through the flow its chat uses; see the module docs.
+pub(crate) async fn send_media(backend: &dyn MediaBackend, m: MediaSend) -> Result<SentMedia> {
+    if m.file.is_empty() {
+        return Err(Error::internal("ObsError", "No data to send."));
+    }
+    check_media_size(m.o_type, m.file.len())?;
+    let flow = match m.opts.e2ee {
+        Some(false) => MediaFlow::V1,
+        _ if !v2_capable(&m.to) => {
+            if m.opts.e2ee == Some(true) {
+                return Err(Error::internal("ObsError", "Invalid mid"));
+            }
+            MediaFlow::V1
+        }
+        Some(true) => MediaFlow::V2,
+        None => match backend.media_flows(&m.to).await {
+            Ok(flows) => flows.get(m.o_type),
+            Err(e) => {
+                // Keep sending as before when LINE can't say: encrypted
+                // for users and groups.
+                tracing::debug!(error = %e, "determineMediaMessageFlow failed");
+                MediaFlow::V2
+            }
+        },
+    };
+    // One request number for the upload and every resend (`uq8/y3`).
+    let seq = backend.reqseq().await?;
+    if flow == MediaFlow::V1 {
+        return send_v1(backend, &m, seq).await;
+    }
+
+    let object = upload_v2(backend, &m).await?;
+    let (_, content_type) = type_set(m.o_type);
+    let metadata = e2ee_content_metadata(
+        m.o_type,
+        &object.obj_id,
+        m.file.len(),
+        m.file.extension().as_deref(),
+        &m.opts,
+    );
+    let file_name = (m.o_type == ObjType::File).then(|| payload_file_name(&m.file));
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let chunks = backend
+            .encrypt_message(
+                &m.to,
+                &object.key_material,
+                file_name.as_deref(),
+                content_type,
+            )
+            .await?;
+        let err = match backend
+            .send(&m.to, chunks, content_type, metadata.clone(), seq)
+            .await
+        {
+            Ok(message) => return Ok(SentMedia::E2ee(message)),
+            Err(e) => e,
+        };
+        let code = err.code().unwrap_or_default();
+        let refresh_flow = matches!(code, "REFRESH_MEDIA_FLOW" | "122");
+        let recovery = send_recovery(code);
+        if refresh_flow || recovery == Some(E2eeSendRecovery::RetryPlain) {
+            backend.drop_media_flow(&m.to);
+            if m.opts.e2ee == Some(true) {
+                return Err(err);
+            }
+            return send_v1(backend, &m, seq).await;
+        }
+        match recovery {
+            Some(r) if attempts < MAX_MEDIA_SEND_ATTEMPTS => {
+                backend.prepare_resend(&m.to, r).await?;
+            }
+            _ => return Err(err),
+        }
+    }
+}
+
+async fn send_v1(backend: &dyn MediaBackend, m: &MediaSend, seq: i64) -> Result<SentMedia> {
+    let up = backend
+        .upload_plain(&m.to, m.o_type, m.file.clone(), m.opts.duration_ms, seq)
+        .await?;
+    Ok(SentMedia::Plain {
+        obj_id: up.obj_id,
+        obj_hash: up.obj_hash,
+    })
+}
+
+/// `fileName` of a FILE message's E2EE payload.
+fn payload_file_name(file: &ObsFile) -> String {
+    file.name.clone().unwrap_or_else(|| match file.extension() {
+        Some(ext) => format!("file.{ext}"),
+        None => "file".to_string(),
+    })
+}
+
+/// `name` of the main object: the file's own name; for a video (and a
+/// nameless file) `<uuid>.<ext>` as the app does (`a41/h0`).
+fn upload_name(o_type: ObjType, file: &ObsFile) -> String {
     let ext = file.extension();
-    let (namespace, content_type) = type_set(o_type);
-    let mut params = vec![("type".to_string(), "file".to_string())];
-    if o_type == ObjType::Gif {
-        params.push(("cat".into(), "original".into()));
+    match (&file.name, o_type) {
+        (Some(name), t) if t != ObjType::Video => name.clone(),
+        (_, ObjType::Video) => format!("{}.{}", super::uuid_v4(), ext.as_deref().unwrap_or("mp4")),
+        _ => match ext {
+            Some(ext) => format!("{}.{ext}", super::uuid_v4()),
+            None => super::uuid_v4(),
+        },
     }
-    if !(to.starts_with('u') || to.starts_with('c')) {
-        return Err(Error::internal("ObsError", "Invalid mid"));
-    }
-    let enc = encrypt_by_key_material(&file.data, None);
-    let edata = Bytes::from(enc.encrypted_data);
-    let size = edata.len();
+}
+
+/// Encrypt and upload the object, its preview and (video) its chunk
+/// hashes (`a41/p.b`).
+async fn upload_v2(backend: &dyn MediaBackend, m: &MediaSend) -> Result<V2Object> {
+    let (namespace, _) = type_set(m.o_type);
+    let video = m.o_type == ObjType::Video;
+    let enc = encrypt_media(
+        &m.file.data,
+        None,
+        if video {
+            MediaHmacVersion::V2
+        } else {
+            MediaHmacVersion::V1
+        },
+    );
+    let data = Bytes::from(enc.data);
+    let name = upload_name(m.o_type, &m.file);
     let temp_id = format!("reqid-{}", super::uuid_v4());
+    let params = v2_params(&name, data.len());
     let obj_id = backend
-        .upload(
-            edata.clone(),
-            format!("talk/{namespace}/{temp_id}"),
-            params.clone(),
-        )
+        .upload(data.clone(), format!("talk/{namespace}/{temp_id}"), params)
         .await?;
 
-    if has_preview(o_type) {
-        let preview_data = match preview {
-            Some(p) => {
-                use base64::Engine;
-                let key = base64::engine::general_purpose::STANDARD
-                    .decode(&enc.key_material)
-                    .map_err(|e| Error::internal("E2EEMediaError", e.to_string()))?;
-                Bytes::from(encrypt_by_key_material(&p, Some(&key)).encrypted_data)
-            }
-            None => edata,
-        };
-        let obj_id2 = backend
+    // The preview is a separate v1 file under the same key. An image is
+    // its own preview; a video without a thumbnail gets none.
+    let preview = match (&m.opts.preview, m.o_type) {
+        (Some(p), ObjType::Image | ObjType::Gif | ObjType::Video) => {
+            use base64::Engine;
+            let key = base64::engine::general_purpose::STANDARD
+                .decode(&enc.key_material)
+                .map_err(|e| Error::internal("E2EEMediaError", e.to_string()))?;
+            Some(Bytes::from(
+                encrypt_by_key_material(p, Some(&key)).encrypted_data,
+            ))
+        }
+        (None, ObjType::Image | ObjType::Gif) => Some(data),
+        _ => None,
+    };
+    if let Some(preview) = preview {
+        let params = v2_params("preview.jpg", preview.len());
+        backend
             .upload(
-                preview_data,
+                preview,
                 format!("talk/{namespace}/{obj_id}__ud-preview"),
                 params,
             )
             .await?;
-        if obj_id != obj_id2 {
-            return Err(Error::internal(
-                "ObsError",
-                format!("objId not match: {obj_id} != {obj_id2}"),
-            ));
-        }
     }
 
-    let file_name = file
-        .name
-        .clone()
-        .unwrap_or_else(|| format!("line.{}", ext.as_deref().unwrap_or("undefined")));
-    let chunks = backend
-        .encrypt_message(&to, &enc.key_material, &file_name, content_type)
-        .await?;
-    let metadata = e2ee_content_metadata(o_type, &obj_id, size, ext.as_deref(), duration_ms);
-    backend.send(&to, chunks, content_type, metadata).await
+    // The app uploads the chunk digests alone (`xx3/f.a()`); the HMAC that
+    // covers them ends the video itself.
+    if let Some(object) = enc.hash_object {
+        let digests = Bytes::from(object[..object.len() - MEDIA_HMAC_LEN].to_vec());
+        let params = v2_params("hash", digests.len());
+        backend
+            .upload(
+                digests,
+                format!("talk/{namespace}/{obj_id}__ud-hash"),
+                params,
+            )
+            .await?;
+    }
+
+    Ok(V2Object {
+        obj_id,
+        key_material: enc.key_material,
+    })
 }
 
 /// `X-Talk-Meta` header value for downloading the object of message `id`.
@@ -277,9 +633,64 @@ pub(crate) fn talk_meta(message_id: &str) -> Result<String> {
     Ok(b64.encode(json))
 }
 
+impl From<E2eeMediaUpload> for MediaSend {
+    fn from(u: E2eeMediaUpload) -> Self {
+        MediaSend {
+            opts: MediaOptions {
+                preview: u.preview,
+                duration_ms: u
+                    .duration_ms
+                    .filter(|_| matches!(u.o_type, ObjType::Video | ObjType::Audio))
+                    .and_then(round_duration),
+                width: u.width,
+                height: u.height,
+                animated: u.animated,
+                e2ee: Some(true),
+            },
+            to: u.to,
+            o_type: u.o_type,
+            file: u.file,
+        }
+    }
+}
+
+/// [`Obs::upload_media_by_e2ee`] against any backend.
+pub(crate) async fn upload_media_by_e2ee(
+    backend: &dyn MediaBackend,
+    opts: E2eeMediaUpload,
+) -> Result<Value> {
+    match send_media(backend, opts.into()).await? {
+        SentMedia::E2ee(message) => Ok(message),
+        SentMedia::Plain { .. } => Err(Error::internal("ObsError", "media was sent without E2EE")),
+    }
+}
+
 impl Obs<'_> {
+    /// Send media to `to` the way the official app does: plain or with
+    /// Letter Sealing as LINE decides for the chat (see [`MediaOptions::e2ee`]
+    /// to force either), recovering from E2EE send errors.
+    pub async fn send_media(
+        &self,
+        to: &str,
+        o_type: ObjType,
+        file: ObsFile,
+        opts: MediaOptions,
+    ) -> Result<SentMedia> {
+        send_media(
+            self,
+            MediaSend {
+                to: to.to_string(),
+                o_type,
+                file,
+                opts,
+            },
+        )
+        .await
+    }
+
     /// Encrypt and upload media for an E2EE chat, then send the message that
-    /// carries the key material. Returns the sent `Message`.
+    /// carries the key material. Returns the sent `Message`. Never falls
+    /// back to a plain upload.
     pub async fn upload_media_by_e2ee(&self, opts: E2eeMediaUpload) -> Result<Value> {
         upload_media_by_e2ee(self, opts).await
     }
