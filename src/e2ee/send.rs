@@ -831,6 +831,15 @@ mod tests {
             self.record("negotiateE2EEPublicKey");
             Ok(self.negotiate.lock().unwrap().clone())
         }
+        async fn get_e2ee_public_key(&self, _mid: &str, _: i32, key_id: i64) -> Result<Value> {
+            self.record("getE2EEPublicKey");
+            let pk = self.negotiate.lock().unwrap()["publicKey"].clone();
+            if pk["keyId"].as_i64() == Some(key_id) {
+                Ok(pk)
+            } else {
+                Err(server_error("NOT_FOUND"))
+            }
+        }
         async fn get_e2ee_group_shared_key(&self, _: i32, _: &str, _: i64) -> Result<Value> {
             self.record("getE2EEGroupSharedKey");
             Err(server_error("NOT_FOUND"))
