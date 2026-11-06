@@ -129,6 +129,17 @@ impl Writer {
     pub fn message(&mut self, field: u32, body: &[u8]) {
         self.bytes_always(field, body);
     }
+
+    /// A packed repeated varint field (`repeated int32/uint64/enum`, proto3's
+    /// default encoding). Negative int32s are sign-extended, as protobuf
+    /// does. Nothing is written for an empty list.
+    pub fn packed_varints(&mut self, field: u32, values: impl IntoIterator<Item = u64>) {
+        let mut body = Writer::new();
+        for v in values {
+            body.put_varint(v);
+        }
+        self.bytes(field, body.as_bytes());
+    }
 }
 
 /// A single field's decoded value, borrowing from the source buffer.
@@ -274,6 +285,15 @@ pub fn packed_varints(buf: &[u8]) -> Result<Vec<u64>> {
     Ok(out)
 }
 
+/// The values of one occurrence of a repeated varint field, which a sender
+/// may write packed (one length-delimited field) or not (one varint).
+pub fn repeated_varints(value: Value<'_>) -> Result<Vec<u64>> {
+    match value {
+        Value::Len(b) => packed_varints(b),
+        other => Ok(vec![other.as_u64()?]),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,5 +370,21 @@ mod tests {
         body.put_varint(2);
         body.put_varint(300);
         assert_eq!(packed_varints(body.as_bytes()).unwrap(), vec![1, 2, 300]);
+    }
+
+    #[test]
+    fn packed_writer_round_trips_and_reads_unpacked_too() {
+        let mut w = Writer::new();
+        w.packed_varints(5, [1, 2, 300]);
+        w.packed_varints(6, []);
+        w.int32(7, 4);
+        let mut r = Reader::new(w.as_bytes());
+        let f = r.next_field().unwrap().unwrap();
+        assert_eq!(f.number, 5);
+        assert_eq!(repeated_varints(f.value).unwrap(), vec![1, 2, 300]);
+        let f = r.next_field().unwrap().unwrap();
+        assert_eq!(f.number, 7);
+        assert_eq!(repeated_varints(f.value).unwrap(), vec![4]);
+        assert!(r.next_field().unwrap().is_none());
     }
 }

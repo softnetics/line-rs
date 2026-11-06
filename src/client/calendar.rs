@@ -5,14 +5,13 @@
 //! [`crate::protobuf`]; see that module for why there is no codegen.
 //!
 //! Covers listing calendars and events, and creating, updating and deleting
-//! events (`EventService/CreateEvents`, `UpdateEvents`, `DeleteEvents`).
-//! Recurrence, invitees, reminders and RSVP (`InvitationService`) are not
-//! done yet.
+//! events (`EventService/CreateEvents`, `UpdateEvents`, `DeleteEvents`),
+//! with their recurrence, changed occurrences, invitees and reminders.
 
 use crate::base::BaseClient;
 use crate::error::{Error, Result};
 use crate::grpc::{self, GrpcRequest};
-use crate::protobuf::{Reader, Writer};
+use crate::protobuf::{Reader, Value, Writer, repeated_varints};
 use crate::tv;
 
 const CALENDAR_SERVICE: &str = "/line.calendar.bff.CalendarService";
@@ -31,7 +30,8 @@ pub struct Calendar {
     pub name: String,
     pub is_visible: bool,
     pub is_favorite: bool,
-    /// Raw `type` enum value (0 = personal, chat types are non-zero).
+    /// Raw `CalendarType`: [`CALENDAR_PERSONAL`] (1) or
+    /// [`CALENDAR_CHATROOM`] (2); 0 is unspecified.
     pub kind: i32,
     pub color_id: i32,
     /// Group/room/user mid for a chat calendar; empty for a personal one.
@@ -40,8 +40,17 @@ pub struct Calendar {
     pub client_updated_at: i64,
     pub created_at: i64,
     pub is_reminder_enabled: bool,
+    /// The calendar the app made for the user on first use.
+    pub is_initial: bool,
+    /// False for a calendar the user has hidden from the calendar list.
     pub is_shown_in_calendar_list: bool,
+    pub to_app_id: String,
 }
+
+/// [`Calendar::kind`] of the user's own calendars.
+pub const CALENDAR_PERSONAL: i32 = 1;
+/// [`Calendar::kind`] of a chat's calendar.
+pub const CALENDAR_CHATROOM: i32 = 2;
 
 impl Calendar {
     /// Decodes a `line.calendar.bff.Calendar` message.
@@ -61,7 +70,267 @@ impl Calendar {
                 11 => c.client_updated_at = f.value.as_i64()?,
                 12 => c.created_at = f.value.as_i64()?,
                 13 => c.is_reminder_enabled = f.value.as_bool()?,
+                14 => c.is_initial = f.value.as_bool()?,
                 15 => c.is_shown_in_calendar_list = f.value.as_bool()?,
+                16 => c.to_app_id = f.value.as_str()?.to_string(),
+                _ => {}
+            }
+        }
+        Ok(c)
+    }
+}
+
+/// How often a recurring event repeats (`Recurrence.frequency`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Frequency {
+    #[default]
+    Unspecified,
+    Daily,
+    Weekly,
+    Monthly,
+    Yearly,
+    /// A value this library doesn't know.
+    Other(i32),
+}
+
+impl Frequency {
+    pub fn from_raw(v: i32) -> Self {
+        match v {
+            0 => Self::Unspecified,
+            1 => Self::Daily,
+            2 => Self::Weekly,
+            3 => Self::Monthly,
+            4 => Self::Yearly,
+            v => Self::Other(v),
+        }
+    }
+
+    pub fn raw(self) -> i32 {
+        match self {
+            Self::Unspecified => 0,
+            Self::Daily => 1,
+            Self::Weekly => 2,
+            Self::Monthly => 3,
+            Self::Yearly => 4,
+            Self::Other(v) => v,
+        }
+    }
+}
+
+/// How an event repeats (`line.calendar.bff.Recurrence`), an iCalendar
+/// RRULE in parts: the app turns it into `FREQ=…;INTERVAL=…;UNTIL=…;BYDAY=…`
+/// and expands it with ical4j.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Recurrence {
+    pub frequency: Frequency,
+    /// Every `interval` days/weeks/months/years; 0 or 1 is every one.
+    pub interval: u32,
+    /// The last moment an occurrence may start, epoch seconds (UTC).
+    pub until: Option<i64>,
+    /// iCalendar weekdays: `MO`…`SU` for a weekly event, or an ordinal and a
+    /// day such as `2TU` or `-1FR` for "the second Tuesday" / "the last
+    /// Friday" of a monthly one. Empty means the start's own day.
+    pub by_day: Vec<String>,
+    /// Occurrences left out of the series, by their original start (epoch
+    /// seconds, the same value as [`ChildEvent::recur_id`]).
+    pub except_ids: Vec<i64>,
+}
+
+impl Recurrence {
+    fn decode(buf: &[u8]) -> Result<Self> {
+        let mut out = Recurrence::default();
+        let mut r = Reader::new(buf);
+        while let Some(f) = r.next_field()? {
+            match f.number {
+                1 => out.frequency = Frequency::from_raw(f.value.as_i32()?),
+                2 => out.interval = f.value.as_u64()? as u32,
+                3 => out.until = Some(f.value.as_i64()?),
+                4 => out.by_day.push(f.value.as_str()?.to_string()),
+                5 => out
+                    .except_ids
+                    .extend(repeated_varints(f.value)?.into_iter().map(|v| v as i64)),
+                _ => {}
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// When LINE reminds the user of an event (`line.calendar.bff.Reminder`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reminder {
+    OneHourBefore,
+    TwoHoursBefore,
+    OneDayBefore,
+    TwoDaysBefore,
+    /// At 12:00 on the day before.
+    NoonTheDayBefore,
+    /// At 12:00 two days before.
+    NoonTwoDaysBefore,
+    /// A value this library doesn't know (kept so an edit sends it back).
+    Other(i32),
+}
+
+impl Reminder {
+    pub fn from_raw(v: i32) -> Self {
+        match v {
+            1 => Self::OneHourBefore,
+            2 => Self::NoonTheDayBefore,
+            3 => Self::TwoHoursBefore,
+            4 => Self::OneDayBefore,
+            5 => Self::TwoDaysBefore,
+            6 => Self::NoonTwoDaysBefore,
+            v => Self::Other(v),
+        }
+    }
+
+    pub fn raw(self) -> i32 {
+        match self {
+            Self::OneHourBefore => 1,
+            Self::NoonTheDayBefore => 2,
+            Self::TwoHoursBefore => 3,
+            Self::OneDayBefore => 4,
+            Self::TwoDaysBefore => 5,
+            Self::NoonTwoDaysBefore => 6,
+            Self::Other(v) => v,
+        }
+    }
+}
+
+/// An invitee's answer (`line.calendar.bff.InvitationStatus`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum InvitationStatus {
+    #[default]
+    Unspecified,
+    NeedsAction,
+    Accepted,
+    Declined,
+    Other(i32),
+}
+
+impl InvitationStatus {
+    pub fn from_raw(v: i32) -> Self {
+        match v {
+            0 => Self::Unspecified,
+            1 => Self::NeedsAction,
+            2 => Self::Accepted,
+            3 => Self::Declined,
+            v => Self::Other(v),
+        }
+    }
+
+    pub fn raw(self) -> i32 {
+        match self {
+            Self::Unspecified => 0,
+            Self::NeedsAction => 1,
+            Self::Accepted => 2,
+            Self::Declined => 3,
+            Self::Other(v) => v,
+        }
+    }
+}
+
+/// Someone invited to an event, and their answer.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Invitee {
+    /// The invitee's mid.
+    pub invitee_id: String,
+    pub status: InvitationStatus,
+    pub client_updated_at: i64,
+}
+
+impl Invitee {
+    fn decode(buf: &[u8]) -> Result<Self> {
+        let mut out = Invitee::default();
+        let mut r = Reader::new(buf);
+        while let Some(f) = r.next_field()? {
+            match f.number {
+                1 => out.invitee_id = f.value.as_str()?.to_string(),
+                3 => out.status = InvitationStatus::from_raw(f.value.as_i32()?),
+                4 => out.client_updated_at = f.value.as_i64()?,
+                _ => {}
+            }
+        }
+        Ok(out)
+    }
+}
+
+fn reminders(value: Value<'_>) -> Result<Vec<Reminder>> {
+    Ok(repeated_varints(value)?
+        .into_iter()
+        .map(|v| Reminder::from_raw(v as i32))
+        .collect())
+}
+
+/// `AppReminder { offset = 1 (packed int32) }`: the app's own reminder
+/// offsets. The unit is not known (minutes, probably); they are kept only
+/// so that an edit sends them back unchanged.
+fn app_reminders(buf: &[u8]) -> Result<Vec<i32>> {
+    let mut out = Vec::new();
+    let mut r = Reader::new(buf);
+    while let Some(f) = r.next_field()? {
+        if f.number == 1 {
+            out.extend(repeated_varints(f.value)?.into_iter().map(|v| v as i32));
+        }
+    }
+    Ok(out)
+}
+
+/// One occurrence of a recurring event that was changed on its own
+/// (`line.calendar.bff.RecurrenceChildEvent`). It replaces the occurrence
+/// that would have started at [`recur_id`](Self::recur_id).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ChildEvent {
+    /// The original start of the occurrence it replaces, epoch seconds.
+    pub recur_id: i64,
+    pub start_time: i64,
+    pub end_time: i64,
+    pub timezone: String,
+    pub title: String,
+    pub is_all_day: bool,
+    pub location: String,
+    pub url: String,
+    pub description: String,
+    pub invitees: Vec<Invitee>,
+    pub reminders: Vec<Reminder>,
+    /// The occurrence was deleted.
+    pub is_deleted: bool,
+    pub message_id: Option<String>,
+    pub client_updated_at: i64,
+    pub is_editable_in_line_calendar: bool,
+    pub creator_id: String,
+    pub color_id: i32,
+    pub app_reminders: Option<Vec<i32>>,
+    pub stamp_id: String,
+    pub created_at: i64,
+}
+
+impl ChildEvent {
+    fn decode(buf: &[u8]) -> Result<Self> {
+        let mut c = ChildEvent::default();
+        let mut r = Reader::new(buf);
+        while let Some(f) = r.next_field()? {
+            match f.number {
+                1 => c.start_time = f.value.as_i64()?,
+                2 => c.end_time = f.value.as_i64()?,
+                3 => c.timezone = f.value.as_str()?.to_string(),
+                4 => c.title = f.value.as_str()?.to_string(),
+                5 => c.is_all_day = f.value.as_bool()?,
+                6 => c.location = f.value.as_str()?.to_string(),
+                7 => c.url = f.value.as_str()?.to_string(),
+                8 => c.description = f.value.as_str()?.to_string(),
+                9 => c.invitees.push(Invitee::decode(f.value.as_bytes()?)?),
+                10 => c.reminders.extend(reminders(f.value)?),
+                11 => c.is_deleted = f.value.as_bool()?,
+                12 => c.message_id = Some(f.value.as_str()?.to_string()),
+                13 => c.recur_id = f.value.as_i64()?,
+                14 => c.client_updated_at = f.value.as_i64()?,
+                15 => c.is_editable_in_line_calendar = f.value.as_bool()?,
+                16 => c.creator_id = f.value.as_str()?.to_string(),
+                17 => c.color_id = f.value.as_i32()?,
+                18 => c.app_reminders = Some(app_reminders(f.value.as_bytes()?)?),
+                19 => c.stamp_id = f.value.as_str()?.to_string(),
+                20 => c.created_at = f.value.as_i64()?,
                 _ => {}
             }
         }
@@ -74,7 +343,8 @@ impl Calendar {
 pub struct Event {
     pub id: String,
     pub calendar_id: String,
-    /// Start/end as epoch seconds.
+    /// Start/end as epoch seconds. For a recurring event, the first
+    /// occurrence.
     pub start_time: i64,
     pub end_time: i64,
     pub timezone: String,
@@ -83,13 +353,22 @@ pub struct Event {
     pub location: String,
     pub url: String,
     pub description: String,
+    /// How the event repeats; `None` for a one-off.
+    pub recurrence: Option<Recurrence>,
+    pub invitees: Vec<Invitee>,
+    pub reminders: Vec<Reminder>,
     pub is_deleted: bool,
     /// The chat message this event was created from, if any.
-    pub message_id: String,
+    pub message_id: Option<String>,
+    /// Occurrences of a recurring event changed or deleted on their own.
+    pub recurrence_child_events: Vec<ChildEvent>,
     pub client_updated_at: i64,
     pub is_editable_in_line_calendar: bool,
     pub creator_id: String,
     pub color_id: i32,
+    /// See [`ChildEvent::app_reminders`].
+    pub app_reminders: Option<Vec<i32>>,
+    pub stamp_id: String,
     pub created_at: i64,
 }
 
@@ -110,12 +389,20 @@ impl Event {
                 8 => e.location = f.value.as_str()?.to_string(),
                 9 => e.url = f.value.as_str()?.to_string(),
                 10 => e.description = f.value.as_str()?.to_string(),
+                11 => e.recurrence = Some(Recurrence::decode(f.value.as_bytes()?)?),
+                12 => e.invitees.push(Invitee::decode(f.value.as_bytes()?)?),
+                13 => e.reminders.extend(reminders(f.value)?),
                 14 => e.is_deleted = f.value.as_bool()?,
-                15 => e.message_id = f.value.as_str()?.to_string(),
+                15 => e.message_id = Some(f.value.as_str()?.to_string()),
+                16 => e
+                    .recurrence_child_events
+                    .push(ChildEvent::decode(f.value.as_bytes()?)?),
                 17 => e.client_updated_at = f.value.as_i64()?,
                 18 => e.is_editable_in_line_calendar = f.value.as_bool()?,
                 19 => e.creator_id = f.value.as_str()?.to_string(),
                 20 => e.color_id = f.value.as_i32()?,
+                21 => e.app_reminders = Some(app_reminders(f.value.as_bytes()?)?),
+                22 => e.stamp_id = f.value.as_str()?.to_string(),
                 23 => e.created_at = f.value.as_i64()?,
                 _ => {}
             }
@@ -550,6 +837,78 @@ mod tests {
         assert_eq!(out[0].id, "evt-1");
         assert_eq!(out[0].title, "Lunch");
         assert_eq!(out[0].end_time, 1_700_003_600_000);
+    }
+
+    #[test]
+    fn decodes_recurrence_children_invitees_and_reminders() {
+        let mut rec = Writer::new();
+        rec.enumeration(1, 2);
+        rec.uint32(2, 2);
+        rec.int64(3, 1_800_000_000);
+        rec.string(4, "MO");
+        rec.string(4, "WE");
+        rec.packed_varints(5, [1_700_604_800, 1_701_209_600]);
+
+        let mut inv = Writer::new();
+        inv.string(1, "u1");
+        inv.enumeration(3, 2);
+        inv.int64(4, 5);
+
+        let mut child = Writer::new();
+        child.int64(1, 1_700_608_400);
+        child.int64(2, 1_700_612_000);
+        child.string(4, "Moved");
+        child.bool(11, false);
+        child.int64(13, 1_700_604_800);
+        child.packed_varints(10, [4]);
+
+        let mut app = Writer::new();
+        app.packed_varints(1, [(-30_i64) as u64, 0]);
+
+        let mut ev = Writer::new();
+        ev.string(1, "evt-1");
+        ev.int64(3, 1_700_000_000);
+        ev.message(11, rec.as_bytes());
+        ev.message(12, inv.as_bytes());
+        ev.packed_varints(13, [1, 2]);
+        // A sender may also write a repeated enum unpacked.
+        ev.enumeration(13, 6);
+        ev.string(15, "msg-9");
+        ev.message(16, child.as_bytes());
+        ev.int32(20, 3);
+        ev.message(21, app.as_bytes());
+        ev.string(22, "stamp-1");
+
+        let e = Event::decode(ev.as_bytes()).unwrap();
+        let r = e.recurrence.as_ref().unwrap();
+        assert_eq!(r.frequency, Frequency::Weekly);
+        assert_eq!(r.interval, 2);
+        assert_eq!(r.until, Some(1_800_000_000));
+        assert_eq!(r.by_day, ["MO", "WE"]);
+        assert_eq!(r.except_ids, [1_700_604_800, 1_701_209_600]);
+        assert_eq!(e.invitees[0].invitee_id, "u1");
+        assert_eq!(e.invitees[0].status, InvitationStatus::Accepted);
+        assert_eq!(
+            e.reminders,
+            [
+                Reminder::OneHourBefore,
+                Reminder::NoonTheDayBefore,
+                Reminder::NoonTwoDaysBefore
+            ]
+        );
+        assert_eq!(e.message_id.as_deref(), Some("msg-9"));
+        assert_eq!(e.recurrence_child_events.len(), 1);
+        let c = &e.recurrence_child_events[0];
+        assert_eq!(
+            (c.recur_id, c.title.as_str(), c.reminders.as_slice()),
+            (1_700_604_800, "Moved", &[Reminder::OneDayBefore][..])
+        );
+        assert_eq!(e.color_id, 3);
+        assert_eq!(e.app_reminders.as_deref(), Some(&[-30, 0][..]));
+        assert_eq!(e.stamp_id, "stamp-1");
+
+        let plain = Event::decode(&[]).unwrap();
+        assert!(plain.recurrence.is_none() && plain.message_id.is_none());
     }
 
     #[test]
