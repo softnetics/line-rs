@@ -502,8 +502,13 @@ pub(crate) async fn send_media(backend: &dyn MediaBackend, m: MediaSend) -> Resu
         let code = err.code().unwrap_or_default();
         let refresh_flow = matches!(code, "REFRESH_MEDIA_FLOW" | "122");
         let recovery = send_recovery(code);
-        if refresh_flow || recovery == Some(E2eeSendRecovery::RetryPlain) {
-            backend.drop_media_flow(&m.to);
+        // SENDER_DISABLED / SENDER_NOT_ALLOWED: this account can't send
+        // E2EE right now, so this one goes plain; the chat's flow stays.
+        let send_plain = recovery == Some(E2eeSendRecovery::SendPlain);
+        if refresh_flow || send_plain || recovery == Some(E2eeSendRecovery::RetryPlain) {
+            if !send_plain {
+                backend.drop_media_flow(&m.to);
+            }
             if m.opts.e2ee == Some(true) {
                 return Err(err);
             }
