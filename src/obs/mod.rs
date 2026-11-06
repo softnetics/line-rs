@@ -12,17 +12,22 @@
 //! # let _ = (up, file); Ok(()) }
 //! ```
 
+mod copy;
 pub mod crypto;
 mod e2ee;
 mod flow;
+mod group;
+mod meta;
 pub mod mime;
 mod token;
 
+pub use copy::ForwardMedia;
 pub use e2ee::{
     E2eeMediaUpload, MAX_FILE_SIZE, MAX_MEDIA_SEND_ATTEMPTS, MAX_VIDEO_SIZE, MediaOptions,
     SentMedia, check_media_size, e2ee_content_metadata, e2ee_duration,
 };
 pub use flow::{MediaFlow, MediaFlows};
+pub use meta::MediaGroup;
 pub use token::{OBS_TOKEN_ATTEMPTS, parse_obs_token};
 
 use std::time::Instant;
@@ -445,12 +450,22 @@ impl<'a> Obs<'a> {
     ) -> Result<ObsUpload> {
         self.client.require_token()?;
         let reqseq = self.client.get_reqseq("talk").await?;
-        self.upload_obj_talk_with_seq(to, o_type, file, oid, duration_ms, reqseq, self.client)
-            .await
+        self.upload_obj_talk_with_seq(
+            to,
+            o_type,
+            file,
+            oid,
+            duration_ms,
+            reqseq,
+            Vec::new(),
+            self.client,
+        )
+        .await
     }
 
     /// [`upload_obj_talk`](Self::upload_obj_talk) with a given `reqseq`, so
-    /// a media send keeps one request number across its retries.
+    /// a media send keeps one request number across its retries, and extra
+    /// headers such as `X-Talk-Meta`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn upload_obj_talk_with_seq(
         &self,
@@ -460,6 +475,7 @@ impl<'a> Obs<'a> {
         oid: Option<&str>,
         duration_ms: Option<u64>,
         reqseq: i64,
+        add_headers: Vec<(String, String)>,
         tokens: &dyn token::ObsTokenSource,
     ) -> Result<ObsUpload> {
         let ext = file
@@ -503,7 +519,7 @@ impl<'a> Obs<'a> {
             )),
             params,
             filename: Some(name),
-            add_headers: Vec::new(),
+            add_headers,
         };
         if square {
             // Square uploads keep the session token they have always used.
