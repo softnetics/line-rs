@@ -40,6 +40,11 @@ struct Fake {
     prepared: Mutex<Vec<E2eeSendRecovery>>,
     send_errors: Mutex<VecDeque<&'static str>>,
     sent: Mutex<Vec<Sent>>,
+    /// Extra headers of each V2 and V1 upload, in order.
+    headers: Mutex<Vec<Vec<(String, String)>>>,
+    /// `x-line-message-gid` (or `Err` for a failure) of each V1 upload,
+    /// in order; none left means success without a group id.
+    plain_answers: Mutex<VecDeque<std::result::Result<&'static str, u16>>>,
 }
 
 impl Default for Fake {
@@ -60,6 +65,8 @@ impl Fake {
             prepared: Mutex::default(),
             send_errors: Mutex::default(),
             sent: Mutex::default(),
+            headers: Mutex::default(),
+            plain_answers: Mutex::default(),
         }
     }
     fn failing_sends(codes: &[&'static str]) -> Self {
@@ -127,8 +134,10 @@ impl MediaBackend for Fake {
         data: Bytes,
         obs_path: String,
         params: Vec<(String, String)>,
+        headers: Vec<(String, String)>,
     ) -> Result<String> {
         self.uploads.lock().unwrap().push((data, obs_path, params));
+        self.headers.lock().unwrap().push(headers);
         Ok("OBJ-1".into())
     }
     async fn upload_plain(
@@ -138,15 +147,30 @@ impl MediaBackend for Fake {
         file: ObsFile,
         duration_ms: Option<u64>,
         reqseq: i64,
+        headers: Vec<(String, String)>,
     ) -> Result<ObsUpload> {
         self.plain
             .lock()
             .unwrap()
             .push((o_type, file.len(), duration_ms, reqseq));
+        self.headers.lock().unwrap().push(headers);
+        let mut answer = reqwest::header::HeaderMap::new();
+        match self.plain_answers.lock().unwrap().pop_front() {
+            Some(Err(status)) => {
+                return Err(Error::internal(
+                    "ObsError",
+                    format!("Object upload failed: HTTP {status}"),
+                ));
+            }
+            Some(Ok(gid)) => {
+                answer.insert("x-line-message-gid", gid.parse().unwrap());
+            }
+            None => {}
+        }
         Ok(ObsUpload {
             obj_id: "PLAIN-1".into(),
             obj_hash: "HASH".into(),
-            headers: Default::default(),
+            headers: answer,
         })
     }
     async fn encrypt_message(
@@ -1074,6 +1098,7 @@ async fn upload_without_object_id_is_obs_error() {
             Bytes::from_static(b"data"),
             "talk/emf/reqid-1".into(),
             vec![],
+            vec![],
         )
         .await
         .unwrap_err();
@@ -1099,6 +1124,7 @@ async fn v2_upload_sends_obs_token_params_and_content_type() {
             Bytes::from_static(b"data"),
             "talk/emi/reqid-1".into(),
             v2_params("cat.PNG", 4),
+            vec![],
         )
         .await
         .unwrap();
@@ -1130,6 +1156,7 @@ async fn hash_upload_has_empty_content_type() {
             Bytes::from_static(b"data"),
             "talk/emv/OID-9__ud-hash".into(),
             v2_params("hash", 4),
+            vec![],
         )
         .await
         .unwrap();
@@ -1226,6 +1253,7 @@ async fn v1_talk_upload_uses_the_obs_token_and_given_reqseq() {
         ObsFile::new(b"mp4".to_vec()).name("a.mp4"),
         Some(3000),
         77,
+        Vec::new(),
     )
     .await
     .unwrap();
@@ -1288,3 +1316,5 @@ fn metadata_tolerates_nulls_and_numeric_strings() {
     let vid = m.video_mp4_details.unwrap();
     assert_eq!((vid.duration_millis, vid.width), (1500, None));
 }
+
+mod send_extras;

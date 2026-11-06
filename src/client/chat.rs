@@ -112,6 +112,20 @@ impl Chat {
             .await
     }
 
+    /// Send several images as one photo group, as the app does when you
+    /// pick more than one (see [`Obs::send_image_group`](crate::obs::Obs::send_image_group)).
+    /// One result per image, in order.
+    pub async fn send_image_group(
+        &self,
+        images: Vec<(ObsFile, MediaOptions)>,
+    ) -> Vec<Result<SentMedia>> {
+        self.client
+            .base
+            .obs()
+            .send_image_group(self.mid(), images)
+            .await
+    }
+
     fn named(data: Vec<u8>, filename: Option<&str>) -> ObsFile {
         let file = ObsFile::new(data);
         match filename {
