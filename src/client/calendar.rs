@@ -7,7 +7,8 @@
 //! Covers listing calendars and events, and creating, updating and deleting
 //! events (`EventService/CreateEvents`, `UpdateEvents`, `DeleteEvents`),
 //! with their recurrence, changed occurrences, invitees and reminders;
-//! getting or making a chat's calendar (`CalendarService/GetChatCalendar`,
+//! changing or leaving out one occurrence of a recurring event (unverified,
+//! see [`BaseClient::update_occurrence`]); getting or making a chat's calendar (`CalendarService/GetChatCalendar`,
 //! `CreateChatCalendar`); and answering an invitation
 //! (`InvitationService/RespondToInvitation`).
 
@@ -689,6 +690,70 @@ impl BaseClient {
         .await
     }
 
+    /// Changes one occurrence of the recurring event `id` on its own:
+    /// `UpdateEvents` with the series as it is (`series`, from
+    /// [`EventInput::from_event`]) and `occurrence` in the update's
+    /// `recurrence_child_events` (`UpdateRecurrenceChildEvent`, `u50/i`).
+    ///
+    /// **Unverified.** LINE for Android 26.x has no "this event only": it
+    /// edits and deletes whole series only (`qw0/e`, `qw0/b` refuse a
+    /// non-parent event) and never fills this field. The message shape is
+    /// from the app's protobuf classes; how the server treats it has not
+    /// been seen. Check the event afterwards.
+    pub async fn update_occurrence(
+        &self,
+        target: EventTarget<'_>,
+        id: &str,
+        series: &EventInput,
+        occurrence: &OccurrenceInput,
+        previous_updated_at: i64,
+        notify_chat: Option<bool>,
+    ) -> Result<i64> {
+        let at = next_client_updated_at(previous_updated_at);
+        let child = occurrence.encode(at, notify_chat);
+        let body = series.encode_with(id, Write::Update, at, notify_chat, &[child], false);
+        let path = format!("{EVENT_SERVICE}/UpdateEvents");
+        self.grpc_unary(&path, &write_request(target, &[body]), |resp| {
+            write_response("UpdateEvents", resp)
+        })
+        .await
+    }
+
+    /// Leaves one occurrence (by its original start, `recur_id`) out of the
+    /// recurring event `id`: `UpdateEvents` with the series as it is and
+    /// `recur_id` added to its rule's `except_ids`, sent whole.
+    ///
+    /// **Unverified**, as [`update_occurrence`](Self::update_occurrence):
+    /// the app never deletes one occurrence, and on its own updates leaves
+    /// `except_ids` out. That the server takes the list sent as the
+    /// series' exceptions is inferred from the field. Check the event
+    /// afterwards.
+    pub async fn delete_occurrence(
+        &self,
+        target: EventTarget<'_>,
+        id: &str,
+        series: &EventInput,
+        recur_id: i64,
+        previous_updated_at: i64,
+        notify_chat: Option<bool>,
+    ) -> Result<i64> {
+        let Some(rule) = &series.recurrence else {
+            return Err(Error::internal(
+                "CalendarDeleteOccurrence",
+                "the event doesn't repeat",
+            ));
+        };
+        let mut series = series.clone();
+        series.recurrence = Some(rule.with_exception(recur_id));
+        let at = next_client_updated_at(previous_updated_at);
+        let body = series.encode_with(id, Write::Update, at, notify_chat, &[], true);
+        let path = format!("{EVENT_SERVICE}/UpdateEvents");
+        self.grpc_unary(&path, &write_request(target, &[body]), |resp| {
+            write_response("UpdateEvents", resp)
+        })
+        .await
+    }
+
     /// `EventService/ListEventsStream`: events for one calendar (by calendar
     /// id) or one chat (by chatroom id). `client_last_get_time` is 0 for a
     /// full fetch, or the previous `meta.client_last_get_time` for a delta.
@@ -801,6 +866,22 @@ impl EventInput {
         client_updated_at: i64,
         notify: Option<bool>,
     ) -> Vec<u8> {
+        let with_except_ids = matches!(write, Write::Create);
+        self.encode_with(id, write, client_updated_at, notify, &[], with_except_ids)
+    }
+
+    /// [`encode`](Self::encode) with `children` (encoded child event
+    /// messages) in `recurrence_child_events`, and the rule's `except_ids`
+    /// when `with_except_ids`.
+    fn encode_with(
+        &self,
+        id: &str,
+        write: Write,
+        client_updated_at: i64,
+        notify: Option<bool>,
+        children: &[Vec<u8>],
+        with_except_ids: bool,
+    ) -> Vec<u8> {
         let mut w = Writer::new();
         w.string_always(1, id);
         w.int64(2, self.start_time);
@@ -812,7 +893,7 @@ impl EventInput {
         w.string(8, &self.url);
         w.string(9, &self.description);
         if let Some(r) = &self.recurrence {
-            w.message(10, &r.encode(matches!(write, Write::Create)));
+            w.message(10, &r.encode(with_except_ids));
         }
         let reminders = self.reminders.iter().map(|r| r.raw() as i64 as u64);
         let next = match write {
@@ -847,11 +928,14 @@ impl EventInput {
                 14
             }
         };
-        // Then: message_id, recurrence_child_events (not sent; the app
-        // leaves them out of an update too), client_updated_at,
-        // notify_to_chatroom, color_id, app_reminders, stamp_id.
+        // Then: message_id, recurrence_child_events (LINE for Android
+        // never sends any), client_updated_at, notify_to_chatroom, color_id,
+        // app_reminders, stamp_id.
         if let Some(m) = &self.message_id {
             w.string_always(next, m);
+        }
+        for c in children {
+            w.message(next + 1, c);
         }
         w.int64(next + 2, client_updated_at);
         if let Some(n) = notify {
@@ -884,6 +968,149 @@ impl Recurrence {
         }
         if with_except_ids {
             w.packed_varints(5, self.except_ids.iter().map(|v| *v as u64));
+        }
+        w.into_bytes()
+    }
+}
+
+impl Recurrence {
+    /// The rule with `recur_id` among its exceptions, kept sorted.
+    pub fn with_exception(&self, recur_id: i64) -> Self {
+        let mut out = self.clone();
+        if !out.except_ids.contains(&recur_id) {
+            out.except_ids.push(recur_id);
+            out.except_ids.sort_unstable();
+        }
+        out
+    }
+}
+
+/// One occurrence of a recurring event as it should be, for
+/// [`BaseClient::update_occurrence`]. Build it with
+/// [`OccurrenceInput::from_event`] so the fields you don't touch keep what
+/// the occurrence has now. Times are epoch seconds.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct OccurrenceInput {
+    /// The occurrence's original start ([`ChildEvent::recur_id`]).
+    pub recur_id: i64,
+    pub title: String,
+    pub start_time: i64,
+    pub end_time: i64,
+    pub timezone: String,
+    pub is_all_day: bool,
+    pub location: String,
+    pub url: String,
+    pub description: String,
+    pub color_id: i32,
+    pub reminders: Vec<Reminder>,
+    /// Invitee mids the occurrence should have; what differs from
+    /// `original_invitees` goes as `add_invitees` / `remove_invitees`.
+    pub invitees: Vec<String>,
+    pub original_invitees: Vec<String>,
+    pub message_id: Option<String>,
+    pub stamp_id: String,
+    pub app_reminders: Option<Vec<i32>>,
+}
+
+impl OccurrenceInput {
+    /// The occurrence of `e` that would start at `recur_id`: the changed
+    /// one LINE has ([`Event::recurrence_child_events`]), or the series'
+    /// fields at that start.
+    pub fn from_event(e: &Event, recur_id: i64) -> Self {
+        if let Some(c) = e
+            .recurrence_child_events
+            .iter()
+            .find(|c| c.recur_id == recur_id && !c.is_deleted)
+        {
+            let invitees: Vec<String> = c.invitees.iter().map(|i| i.invitee_id.clone()).collect();
+            return OccurrenceInput {
+                recur_id,
+                title: c.title.clone(),
+                start_time: c.start_time,
+                end_time: c.end_time,
+                timezone: c.timezone.clone(),
+                is_all_day: c.is_all_day,
+                location: c.location.clone(),
+                url: c.url.clone(),
+                description: c.description.clone(),
+                color_id: c.color_id,
+                reminders: c.reminders.clone(),
+                original_invitees: invitees.clone(),
+                invitees,
+                message_id: c.message_id.clone(),
+                stamp_id: c.stamp_id.clone(),
+                app_reminders: c.app_reminders.clone(),
+            };
+        }
+        let series = EventInput::from_event(e);
+        OccurrenceInput {
+            recur_id,
+            title: series.title,
+            start_time: recur_id,
+            end_time: recur_id + (e.end_time - e.start_time).max(0),
+            timezone: series.timezone,
+            is_all_day: series.is_all_day,
+            location: series.location,
+            url: series.url,
+            description: series.description,
+            color_id: series.color_id,
+            reminders: series.reminders,
+            invitees: series.invitees,
+            original_invitees: series.original_invitees,
+            message_id: None,
+            stamp_id: series.stamp_id,
+            app_reminders: series.app_reminders,
+        }
+    }
+
+    /// `UpdateRecurrenceChildEvent` (`u50/i`): start = 1, end = 2,
+    /// timezone = 3, title = 4, is_all_day = 5, location = 6, url = 7,
+    /// description = 8, add_invitees = 9, remove_invitees = 10,
+    /// reminder = 11, message_id = 12, recur_id = 13,
+    /// client_updated_at = 14, notify_to_chatroom = 15, color_id = 16,
+    /// app_reminders = 17, stamp_id = 18.
+    fn encode(&self, client_updated_at: i64, notify: Option<bool>) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.int64(1, self.start_time);
+        w.int64(2, self.end_time);
+        w.string(3, &self.timezone);
+        w.string(4, &self.title);
+        w.bool(5, self.is_all_day);
+        w.string(6, &self.location);
+        w.string(7, &self.url);
+        w.string(8, &self.description);
+        let added = self
+            .invitees
+            .iter()
+            .filter(|i| !self.original_invitees.contains(i));
+        let removed = self
+            .original_invitees
+            .iter()
+            .filter(|i| !self.invitees.contains(i));
+        for (field, ids) in [(9, added.collect::<Vec<_>>()), (10, removed.collect())] {
+            for id in ids {
+                let mut i = Writer::new();
+                i.string_always(1, id);
+                w.message(field, i.as_bytes());
+            }
+        }
+        w.packed_varints(11, self.reminders.iter().map(|r| r.raw() as i64 as u64));
+        if let Some(m) = &self.message_id {
+            w.string_always(12, m);
+        }
+        w.int64_always(13, self.recur_id);
+        w.int64(14, client_updated_at);
+        if let Some(n) = notify {
+            w.bool_always(15, n);
+        }
+        w.uint32(16, self.color_id.max(0) as u32);
+        if let Some(offsets) = &self.app_reminders {
+            let mut a = Writer::new();
+            a.packed_varints(1, offsets.iter().map(|o| *o as i64 as u64));
+            w.message(17, a.as_bytes());
+        }
+        if !self.stamp_id.is_empty() {
+            w.string_always(18, &self.stamp_id);
         }
         w.into_bytes()
     }
@@ -1342,6 +1569,106 @@ mod tests {
             if f.number == 10 {
                 let rec = Recurrence::decode(f.value.as_bytes().unwrap()).unwrap();
                 assert_eq!(rec.except_ids, [700]);
+            }
+        }
+    }
+
+    fn recurring() -> Event {
+        Event {
+            id: "a-1".into(),
+            start_time: 1_000,
+            end_time: 4_600,
+            timezone: "Asia/Bangkok".into(),
+            title: "Gym".into(),
+            recurrence: Some(Recurrence {
+                frequency: Frequency::Daily,
+                interval: 1,
+                except_ids: vec![87_400],
+                ..Default::default()
+            }),
+            invitees: vec![Invitee {
+                invitee_id: "u1".into(),
+                ..Default::default()
+            }],
+            recurrence_child_events: vec![ChildEvent {
+                recur_id: 173_800,
+                start_time: 180_000,
+                end_time: 181_000,
+                title: "Gym, later".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_occurrence_starts_from_the_series_or_its_change() {
+        let e = recurring();
+        let plain = OccurrenceInput::from_event(&e, 260_200);
+        assert_eq!(
+            (plain.start_time, plain.end_time, plain.title.as_str()),
+            (260_200, 263_800, "Gym")
+        );
+        assert_eq!(plain.invitees, ["u1"]);
+        let changed = OccurrenceInput::from_event(&e, 173_800);
+        assert_eq!(
+            (changed.start_time, changed.title.as_str()),
+            (180_000, "Gym, later")
+        );
+    }
+
+    #[test]
+    fn an_occurrence_update_carries_the_series_and_one_child() {
+        let e = recurring();
+        let series = EventInput::from_event(&e);
+        let mut one = OccurrenceInput::from_event(&e, 260_200);
+        one.title = "Gym, moved".into();
+        one.invitees.push("u2".into());
+        let child = one.encode(42, Some(false));
+        assert_eq!(field_numbers(&child), [1, 2, 3, 4, 9, 13, 14, 15]);
+        let body = series.encode_with(
+            "a-1",
+            Write::Update,
+            42,
+            Some(false),
+            std::slice::from_ref(&child),
+            false,
+        );
+        let mut r = Reader::new(&body);
+        let mut seen = None;
+        while let Some(f) = r.next_field().unwrap() {
+            if f.number == 15 {
+                seen = Some(f.value.as_bytes().unwrap().to_vec());
+            }
+            if f.number == 10 {
+                let rule = Recurrence::decode(f.value.as_bytes().unwrap()).unwrap();
+                assert!(rule.except_ids.is_empty());
+            }
+        }
+        assert_eq!(seen.as_deref(), Some(child.as_slice()));
+        let mut c = Reader::new(&child);
+        while let Some(f) = c.next_field().unwrap() {
+            match f.number {
+                4 => assert_eq!(f.value.as_str().unwrap(), "Gym, moved"),
+                13 => assert_eq!(f.value.as_i64().unwrap(), 260_200),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn deleting_an_occurrence_sends_every_exception() {
+        let rule = recurring().recurrence.unwrap();
+        assert_eq!(rule.with_exception(1_000).except_ids, [1_000, 87_400]);
+        assert_eq!(rule.with_exception(87_400).except_ids, [87_400]);
+        let mut series = EventInput::from_event(&recurring());
+        series.recurrence = Some(rule.with_exception(173_800));
+        let body = series.encode_with("a-1", Write::Update, 42, None, &[], true);
+        let mut r = Reader::new(&body);
+        while let Some(f) = r.next_field().unwrap() {
+            if f.number == 10 {
+                let rule = Recurrence::decode(f.value.as_bytes().unwrap()).unwrap();
+                assert_eq!(rule.except_ids, [87_400, 173_800]);
             }
         }
     }
