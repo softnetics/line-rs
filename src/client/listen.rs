@@ -134,9 +134,10 @@ pub enum TalkEvent {
     },
     /// `SEND_CHAT_REMOVED`: we deleted `chat_mid` (on any device, the
     /// chat list's "delete"). The Android app (`SEND_CHAT_REMOVED.kt`)
-    /// reads only `param1`: it deletes a 1:1 chat or room with its
-    /// messages, and only the messages (and album cache) of a group we
-    /// are still in. `last_message_id` is `param2`, the
+    /// reads only `param1`: it deletes a 1:1 chat, group or memo chat
+    /// from the chat list with its messages (`deleteChatWithoutMuteStatus`),
+    /// and only the messages (and album cache) of a room (`ig3/k.c.c`,
+    /// "Room"), whose row stays. `last_message_id` is `param2`, the
     /// `sendChatRemoved` request's `lastMessageId` the app sends from the
     /// chat's last message (inferred from the request, unverified on the
     /// wire; the app ignores it on receipt).
