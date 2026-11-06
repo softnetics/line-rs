@@ -219,7 +219,6 @@ impl E2ee<'_> {
         let fail =
             |why: String| Error::Crypto(format!("E2EE self-check failed, message not sent: {why}"));
         let sender_key_id = crypto::byte2int(&chunks[3]);
-        let receiver_key_id = crypto::byte2int(&chunks[4]);
         let private_key = self_key.private_key();
         let confirmed = self
             .state
@@ -251,22 +250,14 @@ impl E2ee<'_> {
                 }
             }
         }
-        let (ecdh_private, ecdh_public) = if group {
-            let key = self
-                .get_group_key(to, Some(receiver_key_id))
-                .await
-                .map_err(|e| fail(e.to_string()))?;
-            (
-                key.private_key(),
-                crypto::public_key_of(&private_key).to_vec(),
-            )
-        } else {
-            let peer = self
-                .get_user_public_key(to, Some(receiver_key_id))
-                .await
-                .map_err(|e| fail(e.to_string()))?;
-            (private_key, peer)
-        };
+        // Select keys exactly as decrypting the sent message will.
+        let mut sent = crate::tv!({"from": from, "to": to});
+        sent.insert("toType", if group { 1 } else { 0 });
+        let keys = self
+            .message_keys(&sent, chunks)
+            .await
+            .map_err(|e| fail(e.to_string()))?;
+        let (ecdh_private, ecdh_public) = (keys.private_key, keys.public_key);
         let spec = 2;
         let opened = decrypt_message_v2(
             to,
@@ -284,10 +275,17 @@ impl E2ee<'_> {
         Ok(())
     }
 
-    /// Pick our private key and the peer public key for a received or sent
-    /// message. For 1:1 chats our generation is pinned by the envelope key id
-    /// (falling back to the current key); groups use the shared key of the
-    /// generation named by `receiverKeyId`.
+    /// Pick the ECDH inputs for a received or sent message strictly by the
+    /// key ids in its envelope, as `xn8/g0.g` / `g0.h` do. A key that is not
+    /// available is an `E2EEKeyMissing` error, never another generation:
+    /// a guessed key only fails later as "unable to authenticate data".
+    ///
+    /// | message        | private key                | public key               |
+    /// |----------------|----------------------------|--------------------------|
+    /// | 1:1 received   | ours, `receiverKeyId`      | sender's, `senderKeyId`  |
+    /// | 1:1 sent       | ours, `senderKeyId`        | peer's, `receiverKeyId`  |
+    /// | group received | group, `receiverKeyId`     | sender's, `senderKeyId`  |
+    /// | group sent     | group, `receiverKeyId`     | ours, `senderKeyId`      |
     pub(crate) async fn message_keys(
         &self,
         message: &Value,
@@ -296,34 +294,26 @@ impl E2ee<'_> {
         let mid = self.host.self_mid().unwrap_or_default();
         let from = message["from"].as_str().unwrap_or_default();
         let to = message["to"].as_str().unwrap_or_default();
-        let is_self = from == mid;
+        let is_self = !mid.is_empty() && from == mid;
         let sender_key_id = crypto::byte2int(&chunks[3]);
         let receiver_key_id = crypto::byte2int(&chunks[4]);
 
         if is_user_to_type(&message["toType"]) {
-            let self_key_id = if is_self {
-                sender_key_id
+            let (self_key_id, peer, peer_key_id) = if is_self {
+                (sender_key_id, to, receiver_key_id)
             } else {
-                receiver_key_id
+                (receiver_key_id, from, sender_key_id)
             };
-            let self_key = match self.get_self_key_by_key_id(self_key_id).await {
-                Some(k) => k,
-                None => self.get_self_key(&mid).await?,
-            };
-            let public_key = if is_self {
-                self.get_user_public_key(to, Some(receiver_key_id)).await?
-            } else {
-                self.get_user_public_key(from, Some(sender_key_id)).await?
-            };
+            let self_key = self.own_key(self_key_id).await?;
+            let public_key = self.get_user_public_key(peer, Some(peer_key_id)).await?;
             Ok(MessageKeys {
                 private_key: self_key.private_key(),
                 public_key,
             })
         } else {
-            let self_key = self.get_self_key(&mid).await?;
             let group = self.get_group_key(to, Some(receiver_key_id)).await?;
             let public_key = if is_self {
-                self_key.public_key()
+                self.own_key(sender_key_id).await?.public_key()
             } else {
                 self.get_user_public_key(from, Some(sender_key_id)).await?
             };
@@ -499,11 +489,87 @@ mod tests {
         assert_eq!(keys.public_key, [0x71; 32]);
     }
 
+    async fn keys_err(host: &FakeHost, m: &Value) -> Error {
+        let state = E2eeState::default();
+        let chunks = chunks_of(m).unwrap();
+        match E2ee::new(host, &state).message_keys(m, &chunks).await {
+            Ok(_) => panic!("keys were found"),
+            Err(e) => e,
+        }
+    }
+
+    fn is_missing(e: &Error) -> bool {
+        matches!(e, Error::Internal { kind, .. } if kind == "E2EEKeyMissing")
+    }
+
     #[tokio::test]
-    async fn missing_key_id_falls_back_to_latest_key() {
-        let host = fixture(&[], 5).await;
-        let keys = keys_for(&host, &message("u-them", "u-self", "IMAGE", 7, 9)).await;
-        assert_eq!(keys.private_key, [5; 32]);
+    async fn received_message_without_our_key_is_missing_not_latest() {
+        // We hold key 11 and the current pointer, but not key 9.
+        let host = fixture(&[(11, 2)], 5).await;
+        let err = keys_err(&host, &message("u-them", "u-self", "NONE", 7, 9)).await;
+        assert!(is_missing(&err), "{err}");
+    }
+
+    #[tokio::test]
+    async fn sent_message_without_our_key_is_missing_not_latest() {
+        let host = fixture(&[(11, 2)], 5).await;
+        let err = keys_err(&host, &message("u-self", "u-them", "NONE", 7, 11)).await;
+        assert!(is_missing(&err), "{err}");
+    }
+
+    fn group_message(from: &str, sender: i64, receiver: i64) -> Value {
+        let mut m = message(from, "c-group", "NONE", sender, receiver);
+        m.insert("toType", "GROUP");
+        m
+    }
+
+    /// `fixture` plus cached group keys 7 (fill 0x07) and 9 (fill 0x09, also
+    /// the "last" slot).
+    async fn group_fixture(by_id: &[(i64, u8)], latest: u8) -> FakeHost {
+        let host = fixture(by_id, latest).await;
+        for id in [7u8, 9] {
+            let key = serde_json::json!({"privKey": b64(&[id; 32]), "keyId": id}).to_string();
+            host.set(&format!("e2eeGroupKeys:c-group:{id}"), key.clone())
+                .await;
+            host.set("e2eeGroupKeys:c-group", key).await;
+        }
+        host
+    }
+
+    #[tokio::test]
+    async fn received_group_message_uses_group_key_and_sender_key_by_id() {
+        let host = group_fixture(&[], 5).await;
+        let keys = keys_for(&host, &group_message("u-them", 11, 7)).await;
+        assert_eq!(keys.private_key, [7; 32]);
+        assert_eq!(keys.public_key, [0x71; 32]);
+        assert!(host.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn group_message_with_unknown_group_key_is_missing_not_last() {
+        // Group key 8 is neither cached nor served; the last key 9 must not
+        // be used instead.
+        let host = group_fixture(&[], 5).await;
+        let err = keys_err(&host, &group_message("u-them", 7, 8)).await;
+        assert!(is_missing(&err), "{err}");
+        let names: Vec<_> = host.calls().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, ["getE2EEGroupSharedKey"]);
+    }
+
+    #[tokio::test]
+    async fn own_group_message_uses_public_key_of_sender_key_id() {
+        // Sent with our older key 3; the current key is another one.
+        let host = group_fixture(&[(3, 0x33), (4, 0x44)], 0x44).await;
+        let keys = keys_for(&host, &group_message("u-self", 3, 9)).await;
+        assert_eq!(keys.private_key, [9; 32]);
+        assert_eq!(keys.public_key, crypto::public_key_of(&[0x33; 32]));
+    }
+
+    #[tokio::test]
+    async fn own_group_message_without_sender_key_is_missing() {
+        let host = group_fixture(&[(4, 0x44)], 0x44).await;
+        let err = keys_err(&host, &group_message("u-self", 3, 9)).await;
+        assert!(is_missing(&err), "{err}");
     }
 
     #[test]
@@ -525,7 +591,9 @@ mod tests {
                 .to_string();
         host.set("e2eeKeys:1", key.clone()).await;
         host.set("e2eeKeys:u-self", key).await;
-        host.negotiate.insert("u-them".into(), (2, peer_pub));
+        host.negotiate
+            .insert("u-them".into(), (2, peer_pub.clone()));
+        host.peer_keys.insert(("u-them".into(), 2), peer_pub);
         host.public_keys = Some(vec![registered(1, &self_pub)]);
         (host, peer_priv)
     }
