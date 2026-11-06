@@ -45,7 +45,7 @@ pub use media::{
 };
 pub use message::{
     content_type_number, decrypt_message_v1, decrypt_message_v2, describe_e2ee_message,
-    encrypt_payload, spec_version_of,
+    encrypt_payload, is_undecrypted, spec_version_of,
 };
 pub use recovery::{E2eeSendRecovery, MAX_E2EE_SEND_ATTEMPTS, send_recovery};
 pub use send::{E2eeChatState, E2eeSendAttempt, E2eeSendOptions};

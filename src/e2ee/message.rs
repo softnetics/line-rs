@@ -154,6 +154,24 @@ pub fn spec_version_of(message: &Value) -> Result<i64> {
     }
 }
 
+/// Whether `message` is a sealed text or location message that was not
+/// decrypted: it carries `chunks` and `e2eeVersion` but no `text` (NONE)
+/// or `location` (LOCATION). Other content types keep their chunks after
+/// [`decrypt_message`](super::BaseClient::decrypt_e2ee_message) and are
+/// opened on demand, so they never count.
+pub fn is_undecrypted(message: &Value) -> bool {
+    if message["contentMetadata"].get("e2eeVersion").is_none()
+        || message["chunks"].as_list().is_none_or(<[Value]>::is_empty)
+    {
+        return false;
+    }
+    match content_type_number(&message["contentType"]) {
+        0 => message["text"].as_str().is_none_or(str::is_empty),
+        LOCATION => message["location"].is_null(),
+        _ => false,
+    }
+}
+
 /// What a log may say about an E2EE message without its content: id, chat
 /// kind (`u`, `c` or `r`, from `to`), content type, `e2eeVersion`, the key
 /// ids in chunks 3 and 4 and every chunk's length.
@@ -928,6 +946,32 @@ mod tests {
         assert!(host.calls().is_empty());
         m.insert("contentMetadata", Value::Map(vec![]));
         assert_eq!(spec_version_of(&m).unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn undecrypted_is_told_apart_from_decrypted() {
+        let (host, peer_priv) = pair().await;
+        let secret = peer_secret(&host, &peer_priv).await;
+        let chunks = encrypt_payload(
+            2,
+            1,
+            &secret,
+            2,
+            &serde_json::json!({"text": "hi"}),
+            "u-self",
+            "u-them",
+            0,
+        )
+        .unwrap();
+        let m = from_peer(chunks, "2");
+        assert!(is_undecrypted(&m));
+        let state = E2eeState::default();
+        let out = E2ee::new(&host, &state).decrypt_message(m).await.unwrap();
+        assert!(!is_undecrypted(&out));
+        let mut image = from_peer(vec![vec![0; 4]; 5], "2");
+        image.insert("contentType", "IMAGE");
+        assert!(!is_undecrypted(&image));
+        assert!(!is_undecrypted(&tv!({"text": "", "contentType": "NONE"})));
     }
 
     #[test]
