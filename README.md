@@ -170,10 +170,12 @@ Compared with LINEJS at
 
 Session handling:
 
-- Can refresh the v3 access token shortly before it expires, using the
-  cached expiry (set `Config::proactive_refresh`; it's off by default).
-  LINEJS refreshes only after the server answers `MUST_REFRESH_V3_TOKEN`,
-  which line-rs also handles.
+- Refreshes the v3 access token in the background once its refresh time
+  has passed, retries with the server's retry policy and reports the new
+  token, as the Android app does (`Config::proactive_refresh` and
+  `report_refreshed_token`, both on by default). LINEJS refreshes only
+  after the server answers `MUST_REFRESH_V3_TOKEN`, which line-rs also
+  handles.
 - Recognizes more logout reasons (`V3_TOKEN_CLIENT_LOGGED_OUT` and others,
   not only `NOT_AUTHORIZED_DEVICE`) and emits `ClientEvent::KickedOut`.
 - Fails over to the `legy-backup` host when a connection fails, and can go

@@ -2,9 +2,9 @@
 //! square `fetchMyEvents` (service 3) and talk `sync` (services 5/8), ping
 //! handling, push frames and the read loop of one connection.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
 use futures::future::BoxFuture;
@@ -14,21 +14,39 @@ use tokio::task::JoinSet;
 use super::conn::{ByteStream, Conn, ConnWriter, FrameDecoder, Packet};
 use super::frame::{AckType, PushFrame, services_mask, sign_on_request_packet, status_packet};
 use super::{Hub, Kind, tmc};
+use crate::base::ClientEvent;
 use crate::error::{Error, Result};
-use crate::polling::SyncData;
+use crate::polling::{FullSyncCategory, FullSyncReason, SyncData};
 use crate::thrift::{self, Protocol, Schema, TValue, Value};
 use crate::tv;
 
-/// Ping interval announced in the status frame (seconds).
+/// Ping interval announced in the status frame (seconds); the Android
+/// app's `ping_cycle` default (`com/linecorp/legy/streaming/h.java`).
 const PING_INTERVAL: u8 = 30;
+
+/// A connection that delivers nothing (no ping, no response) for two ping
+/// cycles is dead: close it and reconnect (`ta0/t.java`
+/// `launchServerPingTimeoutCoroutine`). Also bounds the wait for the
+/// response headers.
+pub(crate) const PING_TIMEOUT: Duration = Duration::from_secs(2 * PING_INTERVAL as u64);
 
 /// What the push machinery needs from the client. Implemented by
 /// [`BaseClient`](crate::BaseClient); tests use fakes.
 pub(crate) trait PushHost: Clone + Send + Sync + 'static {
     fn auth_token(&self) -> Option<String>;
     fn sync_state(&self) -> &tokio::sync::Mutex<SyncData>;
-    fn emit_sync(&self, data: SyncData);
+    /// Persist new cursors and emit `UpdateSyncData`.
+    fn save_sync(&self, data: SyncData) -> BoxFuture<'static, ()>;
+    /// Restore persisted cursors before the first connection.
+    fn restore_sync(&self) -> BoxFuture<'static, ()>;
     fn log(&self, kind: &str, data: serde_json::Value);
+    fn emit(&self, event: ClientEvent);
+    /// Move to the next LEGY host after repeated connection failures.
+    fn fail_over(&self);
+    /// React to a failed talk `sync` made with `token`: refresh the token
+    /// on `MUST_REFRESH_V3_TOKEN` (returns whether that worked) or end the
+    /// session when the error says it is gone.
+    fn recover_sync_error(&self, e: &Error, token: Option<String>) -> BoxFuture<'static, bool>;
     /// Start the `/PUSH` request at `path`.
     fn open_conn(&self, path: &str) -> Result<Conn>;
     /// `SquareService.fetchMyEvents(args)` over the normal RPC path.
@@ -39,14 +57,18 @@ pub(crate) trait PushHost: Clone + Send + Sync + 'static {
 
 #[derive(Debug, Default)]
 struct State {
-    /// request id → (service type, method name)
+    /// request id → (service type, method name); removed when answered.
     sign_on_requests: HashMap<u16, (u8, &'static str)>,
+    /// Last sign-on request id (ids run 1..=0x7fff, then wrap).
+    last_request_id: u16,
     /// square subscription id → last refresh (unix seconds)
     subscription_ids: HashMap<i64, f64>,
     subscription_id: i64,
     curr_ping_id: u16,
     event_synced: bool,
     auth_token: Option<String>,
+    /// The current connection delivered at least one packet.
+    alive: bool,
 }
 
 pub(crate) struct ConnManager<H> {
@@ -75,13 +97,29 @@ fn now_secs() -> f64 {
         .unwrap_or_default()
 }
 
+/// `sync(SyncRequest)` args (`qq8/f.java` builds the same fields).
 pub(crate) fn talk_sync_args(sync: &SyncData) -> Value {
-    tv!({"request": {
+    let mut req = tv!({
         "lastRevision": sync.talk.revision,
         "count": 100,
         "lastGlobalRevision": sync.talk.global_rev,
         "lastIndividualRevision": sync.talk.individual_rev,
-    }})
+    });
+    if let Some(reason) = sync.full_sync_request {
+        req.insert("fullSyncRequestReason", reason.as_str());
+    }
+    if !sync.last_partial_full_syncs.is_empty() {
+        req.insert(
+            "lastPartialFullSyncs",
+            Value::Map(
+                sync.last_partial_full_syncs
+                    .iter()
+                    .map(|(&k, &v)| (Value::Int(k.into()), Value::Int(v)))
+                    .collect(),
+            ),
+        );
+    }
+    tv!({ "request": req })
 }
 
 fn error_json(e: &Error) -> serde_json::Value {
@@ -106,12 +144,20 @@ impl<H: PushHost> ConnManager<H> {
         self.state.lock().unwrap().subscription_id
     }
 
+    /// Whether the last connection delivered any packet (a connection that
+    /// never did counts as a failed attempt).
+    pub fn was_alive(&self) -> bool {
+        self.state.lock().unwrap().alive
+    }
+
     /// Open a new connection subscribed to `services`.
     pub fn initialize_conn(&self, services: &[u8]) -> Result<Conn> {
         {
             let mut st = self.state.lock().unwrap();
             st.sign_on_requests.clear();
+            st.last_request_id = 0;
             st.auth_token = self.host.auth_token();
+            st.alive = false;
         }
         let m = services_mask(services);
         self.log(&format!("Using `m={m}` on `/PUSH`"), json!(""));
@@ -140,7 +186,9 @@ impl<H: PushHost> ConnManager<H> {
         };
         let id = {
             let mut st = self.state.lock().unwrap();
-            let id = st.sign_on_requests.len() as u16 + 1;
+            // The response carries the id in 15 bits.
+            let id = st.last_request_id % 0x7fff + 1;
+            st.last_request_id = id;
             st.sign_on_requests.insert(id, (service, method));
             id
         };
@@ -152,16 +200,13 @@ impl<H: PushHost> ConnManager<H> {
         Ok(id)
     }
 
-    /// Handle a complete sign-on response. Failures are logged; like linejs
-    /// they end that service's request chain on this connection.
+    /// Handle a complete sign-on response. A failed square request is
+    /// logged and ends the square chain (OpenChat may not support push). A
+    /// failed talk `sync` closes the connection so the listener reconnects
+    /// (after refreshing the token on `MUST_REFRESH_V3_TOKEN`), and is
+    /// reported as a `LegyPusherError` log event.
     pub async fn on_sign_on_response(&self, w: &ConnWriter, req_id: u16, data: &[u8]) {
-        let entry = self
-            .state
-            .lock()
-            .unwrap()
-            .sign_on_requests
-            .get(&req_id)
-            .copied();
+        let entry = self.state.lock().unwrap().sign_on_requests.remove(&req_id);
         let Some((service, _method)) = entry else {
             self.log(
                 &format!("[PUSH] unknown sign-on-response requestId:{req_id}"),
@@ -178,7 +223,12 @@ impl<H: PushHost> ConnManager<H> {
         );
         let res = match service {
             3 => self.on_square_sign_on(data).await,
-            5 | 8 => self.on_talk_sign_on(w, service, data).await,
+            5 | 8 => {
+                if let Err(e) = self.on_talk_sign_on(w, service, data).await {
+                    self.on_talk_sync_failure(w, e).await;
+                }
+                Ok(())
+            }
             _ => Err(Error::internal(
                 "LegyPusherError",
                 format!(
@@ -189,6 +239,23 @@ impl<H: PushHost> ConnManager<H> {
         if let Err(e) = res {
             self.log("sign-on-response failed", error_json(&e));
         }
+    }
+
+    /// A talk `sync` failed, so no further sync request is chained on this
+    /// connection: report it, recover what can be recovered and reconnect.
+    async fn on_talk_sync_failure(&self, w: &ConnWriter, e: Error) {
+        self.host.log(
+            "LegyPusherError",
+            json!({"error": e.to_string(), "method": "sync", "code": e.code()}),
+        );
+        let token = self.state.lock().unwrap().auth_token.clone();
+        let refreshed = self.host.recover_sync_error(&e, token).await;
+        if !refreshed {
+            // Not a sign of a healthy connection: let reconnects back off.
+            self.state.lock().unwrap().alive = false;
+        }
+        self.log("closing push conn after a failed sync", json!(""));
+        w.close();
     }
 
     async fn on_square_sign_on(&self, data: &[u8]) -> Result<()> {
@@ -237,7 +304,7 @@ impl<H: PushHost> ConnManager<H> {
             sync.square = Some(sync_token.clone());
             sync.clone()
         };
-        self.host.emit_sync(snapshot);
+        self.host.save_sync(snapshot).await;
         let first = {
             let mut st = self.state.lock().unwrap();
             st.subscription_id = subscription_id;
@@ -262,22 +329,29 @@ impl<H: PushHost> ConnManager<H> {
         };
         let res = thrift::decode_struct(Schema::line(), Some("sync_result"), &body);
         if !res["e"].is_null() {
-            self.log("sync error:", res["e"].to_json());
-            return Ok(());
+            return Err(Error::Request {
+                method: "sync".into(),
+                path: "/PUSH/1/subs".into(),
+                data: res["e"].clone(),
+            });
         }
         let response = &res["success"];
         if response.is_null() {
             return Ok(());
         }
-        let ops = {
+        let (applied, snapshot) = {
             let mut sync = self.host.sync_state().lock().await;
-            apply_sync_response(&mut sync, response)
+            (apply_sync_response(&mut sync, response), sync.clone())
         };
-        for op in ops {
+        let full_sync = applied.full_sync_event();
+        for op in applied.ops {
             self.hub.deliver(Kind::Talk, op);
         }
-        let snapshot = self.host.sync_state().lock().await.clone();
-        self.host.emit_sync(snapshot.clone());
+        self.host.save_sync(snapshot.clone()).await;
+        if let Some(event) = full_sync {
+            self.log("full sync required", json!(""));
+            self.host.emit(event);
+        }
         let args = talk_sync_args(&snapshot);
         self.log("request talk fetcher:", args.to_json());
         self.build_and_send_sign_on_request(w, service, &args)?;
@@ -320,7 +394,7 @@ impl<H: PushHost> ConnManager<H> {
             }
             sync.clone()
         };
-        self.host.emit_sync(snapshot);
+        self.host.save_sync(snapshot).await;
         let sub_id = res["subscription"]["subscriptionId"]
             .as_i64()
             .unwrap_or_default();
@@ -439,9 +513,18 @@ impl<H: PushHost> ConnManager<H> {
         w: &ConnWriter,
         response: BoxFuture<'static, Result<ByteStream>>,
     ) -> Result<()> {
+        let silent = || {
+            Error::internal(
+                "TimeoutError",
+                format!(
+                    "no data from the push server for {}s",
+                    PING_TIMEOUT.as_secs()
+                ),
+            )
+        };
         let mut body = tokio::select! {
             _ = w.closed() => return Ok(()),
-            r = response => r?,
+            r = tokio::time::timeout(PING_TIMEOUT, response) => r.map_err(|_| silent())??,
         };
         let mut decoder = FrameDecoder::new();
         // Handlers that call back into the network run concurrently so pings
@@ -450,10 +533,14 @@ impl<H: PushHost> ConnManager<H> {
         loop {
             let chunk = tokio::select! {
                 _ = w.closed() => return Ok(()),
-                c = body.next() => c,
+                c = tokio::time::timeout(PING_TIMEOUT, body.next()) => c.map_err(|_| silent())?,
             };
             let Some(chunk) = chunk else { return Ok(()) };
-            for packet in decoder.feed(&chunk?)? {
+            let packets = decoder.feed(&chunk?)?;
+            if !packets.is_empty() {
+                self.state.lock().unwrap().alive = true;
+            }
+            for packet in packets {
                 match packet {
                     Packet::Ping(f) => {
                         w.write(f.ack_packet())?;
@@ -481,12 +568,62 @@ impl<H: PushHost> ConnManager<H> {
     }
 }
 
-/// Fold a talk `sync` response into the cursors and return its operations
-/// (shared with the polling path).
-pub(crate) fn apply_sync_response(sync: &mut SyncData, response: &Value) -> Vec<Value> {
+/// What a talk `sync` response changed.
+#[derive(Debug, Default)]
+pub(crate) struct AppliedSync {
+    pub ops: Vec<Value>,
+    /// `(reasons, categories)` of a full or partial full sync.
+    pub full_sync: Option<(Vec<FullSyncReason>, Vec<FullSyncCategory>)>,
+}
+
+impl AppliedSync {
+    pub fn full_sync_event(&self) -> Option<ClientEvent> {
+        self.full_sync
+            .clone()
+            .map(|(reasons, categories)| ClientEvent::FullSyncRequired {
+                reasons,
+                categories,
+            })
+    }
+}
+
+/// Fold a talk `sync` response (a union of `operationResponse`,
+/// `fullSyncResponse` and `partialFullSyncResponse`; `qq8/f.java` `i()`)
+/// into the cursors and return its operations (shared with the polling
+/// path).
+pub(crate) fn apply_sync_response(sync: &mut SyncData, response: &Value) -> AppliedSync {
     let nonzero = |v: &Value| v.as_i64().filter(|&n| n != 0);
-    if let Some(r) = nonzero(&response["fullSyncResponse"]["nextRevision"]) {
-        sync.talk.revision = r;
+    // Any answer means the pending full-sync request reached the server.
+    sync.full_sync_request = None;
+    let mut out = AppliedSync::default();
+    let full = &response["fullSyncResponse"];
+    if !full.is_null() {
+        if let Some(r) = nonzero(&full["nextRevision"]) {
+            sync.talk.revision = r;
+        }
+        let reasons = full["reasons"]
+            .as_list()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|r| r.as_i64())
+            .map(|r| FullSyncReason::from_i32(r as i32))
+            .collect();
+        out.full_sync = Some((reasons, vec![FullSyncCategory::All]));
+    }
+    let partial = &response["partialFullSyncResponse"];
+    if !partial.is_null() {
+        let targets: BTreeMap<i32, i64> = partial["targetCategories"]
+            .as_map()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|(k, v)| Some((k.as_i64()? as i32, v.as_i64().unwrap_or_default())))
+            .collect();
+        let categories = targets
+            .keys()
+            .map(|&k| FullSyncCategory::from_i32(k))
+            .collect();
+        sync.last_partial_full_syncs = targets;
+        out.full_sync = Some((Vec::new(), categories));
     }
     let ops_res = &response["operationResponse"];
     if let Some(r) = nonzero(&ops_res["globalEvents"]["lastRevision"]) {
@@ -495,16 +632,16 @@ pub(crate) fn apply_sync_response(sync: &mut SyncData, response: &Value) -> Vec<
     if let Some(r) = nonzero(&ops_res["individualEvents"]["lastRevision"]) {
         sync.talk.individual_rev = r;
     }
-    let ops = ops_res["operations"]
+    out.ops = ops_res["operations"]
         .as_list()
         .map(<[Value]>::to_vec)
         .unwrap_or_default();
-    for op in &ops {
+    for op in &out.ops {
         if let Some(r) = op["revision"].as_i64() {
             sync.talk.revision = r;
         }
     }
-    ops
+    out
 }
 
 #[cfg(test)]
@@ -521,15 +658,22 @@ pub(crate) mod tests {
 
     type Responder = Arc<dyn Fn() -> Result<Value> + Send + Sync>;
 
+    /// `(error code, token)` passed to `recover_sync_error`.
+    type Recovered = (Option<String>, Option<String>);
+
     #[derive(Clone)]
     pub(crate) struct FakeHost {
         pub token: Arc<Mutex<Option<String>>>,
         pub sync: Arc<tokio::sync::Mutex<SyncData>>,
         pub logs: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
         pub emitted: Arc<Mutex<Vec<SyncData>>>,
+        pub events: Arc<Mutex<Vec<ClientEvent>>>,
         pub fetch: Responder,
         pub noop_ok: bool,
         pub opens: Arc<AtomicUsize>,
+        pub failovers: Arc<AtomicUsize>,
+        pub recovered: Arc<Mutex<Vec<Recovered>>>,
+        pub refresh_ok: bool,
         /// Connections handed out by `open_conn`; `None` → fail to open.
         pub conns: Arc<Mutex<Vec<Conn>>>,
     }
@@ -541,9 +685,13 @@ pub(crate) mod tests {
                 sync: Arc::default(),
                 logs: Arc::default(),
                 emitted: Arc::default(),
+                events: Arc::default(),
                 fetch: Arc::new(|| Err(Error::internal("TestError", "unexpected fetchMyEvents"))),
                 noop_ok: true,
                 opens: Arc::default(),
+                failovers: Arc::default(),
+                recovered: Arc::default(),
+                refresh_ok: true,
                 conns: Arc::default(),
             }
         }
@@ -564,11 +712,29 @@ pub(crate) mod tests {
         fn sync_state(&self) -> &tokio::sync::Mutex<SyncData> {
             &self.sync
         }
-        fn emit_sync(&self, data: SyncData) {
+        fn save_sync(&self, data: SyncData) -> BoxFuture<'static, ()> {
             self.emitted.lock().unwrap().push(data);
+            async {}.boxed()
+        }
+        fn restore_sync(&self) -> BoxFuture<'static, ()> {
+            async {}.boxed()
         }
         fn log(&self, kind: &str, data: serde_json::Value) {
             self.logs.lock().unwrap().push((kind.to_string(), data));
+        }
+        fn emit(&self, event: ClientEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+        fn fail_over(&self) {
+            self.failovers.fetch_add(1, Ordering::SeqCst);
+        }
+        fn recover_sync_error(&self, e: &Error, token: Option<String>) -> BoxFuture<'static, bool> {
+            self.recovered
+                .lock()
+                .unwrap()
+                .push((e.code().map(str::to_string), token));
+            let ok = self.refresh_ok && e.code() == Some("MUST_REFRESH_V3_TOKEN");
+            async move { ok }.boxed()
         }
         fn open_conn(&self, _path: &str) -> Result<Conn> {
             self.opens.fetch_add(1, Ordering::SeqCst);
@@ -848,6 +1014,118 @@ pub(crate) mod tests {
         assert!(m.init_and_read(conn, &[3, 8]).await.is_err());
     }
 
+    /// `sync_result { e: TalkException { code } }` as a sign-on response
+    /// payload.
+    fn sync_exception(code: i32) -> Vec<u8> {
+        compact_result(
+            "sync",
+            vec![(1, TValue::Struct(vec![(1, TValue::I32(code))]))],
+        )
+    }
+
+    async fn failed_sync(host: &FakeHost, code: i32) -> (ConnManager<FakeHost>, ConnWriter) {
+        let (m, _hub) = manager(host);
+        m.state.lock().unwrap().auth_token = Some("push-token".into());
+        m.state.lock().unwrap().alive = true;
+        let (w, mut written) = ConnWriter::channel();
+        let id = m
+            .build_and_send_sign_on_request(&w, 8, &talk_sync_args(&SyncData::default()))
+            .unwrap();
+        drain(&mut written);
+        m.on_sign_on_response(&w, id, &sync_exception(code)).await;
+        // No new sync request is chained after a failure.
+        assert!(drain(&mut written).is_empty());
+        (m, w)
+    }
+
+    #[tokio::test]
+    async fn must_refresh_during_sync_refreshes_and_reconnects() {
+        let host = FakeHost::new();
+        // 119 = MUST_REFRESH_V3_TOKEN
+        let (m, w) = failed_sync(&host, 119).await;
+        assert_eq!(
+            host.recovered.lock().unwrap().as_slice(),
+            [(
+                Some("MUST_REFRESH_V3_TOKEN".to_string()),
+                Some("push-token".to_string())
+            )]
+        );
+        tokio::time::timeout(Duration::from_millis(100), w.closed())
+            .await
+            .unwrap();
+        // A successful refresh reconnects right away.
+        assert!(m.was_alive());
+        assert!(host.log_kinds().contains(&"LegyPusherError".to_string()));
+    }
+
+    #[tokio::test]
+    async fn other_sync_errors_close_the_connection_and_are_reported() {
+        let host = FakeHost::new();
+        // 20 = INTERNAL_ERROR
+        let (m, w) = failed_sync(&host, 20).await;
+        tokio::time::timeout(Duration::from_millis(100), w.closed())
+            .await
+            .unwrap();
+        assert!(!m.was_alive());
+        let logs = host.logs.lock().unwrap();
+        let (_, data) = logs
+            .iter()
+            .find(|(k, _)| k == "LegyPusherError")
+            .expect("sync error is reported");
+        assert_eq!(data["method"], "sync");
+        assert_eq!(data["code"], "INTERNAL_ERROR");
+    }
+
+    #[test]
+    fn sign_on_request_ids_wrap_and_are_released() {
+        let host = FakeHost::new();
+        let (m, _) = manager(&host);
+        let (w, _written) = ConnWriter::channel();
+        m.state.lock().unwrap().last_request_id = 0x7ffe;
+        let args = talk_sync_args(&SyncData::default());
+        assert_eq!(
+            m.build_and_send_sign_on_request(&w, 8, &args).unwrap(),
+            0x7fff
+        );
+        assert_eq!(m.build_and_send_sign_on_request(&w, 8, &args).unwrap(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn silent_connection_times_out() {
+        let host = FakeHost::new();
+        let (m, hub) = manager(&host);
+        let _rx = hub.subscribe_raw(Kind::Talk);
+        let (conn, _written, body) = fake_conn();
+        let task = tokio::spawn({
+            let m = m.clone();
+            async move { m.init_and_read(conn, &[]).await }
+        });
+        // A ping keeps the connection alive past one timeout window.
+        tokio::time::sleep(PING_TIMEOUT - Duration::from_secs(1)).await;
+        body.send(Ok(Bytes::from(request_packet(FRAME_PING, &[2, 0, 1]))))
+            .unwrap();
+        tokio::time::sleep(PING_TIMEOUT - Duration::from_secs(1)).await;
+        assert!(!task.is_finished());
+        // Then silence for a whole window ends it with a timeout.
+        let start = tokio::time::Instant::now();
+        let err = task.await.unwrap().unwrap_err();
+        assert!(err.is_timeout(), "{err}");
+        assert!(start.elapsed() <= Duration::from_secs(2));
+        assert!(m.was_alive());
+        drop(body);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn missing_response_headers_time_out() {
+        let host = FakeHost::new();
+        let (m, _) = manager(&host);
+        let (w, _written) = ConnWriter::channel();
+        let conn = Conn::from_parts(w, futures::future::pending().boxed());
+        let err = m.init_and_read(conn, &[]).await.unwrap_err();
+        assert!(err.is_timeout(), "{err}");
+        assert!(!m.was_alive());
+    }
+
     #[tokio::test]
     async fn bad_frame_ends_connection_with_error() {
         let host = FakeHost::new();
@@ -865,12 +1143,113 @@ pub(crate) mod tests {
             "globalEvents": {"lastRevision": 7},
             "individualEvents": {"lastRevision": 0},
         }});
-        let ops = apply_sync_response(&mut sync, &res);
-        assert_eq!(ops.len(), 2);
+        let applied = apply_sync_response(&mut sync, &res);
+        assert_eq!(applied.ops.len(), 2);
+        assert!(applied.full_sync.is_none());
         assert_eq!(sync.talk.revision, 11);
         assert_eq!(sync.talk.global_rev, 7);
         assert_eq!(sync.talk.individual_rev, 0);
         apply_sync_response(&mut sync, &tv!({}));
         assert_eq!(sync.talk.revision, 11);
+    }
+
+    #[test]
+    fn full_sync_response_moves_revision_and_reports_reasons() {
+        let mut sync = SyncData::default();
+        sync.talk.revision = 3;
+        sync.full_sync_request = Some(crate::polling::FullSyncRequestReason::Other);
+        let res = tv!({"fullSyncResponse": {"reasons": [1, 4, 77], "nextRevision": 500}});
+        let applied = apply_sync_response(&mut sync, &res);
+        assert!(applied.ops.is_empty());
+        assert_eq!(sync.talk.revision, 500);
+        assert_eq!(sync.full_sync_request, None);
+        let Some(ClientEvent::FullSyncRequired {
+            reasons,
+            categories,
+        }) = applied.full_sync_event()
+        else {
+            panic!("no full sync event")
+        };
+        assert_eq!(
+            reasons,
+            [
+                FullSyncReason::RevisionGapTooLargeClient,
+                FullSyncReason::RevisionHole,
+                FullSyncReason::Other(77)
+            ]
+        );
+        assert_eq!(categories, [FullSyncCategory::All]);
+    }
+
+    #[test]
+    fn partial_full_sync_is_remembered_and_sent_back() {
+        let mut sync = SyncData::default();
+        sync.talk.revision = 9;
+        let mut partial = Value::object();
+        partial.insert(
+            "targetCategories",
+            Value::Map(vec![
+                (Value::Int(7), Value::Int(1000)),
+                (Value::Int(4), Value::Int(900)),
+            ]),
+        );
+        let mut res = Value::object();
+        res.insert("partialFullSyncResponse", partial);
+        let applied = apply_sync_response(&mut sync, &res);
+        // The revision stays; only the categories are re-pulled.
+        assert_eq!(sync.talk.revision, 9);
+        assert_eq!(
+            sync.last_partial_full_syncs,
+            BTreeMap::from([(4, 900), (7, 1000)])
+        );
+        assert!(matches!(
+            applied.full_sync_event(),
+            Some(ClientEvent::FullSyncRequired { reasons, categories })
+                if reasons.is_empty()
+                    && categories == [FullSyncCategory::Contact, FullSyncCategory::Message]
+        ));
+        // The next request carries `lastPartialFullSyncs` on the wire.
+        let fields =
+            thrift::encode_struct(Schema::line(), "sync_args", &talk_sync_args(&sync)).unwrap();
+        let decoded =
+            thrift::decode_struct(Schema::line(), Some("sync_args"), &TValue::Struct(fields));
+        let sent = decoded["request"]["lastPartialFullSyncs"].as_map().unwrap();
+        assert_eq!(sent.len(), 2);
+        assert!(sent.contains(&(Value::Int(7), Value::Int(1000))));
+    }
+
+    #[tokio::test]
+    async fn push_sign_on_full_sync_emits_event() {
+        let host = FakeHost::new();
+        let (m, hub) = manager(&host);
+        let _talk = hub.subscribe_raw(Kind::Talk);
+        let (w, mut written) = ConnWriter::channel();
+        let id = m
+            .build_and_send_sign_on_request(&w, 8, &talk_sync_args(&SyncData::default()))
+            .unwrap();
+        drain(&mut written);
+        // sync_result { success: { fullSyncResponse: { reasons: {5}, nextRevision: 77 } } }
+        let full = TValue::Struct(vec![
+            (
+                1,
+                TValue::Set(crate::thrift::TType::I32, vec![TValue::I32(5)]),
+            ),
+            (2, TValue::I64(77)),
+        ]);
+        let body = compact_result("sync", vec![(0, TValue::Struct(vec![(2, full)]))]);
+        m.on_sign_on_response(&w, id, &body).await;
+        assert_eq!(host.sync.lock().await.talk.revision, 77);
+        let events = host.events.lock().unwrap();
+        assert!(matches!(
+            events.as_slice(),
+            [ClientEvent::FullSyncRequired { reasons, categories }]
+                if reasons == &[FullSyncReason::ForceTriggered]
+                    && categories == &[FullSyncCategory::All]
+        ));
+        // The chain goes on from the new revision.
+        let next = drain(&mut written);
+        let msg = thrift::read_message(&next[0][9..], Protocol::Compact).unwrap();
+        let args = thrift::decode_struct(Schema::line(), Some("sync_args"), &msg.body);
+        assert_eq!(args["request"]["lastRevision"].as_i64(), Some(77));
     }
 }

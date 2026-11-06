@@ -4,13 +4,13 @@
 mod events;
 mod session;
 
-pub use events::ClientEvent;
+pub use events::{ClientEvent, EVENT_CAPACITY};
 pub(crate) use session::now_epoch_sec as session_now;
 pub use session::{LEGY_BACKUP_HOST, LEGY_HOST, LogoutReason, ProxyConfig};
 
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
@@ -41,17 +41,24 @@ pub struct Config {
     pub timeout: Duration,
     /// Long-poll timeout (default 180s).
     pub long_timeout: Duration,
-    /// Refresh a v3 access token before sending a request once the stored
-    /// `expire` (issue time + `durationUntilRefreshInSec`) is within
-    /// `refresh_margin` (default on).
+    /// Refresh a v3 access token in the background once the stored
+    /// `expire` (issue time + `durationUntilRefreshInSec`, minus
+    /// `refresh_margin`) has passed, like the Android app
+    /// (`fa0/f0.java`): the request that notices goes out with the current
+    /// token, later requests use the new one. Default on. With it off the
+    /// token is only refreshed after the server answers
+    /// `MUST_REFRESH_V3_TOKEN`.
     pub proactive_refresh: bool,
-    /// How long before `expire` to refresh (default 60s).
+    /// How long before `expire` to refresh (default 0: `expire` already
+    /// lies before the token's real expiry).
     pub refresh_margin: Duration,
-    /// Call `reportRefreshedAccessToken` after a refresh (best effort,
-    /// default on).
+    /// Call `reportRefreshedAccessToken` after a refresh, in the background
+    /// and with retries (best effort, default on, as the Android app does).
     pub report_refreshed_token: bool,
     /// Adopt the token in an `X-Line-Next-Access` response header (default
-    /// on).
+    /// off: the Android app does not read this header). Off, the header is
+    /// ignored; on, the new token is used and reported as
+    /// [`ClientEvent::UpdateAuthToken`].
     pub apply_next_access: bool,
     /// Recover from `E2EE_*` `sendMessage` errors the way LINE for Android
     /// does: look the chat's key up again and re-encrypt, recreate the group
@@ -72,11 +79,9 @@ impl Default for Config {
         Self {
             timeout: Duration::from_secs(30),
             long_timeout: Duration::from_secs(180),
-            // Off by default to match linejs, which only refreshes after
-            // MUST_REFRESH_V3_TOKEN and never adopts X-Line-Next-Access.
-            proactive_refresh: false,
-            refresh_margin: Duration::from_secs(60),
-            report_refreshed_token: false,
+            proactive_refresh: true,
+            refresh_margin: Duration::ZERO,
+            report_refreshed_token: true,
             apply_next_access: false,
             e2ee_send_recovery: true,
             language: "th_TH".to_string(),
@@ -189,7 +194,7 @@ impl ClientBuilder {
             (None, None) => vec![LEGY_BACKUP_HOST.to_string()],
             (None, Some(_)) => Vec::new(),
         };
-        let (events, _) = broadcast::channel(256);
+        let (events, _) = broadcast::channel(EVENT_CAPACITY);
         let mut device_details = self.device.details(self.version.as_deref());
         if let Some(name) = self.device_name {
             device_details.device_name = name;
@@ -218,9 +223,13 @@ impl ClientBuilder {
             kicked_out: RwLock::new(None),
             token_expire: RwLock::new(None),
             refresh_lock: Mutex::new(()),
+            refresh_running: AtomicBool::new(false),
+            refresh_not_before: AtomicI64::new(0),
             e2ee: E2eeState::default(),
             obs_state: Default::default(),
             sync: Mutex::new(SyncData::default()),
+            sync_loaded: AtomicBool::new(false),
+            sync_saved: Mutex::new(None),
             push: crate::push::PushState::default(),
         })))
     }
@@ -258,10 +267,18 @@ pub struct Inner {
     /// Cached `expire` (`None` = not loaded from storage yet).
     token_expire: RwLock<Option<Option<i64>>>,
     pub(crate) refresh_lock: Mutex<()>,
+    /// A background (proactive) refresh is running.
+    pub(crate) refresh_running: AtomicBool,
+    /// No proactive refresh before this Unix time (after a failed one).
+    pub(crate) refresh_not_before: AtomicI64,
     pub(crate) e2ee: E2eeState,
     /// OBS access token and per-chat media flows.
     pub(crate) obs_state: crate::obs::ObsState,
     pub(crate) sync: Mutex<SyncData>,
+    /// Whether `sync` was restored from storage or set by the caller.
+    pub(crate) sync_loaded: AtomicBool,
+    /// Last `SyncData` written to storage (skips identical writes).
+    pub(crate) sync_saved: Mutex<Option<SyncData>>,
     pub(crate) push: crate::push::PushState,
 }
 
@@ -328,6 +345,14 @@ impl BaseClient {
 
     /// Subscribe to client events. Subscribe before calling login to see
     /// `QrCall`/`PinCall`.
+    ///
+    /// The channel keeps the last [`EVENT_CAPACITY`] events for each
+    /// receiver. A receiver that falls further behind gets
+    /// `Err(RecvError::Lagged(n))`: `n` events are lost to it and it goes on
+    /// with the oldest one still kept. Treat that like
+    /// [`ClientEvent::FullSyncRequired`] with `categories = [All]`: reload
+    /// what you show (chat list, recent messages), then keep receiving.
+    /// `Err(RecvError::Closed)` only happens when the client is dropped.
     pub fn subscribe(&self) -> broadcast::Receiver<ClientEvent> {
         self.events.subscribe()
     }
@@ -373,6 +398,13 @@ impl BaseClient {
         self.disable();
         self.emit(ClientEvent::KickedOut(reason));
         self.emit(ClientEvent::End(self.profile()));
+    }
+
+    /// Whether a server error made with this client's token means the
+    /// session is gone ([`LogoutReason::from_error_for`], with the extra
+    /// codes for secondary devices when this client is one).
+    pub fn logout_reason(&self, e: &Error) -> Option<LogoutReason> {
+        LogoutReason::from_error_for(e, session::is_secondary_device(self.device))
     }
 
     /// Host requests currently go to (primary or a backup after failover).
