@@ -132,9 +132,18 @@ pub enum TalkEvent {
         param2: String,
         param3: String,
     },
-    /// `SEND_CHAT_REMOVED`: we deleted `chat_mid` from the chat list (on
-    /// any device). `param2` is passed through as is.
-    ChatRemoved { chat_mid: String, param2: String },
+    /// `SEND_CHAT_REMOVED`: we deleted `chat_mid` (on any device, the
+    /// chat list's "delete"). The Android app (`SEND_CHAT_REMOVED.kt`)
+    /// reads only `param1`: it deletes a 1:1 chat or room with its
+    /// messages, and only the messages (and album cache) of a group we
+    /// are still in. `last_message_id` is `param2`, the
+    /// `sendChatRemoved` request's `lastMessageId` the app sends from the
+    /// chat's last message (inferred from the request, unverified on the
+    /// wire; the app ignores it on receipt).
+    ChatRemoved {
+        chat_mid: String,
+        last_message_id: String,
+    },
     /// `SEND_CHAT_HIDDEN`: we hid (`hidden`) or unhid `chat_mid` up to
     /// `last_message_id` (on any device; `param3` is `"1"` or `"0"`).
     ChatHidden {
@@ -143,8 +152,20 @@ pub enum TalkEvent {
         hidden: bool,
     },
     /// `REMOVE_ALL_MESSAGES`: we deleted the messages of every chat (on any
-    /// device). The params are passed through as is.
-    AllMessagesRemoved { param1: String, param2: String },
+    /// device). The Android app (`REMOVE_ALL_MESSAGES.kt`) reads no params
+    /// and deletes the messages of every chat.
+    AllMessagesRemoved,
+    /// `UPDATE_MESSAGE_REQUEST_BOX` (`by_me`, on any device) or
+    /// `NOTIFIED_UPDATE_MESSAGE_REQUEST_BOX`: `chat_mid` (`param1`) moved
+    /// into (`in_box`) or out of the message request box (`param2` > 0 or
+    /// not). The app ignores the op when `param2` is not a number. On
+    /// `NOTIFIED_…` with `in_box` the app lights a dot on the request
+    /// box entry of its chat list.
+    MessageRequestBox {
+        chat_mid: String,
+        in_box: bool,
+        by_me: bool,
+    },
     /// `REGISTER_E2EE_PUBLICKEY`, `(NOTIFIED_)UPDATE_PUBLICKEYCHAIN` or
     /// `NOTIFIED_E2EE_KEY_UPDATE`: Letter Sealing keys changed. The client
     /// has already forgotten the key ids it remembered as unresolvable;
@@ -245,8 +266,23 @@ impl TalkEvent {
             },
             "SEND_CHAT_REMOVED" => TalkEvent::ChatRemoved {
                 chat_mid: p(1),
-                param2: p(2),
+                last_message_id: p(2),
             },
+            "UPDATE_MESSAGE_REQUEST_BOX"
+            | "NOTIFIED_UPDATE_MESSAGE_REQUEST_BOX"
+            | "155"
+            | "156" => {
+                let chat_mid = p(1);
+                let in_box = p(2).trim().parse::<i64>().ok()? > 0;
+                if chat_mid.is_empty() {
+                    return None;
+                }
+                TalkEvent::MessageRequestBox {
+                    chat_mid,
+                    in_box,
+                    by_me: matches!(kind.as_str(), "UPDATE_MESSAGE_REQUEST_BOX" | "155"),
+                }
+            }
             // The Android app ignores the op unless param3 is "0" or "1"
             // (`SEND_CHAT_HIDDEN.kt`).
             "UPDATE_SETTINGS" => TalkEvent::SettingsUpdated {
@@ -261,10 +297,7 @@ impl TalkEvent {
                     _ => return None,
                 },
             },
-            "REMOVE_ALL_MESSAGES" => TalkEvent::AllMessagesRemoved {
-                param1: p(1),
-                param2: p(2),
-            },
+            "REMOVE_ALL_MESSAGES" => TalkEvent::AllMessagesRemoved,
             "NOTIFIED_DELETE_OTHER_FROM_CHAT" | "NOTIFIED_KICKOUT_FROM_GROUP" => TalkEvent::Kick {
                 chat_mid: p(1),
                 kicker_mid: p(2),
@@ -706,9 +739,28 @@ mod tests {
             ev(tv!({"type": 41, "param1": "u3", "param2": "200"})),
             Some(TalkEvent::ChatRemoved {
                 chat_mid: s("u3"),
-                param2: s("200")
+                last_message_id: s("200")
             })
         );
+        // 155/156 = (NOTIFIED_)UPDATE_MESSAGE_REQUEST_BOX
+        assert_eq!(
+            ev(tv!({"type": 156, "param1": "u4", "param2": "1"})),
+            Some(TalkEvent::MessageRequestBox {
+                chat_mid: s("u4"),
+                in_box: true,
+                by_me: false
+            })
+        );
+        assert_eq!(
+            ev(tv!({"type": "UPDATE_MESSAGE_REQUEST_BOX", "param1": "u4", "param2": "0"})),
+            Some(TalkEvent::MessageRequestBox {
+                chat_mid: s("u4"),
+                in_box: false,
+                by_me: true
+            })
+        );
+        assert_eq!(ev(tv!({"type": 156, "param1": "u4", "param2": "x"})), None);
+        assert_eq!(ev(tv!({"type": 156, "param2": "1"})), None);
         // 77 = NOTIFIED_E2EE_KEY_UPDATE, 72 = REGISTER_E2EE_PUBLICKEY
         assert_eq!(
             ev(tv!({"type": 77})),
@@ -743,10 +795,7 @@ mod tests {
         // 46 = REMOVE_ALL_MESSAGES
         assert_eq!(
             ev(tv!({"type": 46, "param1": "a"})),
-            Some(TalkEvent::AllMessagesRemoved {
-                param1: s("a"),
-                param2: s("")
-            })
+            Some(TalkEvent::AllMessagesRemoved)
         );
     }
 
