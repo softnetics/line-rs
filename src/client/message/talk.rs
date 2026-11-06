@@ -394,7 +394,12 @@ impl TalkMessage {
         reply_target(&self.raw)
     }
 
-    /// Download the attached media (image / video / audio / file).
+    /// Download the attached media (image / video / audio / file), or with
+    /// `preview` its thumbnail. An E2EE thumbnail is the one the sender
+    /// uploaded (see [`Obs::download_e2ee_preview`]); only an image
+    /// without one falls back to the image itself, never a video.
+    ///
+    /// [`Obs::download_e2ee_preview`]: crate::obs::Obs::download_e2ee_preview
     pub async fn data(&self, preview: bool) -> Result<Vec<u8>> {
         let content = self.content();
         if !content.has_media() {
@@ -410,9 +415,14 @@ impl TalkMessage {
             return fetch_bytes(&self.client.base.http, &url).await;
         }
         let obs = self.client.base.obs();
-        if self.raw["chunks"].as_list().is_some_and(|c| !c.is_empty())
-            && let Some(file) = obs.download_e2ee_message_media(&self.raw).await?
-        {
+        let e2ee = self.raw["chunks"].as_list().is_some_and(|c| !c.is_empty());
+        if e2ee && preview {
+            match obs.download_e2ee_message_preview(&self.raw).await {
+                Err(e) if e.http_status() == Some(404) && content.content_type == "IMAGE" => {}
+                other => return other,
+            }
+        }
+        if e2ee && let Some(file) = obs.download_e2ee_message_media(&self.raw).await? {
             return Ok(file.data.to_vec());
         }
         Ok(obs

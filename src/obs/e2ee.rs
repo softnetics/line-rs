@@ -730,18 +730,69 @@ impl Obs<'_> {
         if message["chunks"].as_list().is_none_or(|c| c.is_empty()) {
             return Ok(None);
         }
-        let id = message["id"].as_str().unwrap_or_default();
-        let meta = &message["contentMetadata"];
-        let oid = meta["OID"].as_str().unwrap_or_default();
-        let sid = meta["SID"].as_str().unwrap_or_default();
+        let (sid, oid, meta) = e2ee_object(message)?;
         let data = self
-            .download_object_for_service(
-                &format!("talk/{sid}"),
-                oid,
-                vec![("X-Talk-Meta".into(), talk_meta(id)?)],
-            )
+            .download_object_for_service(&format!("talk/{sid}"), &oid, meta)
             .await?;
         let plain = crypto::decrypt_by_key_material_b64(&data, key_material)?;
         Ok(Some(ObsFile::new(plain).name(file_name)))
     }
+
+    /// Download and decrypt the thumbnail of an E2EE image or video,
+    /// reading `keyMaterial` from its decrypted payload. See
+    /// [`download_e2ee_preview`](Self::download_e2ee_preview).
+    pub async fn download_e2ee_message_preview(&self, message: &Value) -> Result<Vec<u8>> {
+        let payload = self.client.decrypt_e2ee_data_message(message).await?;
+        let key_material = payload["keyMaterial"].as_str().ok_or_else(|| {
+            Error::internal("E2EEMediaError", "decrypted payload has no keyMaterial")
+        })?;
+        self.download_e2ee_preview(message, key_material).await
+    }
+
+    /// Download and decrypt the thumbnail the sender uploaded beside an
+    /// E2EE image or video, encrypted with the same `key_material`.
+    ///
+    /// Asks for `r/talk/{sid}/{oid}/ud-preview`, as LINE for Android does
+    /// (`e80/f0.b`, MESSAGE_IMAGE_THUMB), and on HTTP 404 for the name it
+    /// was uploaded under, `{oid}__ud-preview` (unverified that OBS serves
+    /// that name). Never downloads the media itself: a video without a
+    /// thumbnail fails with the 404.
+    pub async fn download_e2ee_preview(
+        &self,
+        message: &Value,
+        key_material: &str,
+    ) -> Result<Vec<u8>> {
+        let (sid, oid, meta) = e2ee_object(message)?;
+        let path = format!("talk/{sid}");
+        let data = match self
+            .download_object_for_service(&path, &format!("{oid}/ud-preview"), meta.clone())
+            .await
+        {
+            Err(e) if e.http_status() == Some(404) => {
+                self.download_object_for_service(&path, &format!("{oid}__ud-preview"), meta)
+                    .await?
+            }
+            other => other?,
+        };
+        crypto::decrypt_by_key_material_b64(&data, key_material)
+    }
+}
+
+/// `[X-Talk-Meta]`, the header of an E2EE object download.
+type TalkMetaHeader = Vec<(String, String)>;
+
+/// `(sid, oid, [X-Talk-Meta])` of an E2EE media message.
+fn e2ee_object(message: &Value) -> Result<(String, String, TalkMetaHeader)> {
+    let meta = &message["contentMetadata"];
+    let oid = meta["OID"].as_str().unwrap_or_default();
+    let sid = meta["SID"].as_str().unwrap_or_default();
+    if oid.is_empty() || sid.is_empty() {
+        return Err(Error::internal("ObsError", "message has no OID/SID"));
+    }
+    let id = message["id"].as_str().unwrap_or_default();
+    Ok((
+        sid.to_string(),
+        oid.to_string(),
+        vec![("X-Talk-Meta".into(), talk_meta(id)?)],
+    ))
 }

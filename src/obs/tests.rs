@@ -841,15 +841,19 @@ fn obs_params_are_base64_json() {
 struct Canned {
     status: u16,
     content_type: Option<&'static str>,
-    body: &'static [u8],
+    body: Bytes,
     headers: Vec<(&'static str, &'static str)>,
 }
 
 fn canned(status: u16, content_type: Option<&'static str>, body: &'static [u8]) -> Canned {
+    canned_bytes(status, content_type, Bytes::from_static(body))
+}
+
+fn canned_bytes(status: u16, content_type: Option<&'static str>, body: impl Into<Bytes>) -> Canned {
     Canned {
         status,
         content_type,
-        body,
+        body: body.into(),
         headers: Vec::new(),
     }
 }
@@ -924,7 +928,7 @@ async fn serve_heads(
             }
             out.push_str("\r\n");
             sock.write_all(out.as_bytes()).await.unwrap();
-            sock.write_all(r.body).await.unwrap();
+            sock.write_all(&r.body).await.unwrap();
             sock.shutdown().await.ok();
         }
     });
@@ -1006,6 +1010,55 @@ async fn gone_objects_are_expired_without_retry() {
         assert!(err.is_media_expired(), "{status}");
         assert_eq!(urls.lock().unwrap().len(), 1);
     }
+}
+
+fn e2ee_message() -> Value {
+    let mut message = crate::tv!({"id": "1", "to": "u-recipient", "contentMetadata": {"OID": "OBJ-1", "SID": "emv"}});
+    message.insert("chunks", Value::List(vec![Value::Binary(Vec::new())]));
+    message
+}
+
+#[tokio::test]
+async fn e2ee_preview_asks_for_ud_preview_then_the_upload_name() {
+    let enc = crypto::encrypt_by_key_material(b"thumb", None);
+    let (prefix, urls, heads) = serve_heads(vec![
+        canned(404, None, b""),
+        canned_bytes(200, None, enc.encrypted_data),
+    ])
+    .await;
+    let c = client();
+    let thumb = c
+        .obs()
+        .with_prefix(prefix)
+        .download_e2ee_preview(&e2ee_message(), &enc.key_material)
+        .await
+        .unwrap();
+    assert_eq!(thumb, b"thumb");
+    assert_eq!(
+        *urls.lock().unwrap(),
+        [
+            "/r/talk/emv/OBJ-1/ud-preview",
+            "/r/talk/emv/OBJ-1__ud-preview"
+        ]
+    );
+    assert!(header(&heads.lock().unwrap()[0], "x-talk-meta").is_some());
+}
+
+#[tokio::test]
+async fn missing_e2ee_preview_never_downloads_the_video() {
+    let (prefix, urls) = serve(vec![canned(404, None, b""), canned(404, None, b"")]).await;
+    let c = client();
+    let err = c
+        .obs()
+        .with_prefix(prefix)
+        .download_e2ee_preview(
+            &e2ee_message(),
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.http_status(), Some(404));
+    assert_eq!(urls.lock().unwrap().len(), 2);
 }
 
 #[tokio::test]
