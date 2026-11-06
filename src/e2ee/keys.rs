@@ -4,6 +4,9 @@
 //!
 //! * `e2eeKeys:<keyId>` / `e2eeKeys:<mid>` — JSON [`E2eeKey`] (the mid slot
 //!   aliases the current generation),
+//! * `e2eeLoginKeyId` — the key id chosen at a login that happened before
+//!   the profile (and so the mid) was known; it becomes the mid slot on the
+//!   next [`E2ee::get_self_key`],
 //! * `e2eePublicKeys:<mid>:<keyId>` — a peer's base64 public key,
 //! * `e2eeGroupKeys:<chatMid>:<groupKeyId>` / `e2eeGroupKeys:<chatMid>` —
 //!   JSON [`GroupKey`] (the unsuffixed slot holds the most recent one).
@@ -117,6 +120,9 @@ pub(crate) fn missing_key(what: impl std::fmt::Display) -> Error {
 
 /// `keyVersion` of every key call; the APK always sends 1.
 const KEY_VERSION: i32 = 1;
+
+/// Storage slot for a login key id waiting for the mid (see module docs).
+const LOGIN_KEY_ID: &str = "e2eeLoginKeyId";
 
 pub(crate) fn no_e2ee_key() -> Error {
     Error::internal(
@@ -274,9 +280,17 @@ impl<'a> E2ee<'a> {
             .ok_or_else(|| missing_key(format_args!("our E2EE key {key_id}")))
     }
 
-    /// The current own key: the `e2eeKeys:<mid>` alias (refreshed through its
-    /// per-id slot), else the first server-registered generation we hold.
+    /// The current own key: the key chosen at a login that had no mid yet,
+    /// else the `e2eeKeys:<mid>` alias (refreshed through its per-id slot),
+    /// else the first server-registered generation we hold.
     pub async fn get_self_key(&self, mid: &str) -> Result<E2eeKey> {
+        if let Some(id) = self.get_json::<i64>(LOGIN_KEY_ID).await
+            && let Some(key) = self.get_self_key_by_key_id(id).await
+        {
+            self.save_self_key_by_key_id(mid, &key).await?;
+            self.host.storage().delete(LOGIN_KEY_ID).await?;
+            return Ok(key);
+        }
         if let Some(key) = self.get_self_key_by_key_id(mid).await {
             // A new login can repair a mislabelled alias without deleting storage.
             if let Some(id) = key.key_id {
@@ -554,7 +568,8 @@ impl<'a> E2ee<'a> {
 
     /// Decode the login key chain (`encryptedKeyChain`, `publicKey`, `keyId`,
     /// `e2eeVersion`). Every generation is stored under its own id; the
-    /// requested one is remembered for [`Self::verify_login_key`].
+    /// requested one becomes the current key and is remembered for
+    /// [`Self::verify_login_key`].
     pub async fn decode_key_v1(
         &self,
         data: &Value,
@@ -618,6 +633,18 @@ impl<'a> E2ee<'a> {
             pub_key: B64.encode(&selected.public_key),
             e2ee_version,
         };
+        // The login names the current key: point `e2eeKeys:<mid>` at it so
+        // a re-login repairs a stale pointer. Before the profile is loaded
+        // the mid is unknown, so the id waits in its own slot.
+        match self.host.self_mid() {
+            Some(mid) => {
+                self.save_self_key_by_key_id(mid, &key).await?;
+                self.host.storage().delete(LOGIN_KEY_ID).await?;
+            }
+            None => self.set_json(LOGIN_KEY_ID, &selected.key_id).await?,
+        }
+        // Keys confirmed before this login may have been replaced.
+        self.state.confirmed_keys.lock().unwrap().clear();
         Ok(Some((key, selected.private_key, selected.public_key)))
     }
 
@@ -1159,7 +1186,8 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(priv_key, keys[7].private_key);
         assert_eq!(pub_key, keys[7].public_key);
-        assert_eq!(saved_count(&host).await, 8);
+        // Eight generations plus the current-key pointer.
+        assert_eq!(saved_count(&host).await, 9);
         for k in &keys {
             let stored: E2eeKey = serde_json::from_str(
                 host.get(&format!("e2eeKeys:{}", k.key_id))
@@ -1270,6 +1298,55 @@ pub(crate) mod tests {
             e2ee.get_self_key("u-self").await.unwrap().priv_key,
             b64(&keys[7].private_key)
         );
+    }
+
+    #[tokio::test]
+    async fn login_points_current_key_at_the_login_key() {
+        let (host, secret, data, keys) = login_fixture(&[10, 80], false).await;
+        // A pointer left at another generation, without a key id to refresh.
+        let stale = serde_json::json!({
+            "privKey": b64(&keys[0].private_key), "pubKey": b64(&keys[0].public_key)
+        });
+        host.set("e2eeKeys:u-self", stale.to_string()).await;
+        let state = E2eeState::default();
+        state.confirmed_keys.lock().unwrap().insert(80);
+        let e2ee = E2ee::new(&host, &state);
+        e2ee.decode_key_v1(&data, &secret).await.unwrap();
+        let pointer: E2eeKey =
+            serde_json::from_str(host.get("e2eeKeys:u-self").await.unwrap().as_str().unwrap())
+                .unwrap();
+        assert_eq!(pointer.key_id, Some(80));
+        assert_eq!(pointer.priv_key, b64(&keys[1].private_key));
+        assert!(state.confirmed_keys.lock().unwrap().is_empty());
+        assert_eq!(e2ee.get_self_key("u-self").await.unwrap(), pointer);
+    }
+
+    #[tokio::test]
+    async fn login_before_profile_sets_current_key_once_mid_is_known() {
+        let (mut host, secret, data, keys) = login_fixture(&[10, 80], false).await;
+        host.mid = None;
+        let stale = serde_json::json!({
+            "keyId": 10, "privKey": b64(&keys[0].private_key), "pubKey": b64(&keys[0].public_key)
+        });
+        host.set("e2eeKeys:u-self", stale.to_string()).await;
+        let state = E2eeState::default();
+        E2ee::new(&host, &state)
+            .decode_key_v1(&data, &secret)
+            .await
+            .unwrap();
+        assert!(host.get(LOGIN_KEY_ID).await.is_some());
+
+        // Later, e.g. after a restart, with the profile loaded.
+        host.mid = Some("u-self".into());
+        let state = E2eeState::default();
+        let key = E2ee::new(&host, &state)
+            .get_self_key("u-self")
+            .await
+            .unwrap();
+        assert_eq!(key.key_id, Some(80));
+        assert_eq!(key.priv_key, b64(&keys[1].private_key));
+        assert!(host.get(LOGIN_KEY_ID).await.is_none());
+        assert!(host.calls().is_empty());
     }
 
     #[tokio::test]
