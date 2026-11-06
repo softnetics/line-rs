@@ -179,13 +179,21 @@ pub(crate) fn react_args(req_seq: i64, o: &ReactOptions) -> Value {
     args
 }
 
+/// `sendPostback` arguments. Empty `message_id` and `origin_mid` are left
+/// out, as LINE for Android leaves them unset for rich-menu taps
+/// (`vp1/d.java` passes no message).
 pub(crate) fn postback_args(
-    message_id: &str,
+    message_id: Option<&str>,
     url: &str,
     chat_mid: &str,
-    origin_mid: &str,
+    origin_mid: Option<&str>,
 ) -> Value {
-    crate::tv!({"request": {"messageId": message_id, "url": url, "chatMID": chat_mid, "originMID": origin_mid}})
+    let mut req = crate::tv!({"url": url, "chatMID": chat_mid});
+    req.insert("messageId", message_id.filter(|s| !s.is_empty()));
+    req.insert("originMID", origin_mid.filter(|s| !s.is_empty()));
+    let mut args = Value::object();
+    args.insert("request", req);
+    args
 }
 
 pub(crate) fn get_chats_args(o: &GetChatsOptions) -> Value {
@@ -426,12 +434,27 @@ impl TalkService<'_> {
 
     /// Report a Flex message postback action (`sendPostback`): `url` is the
     /// action's postback URL, `origin_mid` the sender of the Flex message.
+    /// Build `url` with [`Postback`](crate::client::postback::Postback).
     pub async fn send_flex_postback(
         &self,
         message_id: &str,
         url: &str,
         chat_mid: &str,
         origin_mid: &str,
+    ) -> Result<Value> {
+        self.send_postback_url(url, chat_mid, Some(message_id), Some(origin_mid))
+            .await
+    }
+
+    /// `sendPostback` with an optional message and sender: rich-menu taps
+    /// have neither. `url` is a `linepostback://` URL (see
+    /// [`client::postback`](crate::client::postback)).
+    pub async fn send_postback_url(
+        &self,
+        url: &str,
+        chat_mid: &str,
+        message_id: Option<&str>,
+        origin_mid: Option<&str>,
     ) -> Result<Value> {
         self.call(
             "sendPostback",
@@ -1218,6 +1241,27 @@ mod tests {
     }
 
     #[test]
+    fn rich_menu_postback_has_no_message_or_origin() {
+        let args = encode(
+            "sendPostback_args",
+            &postback_args(Some(""), "linepostback://postback?_data=x", "u1", None),
+        );
+        assert_eq!(path(&args, &[2, 1]), None);
+        assert_eq!(
+            path(&args, &[2, 2]),
+            Some(&s("linepostback://postback?_data=x"))
+        );
+        assert_eq!(path(&args, &[2, 3]), Some(&s("u1")));
+        assert_eq!(path(&args, &[2, 4]), None);
+        let flex = encode(
+            "sendPostback_args",
+            &postback_args(Some("9"), "u", "c1", Some("u2")),
+        );
+        assert_eq!(path(&flex, &[2, 1]), Some(&s("9")));
+        assert_eq!(path(&flex, &[2, 4]), Some(&s("u2")));
+    }
+
+    #[test]
     fn sync_args_defaults() {
         let f = encode(
             "sync_args",
@@ -1235,7 +1279,7 @@ mod tests {
     fn postback_args_encoding() {
         let f = encode(
             "sendPostback_args",
-            &postback_args("1", "https://p", "c1", "u1"),
+            &postback_args(Some("1"), "https://p", "c1", Some("u1")),
         );
         assert_eq!(path(&f, &[2, 1]), Some(&s("1")));
         assert_eq!(path(&f, &[2, 2]), Some(&s("https://p")));

@@ -402,6 +402,15 @@ fn now_ms() -> i64 {
 }
 
 impl Client {
+    /// Send a `linepostback://` URL to a chat's bot without a message, as a
+    /// rich-menu tap does (see [`postback`](crate::client::postback)).
+    pub async fn send_postback(&self, chat_mid: &str, url: &str) -> Result<Value> {
+        self.base
+            .talk()
+            .send_postback_url(url, chat_mid, None, None)
+            .await
+    }
+
     /// Chat effect definitions (`getChatEffectMetaList`) for `Pb1_Q2`
     /// categories (`BACKGROUND`, `KEYWORD`, `CONTENT_METADATA_TAG_BASED`).
     pub async fn chat_effects(&self, categories: &[&str]) -> Result<Vec<Value>> {

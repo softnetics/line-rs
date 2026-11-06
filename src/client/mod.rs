@@ -25,6 +25,7 @@ pub mod liff;
 mod listen;
 mod login;
 pub mod message;
+pub mod postback;
 mod premium;
 mod profile;
 mod square;
@@ -829,7 +830,7 @@ mod tests {
         check(
             "sendPostback",
             false,
-            crate::service::talk::postback_args("1", "u", "c", "o"),
+            crate::service::talk::postback_args(Some("1"), "u", "c", Some("o")),
         );
         check("getProfile", false, tv!({"syncReason": "INTERNAL"}));
         check(
