@@ -19,10 +19,62 @@ impl AuthService<'_> {
         self.client.try_refresh_token().await
     }
 
-    /// Log out this device (`logoutZ` on `/RS4`) and disable the client:
-    /// later requests fail with `ClientClosed`, `End` is emitted and the auth
-    /// token is dropped. Returns the decoded `success` (or `true`).
+    /// Log out this device and disable the client: later requests fail
+    /// with `ClientClosed`, `End` is emitted, listening stops and the auth
+    /// token is dropped.
+    ///
+    /// Uses `logoutV2` like the Android app (`gr8/c0.java`), which refreshes
+    /// the token and retries on `MUST_REFRESH_V3_TOKEN`. If the server says
+    /// the session is already gone, that counts as logged out. Any other
+    /// `logoutV2` failure falls back to [`logout_z`](Self::logout_z).
+    pub async fn logout(&self) -> Result<()> {
+        let client = self.client;
+        match self.logout_v2().await {
+            Ok(_) => {}
+            // `request` already ended the session (KickedOut, End).
+            Err(e) if client.logout_reason(&e).is_some() && client.kicked_out().is_some() => {
+                client.stop_listening();
+                return Ok(());
+            }
+            Err(e) if client.logout_reason(&e).is_some() => {}
+            Err(e) => {
+                client.log("LogoutV2Error", serde_json::json!({"error": e.to_string()}));
+                self.logout_z().await?;
+                return Ok(());
+            }
+        }
+        self.end_session();
+        Ok(())
+    }
+
+    /// Log out this device with the older `logoutZ` on `/RS4` and disable
+    /// the client (see [`logout`](Self::logout), which is preferred). On
+    /// `MUST_REFRESH_V3_TOKEN` the token is refreshed and the call retried
+    /// once. Returns the decoded `success` (or `true`).
     pub async fn logout_z(&self) -> Result<Value> {
+        let client = self.client;
+        let mut refreshed = false;
+        loop {
+            let sent = client.auth_token();
+            match self.logout_z_once(sent.as_deref()).await {
+                Err(e)
+                    if !refreshed
+                        && e.code() == Some("MUST_REFRESH_V3_TOKEN")
+                        && client.storage.get_string("refreshToken").await?.is_some() =>
+                {
+                    refreshed = true;
+                    client.refresh_token_after(sent.as_deref()).await?;
+                }
+                Err(e) => return Err(e),
+                Ok(result) => {
+                    self.end_session();
+                    return Ok(result);
+                }
+            }
+        }
+    }
+
+    async fn logout_z_once(&self, sent: Option<&str>) -> Result<Value> {
         let client = self.client;
         let res = client
             .send_http(
@@ -34,7 +86,7 @@ impl AuthService<'_> {
             )
             .await?;
         if let Some(next) = res.header("x-line-next-access") {
-            client.emit(ClientEvent::UpdateAuthToken(next.to_string()));
+            client.apply_next_access(sent, next);
         }
         let msg = thrift::read_message(&res.body, Protocol::Compact).map_err(|_| {
             Error::internal(
@@ -49,37 +101,37 @@ impl AuthService<'_> {
             unreachable!("read_message returns a struct")
         };
         if let Some((_, exc)) = fields.iter().find(|(id, _)| *id != 0) {
-            let data = thrift::decode_struct(Schema::line(), Some("TalkException"), exc);
-            let refreshable = data["code"].as_str() == Some("MUST_REFRESH_V3_TOKEN")
-                && client.storage.get("refreshToken").await?.is_some();
-            if !refreshable {
-                return Err(Error::Request {
-                    method: "logoutZ".into(),
-                    path: LOGOUT_Z_PATH.into(),
-                    data,
-                });
-            }
+            return Err(Error::Request {
+                method: "logoutZ".into(),
+                path: LOGOUT_Z_PATH.into(),
+                data: thrift::decode_struct(Schema::line(), Some("TalkException"), exc),
+            });
         }
-        let result = msg
+        Ok(msg
             .body
             .field(0)
             .map(thrift::decode_raw)
-            .unwrap_or(Value::Bool(true));
+            .unwrap_or(Value::Bool(true)))
+    }
+
+    /// Disable the client after a logout and tell listeners.
+    fn end_session(&self) {
+        let client = self.client;
         client.disable();
         client.stop_listening();
         if let Some(profile) = client.profile() {
             client.emit(ClientEvent::End(Some(profile)));
         }
         client.set_auth_token(None);
-        Ok(result)
     }
 }
 
 impl AuthService<'_> {
-    /// Log out the current session (v2; no arguments).
+    /// Log out the current session (v2; no arguments). Does not disable
+    /// the client; [`logout`](Self::logout) does.
     ///
-    /// Recovered by static RE of LINE macOS 26.5.0; unverified against a live
-    /// server.
+    /// Recovered by static RE of LINE macOS 26.5.0; the Android app calls
+    /// it too (`gr8/c0.java`).
     pub async fn logout_v2(&self) -> Result<Value> {
         self.request("logoutV2", Vec::new(), Parse::Result).await
     }

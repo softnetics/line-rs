@@ -525,3 +525,132 @@ fn x_lal_follows_the_configured_language() {
         Some("ja_JP")
     );
 }
+
+/// `<method>_result { e: TalkException { code } }`.
+fn talk_exception(method: &str, code: i32) -> Reply {
+    reply(
+        method,
+        vec![(1, TValue::Struct(vec![(1, TValue::I32(code))]))],
+    )
+}
+
+fn logout_client(endpoint: &str, storage: Arc<MemoryStorage>) -> BaseClient {
+    let config = crate::base::Config {
+        report_refreshed_token: false,
+        ..Default::default()
+    };
+    let c = client_with(endpoint, storage, config);
+    c.set_profile(Some(crate::tv!({"mid": "u1"})));
+    c
+}
+
+fn assert_logged_out(c: &BaseClient, events: &mut tokio::sync::broadcast::Receiver<ClientEvent>) {
+    assert!(c.is_disabled());
+    assert!(c.auth_token().is_none());
+    assert!(
+        std::iter::from_fn(|| events.try_recv().ok()).any(|e| matches!(e, ClientEvent::End(_)))
+    );
+}
+
+#[tokio::test]
+async fn logout_uses_logout_v2() {
+    let (endpoint, seen) = serve(vec![reply("logoutV2", vec![])]).await;
+    let c = logout_client(&endpoint, Arc::new(MemoryStorage::new()));
+    let mut events = c.subscribe();
+    c.auth().logout().await.unwrap();
+    assert_logged_out(&c, &mut events);
+    let seen = seen.lock().unwrap();
+    assert_eq!(
+        (seen[0].path.as_str(), seen[0].method.as_str()),
+        ("/AS4", "logoutV2")
+    );
+}
+
+#[tokio::test]
+async fn logout_refreshes_and_retries_on_must_refresh() {
+    let storage = Arc::new(MemoryStorage::new());
+    // 119 = MUST_REFRESH_V3_TOKEN
+    let (endpoint, seen) = serve(vec![
+        talk_exception("logoutV2", 119),
+        refresh_ok("FRESH"),
+        reply("logoutV2", vec![]),
+    ])
+    .await;
+    let c = logout_client(&endpoint, storage.clone());
+    storage.set("refreshToken", "R1".into()).await.unwrap();
+    let mut events = c.subscribe();
+    c.auth().logout().await.unwrap();
+    assert_logged_out(&c, &mut events);
+    let seen = seen.lock().unwrap();
+    let calls: Vec<_> = seen
+        .iter()
+        .map(|s| (s.method.as_str(), s.access.as_deref()))
+        .collect();
+    assert_eq!(
+        calls,
+        [
+            ("logoutV2", Some("OLD")),
+            ("refresh", Some("OLD")),
+            ("logoutV2", Some("FRESH"))
+        ]
+    );
+}
+
+#[tokio::test]
+async fn logout_falls_back_to_logout_z() {
+    // 20 = INTERNAL_ERROR
+    let (endpoint, seen) = serve(vec![
+        talk_exception("logoutV2", 20),
+        reply("logoutZ", vec![]),
+    ])
+    .await;
+    let c = logout_client(&endpoint, Arc::new(MemoryStorage::new()));
+    let mut events = c.subscribe();
+    c.auth().logout().await.unwrap();
+    assert_logged_out(&c, &mut events);
+    assert_eq!(seen.lock().unwrap()[1].path, "/RS4");
+}
+
+#[tokio::test]
+async fn logout_z_refreshes_instead_of_counting_must_refresh_as_success() {
+    let storage = Arc::new(MemoryStorage::new());
+    let (endpoint, seen) = serve(vec![
+        talk_exception("logoutZ", 119),
+        refresh_ok("FRESH"),
+        reply("logoutZ", vec![]),
+    ])
+    .await;
+    let c = logout_client(&endpoint, storage.clone());
+    storage.set("refreshToken", "R1".into()).await.unwrap();
+    let mut events = c.subscribe();
+    c.auth().logout_z().await.unwrap();
+    assert_logged_out(&c, &mut events);
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 3);
+    assert_eq!(seen[2].access.as_deref(), Some("FRESH"));
+}
+
+#[tokio::test]
+async fn logout_z_error_keeps_the_session() {
+    let (endpoint, _seen) = serve(vec![talk_exception("logoutZ", 20)]).await;
+    let c = logout_client(&endpoint, Arc::new(MemoryStorage::new()));
+    let err = c.auth().logout_z().await.unwrap_err();
+    assert_eq!(err.code(), Some("INTERNAL_ERROR"));
+    assert!(!c.is_disabled());
+    assert_eq!(c.auth_token().as_deref(), Some("OLD"));
+}
+
+#[tokio::test]
+async fn logout_of_an_ended_session_counts_as_done() {
+    // 8 = NOT_AUTHORIZED_DEVICE
+    let (endpoint, seen) = serve(vec![talk_exception("logoutV2", 8)]).await;
+    let c = logout_client(&endpoint, Arc::new(MemoryStorage::new()));
+    let mut events = c.subscribe();
+    c.auth().logout().await.unwrap();
+    let ends = std::iter::from_fn(|| events.try_recv().ok())
+        .filter(|e| matches!(e, ClientEvent::End(_)))
+        .count();
+    assert_eq!(ends, 1);
+    assert!(c.is_disabled());
+    assert_eq!(seen.lock().unwrap().len(), 1);
+}
