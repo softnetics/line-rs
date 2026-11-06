@@ -2,7 +2,16 @@ use super::LogoutReason;
 use crate::polling::{FullSyncCategory, FullSyncReason, SyncData};
 use crate::thrift::Value;
 
+/// Events each subscriber can fall behind by before it misses some (see
+/// [`BaseClient::subscribe`](super::BaseClient::subscribe)). Shared by the
+/// high-level [`Client`](crate::Client) event channel.
+pub const EVENT_CAPACITY: usize = 4096;
+
 /// Events emitted by [`BaseClient`](super::BaseClient).
+///
+/// Delivered through a `tokio::sync::broadcast` channel: handle
+/// `RecvError::Lagged` as described on
+/// [`BaseClient::subscribe`](super::BaseClient::subscribe).
 #[derive(Debug, Clone)]
 pub enum ClientEvent {
     /// Show this PIN to the user (enter on the primary device).
@@ -50,4 +59,26 @@ pub enum ClientEvent {
         kind: String,
         data: serde_json::Value,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::broadcast::error::TryRecvError;
+
+    use super::*;
+
+    #[test]
+    fn a_slow_subscriber_sees_lagged_only_past_capacity() {
+        let c = crate::BaseClient::new(crate::Device::DesktopMac).unwrap();
+        let mut rx = c.subscribe();
+        let token = |i: usize| ClientEvent::UpdateAuthToken(i.to_string());
+        for i in 0..EVENT_CAPACITY {
+            c.emit(token(i));
+        }
+        assert!(matches!(rx.try_recv(), Ok(ClientEvent::UpdateAuthToken(t)) if t == "0"));
+        for i in EVENT_CAPACITY..EVENT_CAPACITY + 2 {
+            c.emit(token(i));
+        }
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Lagged(1))));
+    }
 }

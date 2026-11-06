@@ -104,7 +104,7 @@ struct Inner {
 impl Client {
     /// Wrap a (logged-in) base client.
     pub fn new(base: BaseClient) -> Self {
-        let (events, _) = broadcast::channel(256);
+        let (events, _) = broadcast::channel(crate::base::EVENT_CAPACITY);
         Self {
             base,
             inner: Arc::new(Inner {
@@ -116,7 +116,11 @@ impl Client {
         }
     }
 
-    /// Subscribe to [`ClientEvent`]s.
+    /// Subscribe to [`ClientEvent`]s. A receiver more than
+    /// [`EVENT_CAPACITY`](crate::base::EVENT_CAPACITY) events behind gets
+    /// `RecvError::Lagged(n)` and has lost `n` events: reload the chat list
+    /// and recent messages, then keep receiving (see
+    /// [`BaseClient::subscribe`]).
     pub fn subscribe(&self) -> broadcast::Receiver<ClientEvent> {
         self.inner.events.subscribe()
     }

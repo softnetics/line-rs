@@ -4,7 +4,7 @@
 mod events;
 mod session;
 
-pub use events::ClientEvent;
+pub use events::{ClientEvent, EVENT_CAPACITY};
 pub(crate) use session::now_epoch_sec as session_now;
 pub use session::{LEGY_BACKUP_HOST, LEGY_HOST, LogoutReason, ProxyConfig};
 
@@ -177,7 +177,7 @@ impl ClientBuilder {
             (None, None) => vec![LEGY_BACKUP_HOST.to_string()],
             (None, Some(_)) => Vec::new(),
         };
-        let (events, _) = broadcast::channel(256);
+        let (events, _) = broadcast::channel(EVENT_CAPACITY);
         Ok(BaseClient(Arc::new(Inner {
             device_details: self.device.details(self.version.as_deref()),
             device: self.device,
@@ -314,6 +314,14 @@ impl BaseClient {
 
     /// Subscribe to client events. Subscribe before calling login to see
     /// `QrCall`/`PinCall`.
+    ///
+    /// The channel keeps the last [`EVENT_CAPACITY`] events for each
+    /// receiver. A receiver that falls further behind gets
+    /// `Err(RecvError::Lagged(n))`: `n` events are lost to it and it goes on
+    /// with the oldest one still kept. Treat that like
+    /// [`ClientEvent::FullSyncRequired`] with `categories = [All]`: reload
+    /// what you show (chat list, recent messages), then keep receiving.
+    /// `Err(RecvError::Closed)` only happens when the client is dropped.
     pub fn subscribe(&self) -> broadcast::Receiver<ClientEvent> {
         self.events.subscribe()
     }
