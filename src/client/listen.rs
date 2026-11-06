@@ -116,9 +116,35 @@ pub enum TalkEvent {
     },
     /// `NOTIFIED_ACCEPT_CHAT_INVITATION` / `NOTIFIED_ACCEPT_GROUP_INVITATION`.
     Join { chat_mid: String, mid: String },
-    /// `NOTIFIED_DELETE_SELF_FROM_CHAT` / `NOTIFIED_LEAVE_GROUP` /
-    /// `NOTIFIED_LEAVE_ROOM`.
+    /// `NOTIFIED_DELETE_SELF_FROM_CHAT` / `NOTIFIED_LEAVE_CHAT` /
+    /// `NOTIFIED_LEAVE_GROUP` / `NOTIFIED_LEAVE_ROOM`: `mid` left
+    /// `chat_mid`.
     Leave { chat_mid: String, mid: String },
+    /// `DELETE_SELF_FROM_CHAT`: we left `chat_mid` (on any device).
+    LeftChat { chat_mid: String },
+    /// `UPDATE_CHAT` (`by_me`, on any device) or `NOTIFIED_UPDATE_CHAT`
+    /// (someone else): the chat's name, picture or settings changed;
+    /// re-fetch it (`getChats`), as the Android app does. `param2` and
+    /// `param3` are passed through as is.
+    ChatUpdated {
+        chat_mid: String,
+        by_me: bool,
+        param2: String,
+        param3: String,
+    },
+    /// `SEND_CHAT_REMOVED`: we deleted `chat_mid` from the chat list (on
+    /// any device). `param2` is passed through as is.
+    ChatRemoved { chat_mid: String, param2: String },
+    /// `SEND_CHAT_HIDDEN`: we hid (`hidden`) or unhid `chat_mid` up to
+    /// `last_message_id` (on any device; `param3` is `"1"` or `"0"`).
+    ChatHidden {
+        chat_mid: String,
+        last_message_id: String,
+        hidden: bool,
+    },
+    /// `REMOVE_ALL_MESSAGES`: we deleted the messages of every chat (on any
+    /// device). The params are passed through as is.
+    AllMessagesRemoved { param1: String, param2: String },
     /// `NOTIFIED_DELETE_OTHER_FROM_CHAT` / `NOTIFIED_KICKOUT_FROM_GROUP`.
     Kick {
         chat_mid: String,
@@ -194,12 +220,39 @@ impl TalkEvent {
                     mid: p(2),
                 }
             }
-            "NOTIFIED_DELETE_SELF_FROM_CHAT" | "NOTIFIED_LEAVE_GROUP" | "NOTIFIED_LEAVE_ROOM" => {
-                TalkEvent::Leave {
-                    chat_mid: p(1),
-                    mid: p(2),
-                }
-            }
+            "NOTIFIED_DELETE_SELF_FROM_CHAT"
+            | "NOTIFIED_LEAVE_CHAT"
+            | "NOTIFIED_LEAVE_GROUP"
+            | "NOTIFIED_LEAVE_ROOM" => TalkEvent::Leave {
+                chat_mid: p(1),
+                mid: p(2),
+            },
+            "DELETE_SELF_FROM_CHAT" => TalkEvent::LeftChat { chat_mid: p(1) },
+            "UPDATE_CHAT" | "NOTIFIED_UPDATE_CHAT" => TalkEvent::ChatUpdated {
+                chat_mid: p(1),
+                by_me: kind == "UPDATE_CHAT",
+                param2: p(2),
+                param3: p(3),
+            },
+            "SEND_CHAT_REMOVED" => TalkEvent::ChatRemoved {
+                chat_mid: p(1),
+                param2: p(2),
+            },
+            // The Android app ignores the op unless param3 is "0" or "1"
+            // (`SEND_CHAT_HIDDEN.kt`).
+            "SEND_CHAT_HIDDEN" => TalkEvent::ChatHidden {
+                chat_mid: p(1),
+                last_message_id: p(2),
+                hidden: match p(3).as_str() {
+                    "1" => true,
+                    "0" => false,
+                    _ => return None,
+                },
+            },
+            "REMOVE_ALL_MESSAGES" => TalkEvent::AllMessagesRemoved {
+                param1: p(1),
+                param2: p(2),
+            },
             "NOTIFIED_DELETE_OTHER_FROM_CHAT" | "NOTIFIED_KICKOUT_FROM_GROUP" => TalkEvent::Kick {
                 chat_mid: p(1),
                 kicker_mid: p(2),
@@ -564,6 +617,73 @@ mod tests {
         );
         assert_eq!(ev(tv!({"type": 25})), None);
         assert_eq!(ev(tv!({"type": 9999})), None);
+    }
+
+    #[test]
+    fn classifies_chat_list_and_membership_ops() {
+        let ev = |v: Value| TalkEvent::from_operation(&v);
+        let s = |v: &str| v.to_string();
+        // 61 = NOTIFIED_LEAVE_CHAT
+        assert_eq!(
+            ev(tv!({"type": 61, "param1": "c1", "param2": "u2"})),
+            Some(TalkEvent::Leave {
+                chat_mid: s("c1"),
+                mid: s("u2")
+            })
+        );
+        // 127 = DELETE_SELF_FROM_CHAT
+        assert_eq!(
+            ev(tv!({"type": 127, "param1": "c1"})),
+            Some(TalkEvent::LeftChat { chat_mid: s("c1") })
+        );
+        // 121 = UPDATE_CHAT, 122 = NOTIFIED_UPDATE_CHAT
+        assert_eq!(
+            ev(tv!({"type": 121, "param1": "c1", "param2": "u1", "param3": "1"})),
+            Some(TalkEvent::ChatUpdated {
+                chat_mid: s("c1"),
+                by_me: true,
+                param2: s("u1"),
+                param3: s("1")
+            })
+        );
+        assert!(matches!(
+            ev(tv!({"type": "NOTIFIED_UPDATE_CHAT", "param1": "c1"})),
+            Some(TalkEvent::ChatUpdated { by_me: false, ref chat_mid, .. }) if chat_mid == "c1"
+        ));
+        // 41 = SEND_CHAT_REMOVED
+        assert_eq!(
+            ev(tv!({"type": 41, "param1": "u3", "param2": "200"})),
+            Some(TalkEvent::ChatRemoved {
+                chat_mid: s("u3"),
+                param2: s("200")
+            })
+        );
+        // 137 = SEND_CHAT_HIDDEN
+        assert_eq!(
+            ev(tv!({"type": 137, "param1": "c1", "param2": "300", "param3": "1"})),
+            Some(TalkEvent::ChatHidden {
+                chat_mid: s("c1"),
+                last_message_id: s("300"),
+                hidden: true
+            })
+        );
+        assert_eq!(
+            ev(tv!({"type": 137, "param1": "c1", "param2": "300", "param3": "0"})),
+            Some(TalkEvent::ChatHidden {
+                chat_mid: s("c1"),
+                last_message_id: s("300"),
+                hidden: false
+            })
+        );
+        assert_eq!(ev(tv!({"type": 137, "param1": "c1", "param3": "x"})), None);
+        // 46 = REMOVE_ALL_MESSAGES
+        assert_eq!(
+            ev(tv!({"type": 46, "param1": "a"})),
+            Some(TalkEvent::AllMessagesRemoved {
+                param1: s("a"),
+                param2: s("")
+            })
+        );
     }
 
     #[tokio::test]
