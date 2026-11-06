@@ -207,6 +207,17 @@ impl MessageInput {
     pub fn sticker_text(self, text: impl Into<String>) -> Self {
         self.metadata("STKTXT", text)
     }
+    /// Send without a notification on the recipients' devices: LINE for
+    /// Android's "send silently" writes `NOTIFICATION_DISABLED=true`
+    /// (`tq8/p1.a`). The message itself arrives as usual.
+    pub fn silent(mut self, silent: bool) -> Self {
+        if silent {
+            self.metadata("NOTIFICATION_DISABLED", "true")
+        } else {
+            self.content_metadata.shift_remove("NOTIFICATION_DISABLED");
+            self
+        }
+    }
 }
 
 impl From<&str> for MessageInput {
@@ -616,6 +627,14 @@ mod tests {
             ("p", Some(1), Some(sticon_url("p", "s").as_str()))
         );
         assert_eq!(decos[4].text, "");
+    }
+
+    #[test]
+    fn silent_sends_disable_notifications() {
+        let input = MessageInput::text("hi").silent(true);
+        assert_eq!(input.content_metadata["NOTIFICATION_DISABLED"], "true");
+        let input = input.silent(false);
+        assert!(!input.content_metadata.contains_key("NOTIFICATION_DISABLED"));
     }
 
     #[test]
