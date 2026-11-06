@@ -1,15 +1,16 @@
 //! The OBS access token: `acquireEncryptedAccessToken(OBS_GENERAL)`.
 //!
-//! The Android app (`hk8/c`, `hk8/b`) authenticates OBS uploads with this
-//! token rather than the session token. The call returns
+//! The Android app (`hk8/c`, `hk8/b`) authenticates OBS uploads and chat
+//! media downloads (`e80/g0` → `fl8/b.c`) with this token rather than the
+//! session token; both share one cache. The call returns
 //! `"<ttlSec>\x1e<token>"`; the token is kept until
 //! `max(30, min(600, ttl / 20))` seconds before it expires. Acquiring is
 //! tried up to three times, 200 ms and 400 ms apart; when every try fails
 //! the last token is used even if stale. An HTTP 401 from OBS drops it.
 //!
-//! When there has never been a token (the call keeps failing), uploads fall
-//! back to the session token in `x-line-access`, which is what line-rs sent
-//! before and which OBS accepts for most accounts.
+//! When there has never been a token (the call keeps failing), uploads and
+//! downloads fall back to the session token in `x-line-access`, which is
+//! what line-rs sent before and which OBS accepts for most accounts.
 
 use std::time::{Duration, Instant};
 
@@ -33,6 +34,10 @@ pub(crate) trait ObsTokenSource: Sync {
 #[async_trait]
 impl ObsTokenSource for BaseClient {
     async fn acquire(&self) -> Result<String> {
+        // Tests never reach LINE: they set a token or pass a fake source.
+        if cfg!(test) {
+            return Err(Error::internal("ObsError", "no OBS token in tests"));
+        }
         let res = self
             .talk()
             .acquire_encrypted_access_token(crate::tv!({"featureType": "OBS_GENERAL"}))

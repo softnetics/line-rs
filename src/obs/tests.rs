@@ -987,6 +987,71 @@ fn client() -> BaseClient {
     c
 }
 
+/// [`client`] holding the OBS token `obs`, for chat media downloads.
+async fn chat_client() -> BaseClient {
+    let c = client();
+    c.obs_state.token.set("obs", Duration::from_secs(60)).await;
+    c
+}
+
+#[tokio::test]
+async fn chat_downloads_send_the_obs_token() {
+    let (prefix, _, heads) = serve_heads(vec![
+        canned(200, Some("image/jpeg"), &[1]),
+        canned(200, None, b"x"),
+    ])
+    .await;
+    let c = chat_client().await;
+    let obs = c.obs().with_prefix(prefix);
+    obs.download_message_data("1", true, false).await.unwrap();
+    // Other objects (group pictures, notes) keep the session token.
+    obs.download_object_for_service("talk/g", "c1", vec![])
+        .await
+        .unwrap();
+    let heads = heads.lock().unwrap();
+    assert_eq!(header(&heads[0], "x-line-access"), Some("obs"));
+    assert_eq!(header(&heads[1], "x-line-access"), Some("token"));
+}
+
+#[tokio::test]
+async fn chat_download_401_gets_a_new_obs_token() {
+    let (prefix, _, heads) = serve_heads(vec![
+        canned(401, None, b""),
+        canned(200, Some("image/jpeg"), &[1]),
+    ])
+    .await;
+    let c = chat_client().await;
+    let tokens = Tokens::new(vec![Ok("3600\u{1e}new".into())]);
+    c.obs()
+        .with_prefix(prefix)
+        .with_tokens(&tokens)
+        .download_message_data("1", true, false)
+        .await
+        .unwrap();
+    assert_eq!(tokens.calls(), 1);
+    let heads = heads.lock().unwrap();
+    assert_eq!(header(&heads[0], "x-line-access"), Some("obs"));
+    assert_eq!(header(&heads[1], "x-line-access"), Some("new"));
+}
+
+#[tokio::test]
+async fn chat_downloads_without_obs_token_send_the_session_token() {
+    let (prefix, _, heads) = serve_heads(vec![canned(200, Some("image/jpeg"), &[1])]).await;
+    let c = client();
+    let tokens = Tokens::new(vec![]);
+    c.obs()
+        .with_prefix(prefix)
+        .with_tokens(&tokens)
+        .download_message_data("1", true, false)
+        .await
+        .unwrap();
+    assert_eq!(tokens.calls(), OBS_TOKEN_ATTEMPTS);
+    assert_eq!(
+        header(&heads.lock().unwrap()[0], "x-line-access"),
+        Some("token")
+    );
+}
+
 #[tokio::test]
 async fn download_object_404_is_obs_error() {
     let (prefix, urls) = serve(vec![canned(404, None, b"")]).await;
@@ -1039,7 +1104,7 @@ async fn download_gives_up_after_one_retry() {
 async fn gone_objects_are_expired_without_retry() {
     for status in [403, 404, 410] {
         let (prefix, urls) = serve(vec![canned(status, None, b"")]).await;
-        let c = client();
+        let c = chat_client().await;
         let err = c
             .obs()
             .with_prefix(prefix)
@@ -1065,7 +1130,7 @@ async fn e2ee_preview_asks_for_ud_preview_then_the_upload_name() {
         canned_bytes(200, None, enc.encrypted_data),
     ])
     .await;
-    let c = client();
+    let c = chat_client().await;
     let thumb = c
         .obs()
         .with_prefix(prefix)
@@ -1086,7 +1151,7 @@ async fn e2ee_preview_asks_for_ud_preview_then_the_upload_name() {
 #[tokio::test]
 async fn missing_e2ee_preview_never_downloads_the_video() {
     let (prefix, urls) = serve(vec![canned(404, None, b""), canned(404, None, b"")]).await;
-    let c = client();
+    let c = chat_client().await;
     let err = c
         .obs()
         .with_prefix(prefix)
@@ -1103,7 +1168,7 @@ async fn missing_e2ee_preview_never_downloads_the_video() {
 #[tokio::test]
 async fn expired_e2ee_object_fails_before_decryptor() {
     let (prefix, _) = serve(vec![canned(404, None, b"")]).await;
-    let c = client();
+    let c = chat_client().await;
     let mut message = crate::tv!({"id": "1", "to": "u-recipient", "contentMetadata": {"OID": "OBJ-1", "SID": "emi"}});
     message.insert("chunks", Value::List(vec![Value::Binary(Vec::new())]));
     let err = c
@@ -1130,7 +1195,7 @@ async fn message_data_410_stops_before_metadata() {
         b"<html><body>expired</body></html>",
     )])
     .await;
-    let c = client();
+    let c = chat_client().await;
     let err = c
         .obs()
         .with_prefix(prefix)
@@ -1147,7 +1212,7 @@ async fn message_data_410_stops_before_metadata() {
 #[tokio::test]
 async fn metadata_empty_403_is_obs_error() {
     let (prefix, _) = serve(vec![canned(403, None, b"")]).await;
-    let c = client();
+    let c = chat_client().await;
     let err = c
         .obs()
         .with_prefix(prefix)
@@ -1167,7 +1232,7 @@ async fn message_data_2xx_yields_file() {
         canned(200, Some("application/json"), br#"{"name":"photo.jpg"}"#),
     ])
     .await;
-    let c = client();
+    let c = chat_client().await;
     let file = c
         .obs()
         .with_prefix(prefix)
@@ -1190,7 +1255,7 @@ async fn message_data_survives_a_failed_object_info() {
         canned(500, None, b""),
     ])
     .await;
-    let c = client();
+    let c = chat_client().await;
     let file = c
         .obs()
         .with_prefix(prefix)
@@ -1205,7 +1270,7 @@ async fn message_data_survives_a_failed_object_info() {
 #[tokio::test]
 async fn preview_skips_object_info() {
     let (prefix, urls) = serve(vec![canned(200, Some("image/jpeg"), &[1])]).await;
-    let c = client();
+    let c = chat_client().await;
     c.obs()
         .with_prefix(prefix)
         .download_message_data("1", true, false)
@@ -1218,7 +1283,7 @@ async fn preview_skips_object_info() {
 async fn streams_into_a_sink() {
     let body: Vec<u8> = (0..300_000u32).map(|i| i as u8).collect();
     let (prefix, _) = serve(vec![canned_bytes(200, Some("video/mp4"), body.clone())]).await;
-    let c = client();
+    let c = chat_client().await;
     let mut out = Vec::new();
     let dl = c
         .obs()
@@ -1274,7 +1339,7 @@ async fn e2ee_media_streams_and_checks_the_hmac() {
             canned_bytes(200, None, bad),
         ])
         .await;
-        let c = client();
+        let c = chat_client().await;
         let obs = c.obs().with_prefix(prefix);
         let mut out = Vec::new();
         let dl = obs

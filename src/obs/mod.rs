@@ -264,6 +264,26 @@ pub(crate) struct ObsState {
 pub struct Obs<'a> {
     pub client: &'a BaseClient,
     prefix: String,
+    /// Where a new OBS access token comes from: the client's talk service,
+    /// a fake in tests.
+    tokens: &'a dyn token::ObsTokenSource,
+}
+
+/// Which token a download sends in `x-line-access`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObjectAuth {
+    /// The session token.
+    Session,
+    /// The OBS access token, the session token while there is none.
+    Obs,
+}
+
+impl ObjectAuth {
+    /// A chat's media: the OBS token for talk, the session token for
+    /// Square, which keeps what it always used.
+    fn chat(square: bool) -> Self {
+        if square { Self::Session } else { Self::Obs }
+    }
 }
 
 impl BaseClient {
@@ -272,6 +292,7 @@ impl BaseClient {
         Obs {
             client: self,
             prefix: OBS_PREFIX.to_string(),
+            tokens: self,
         }
     }
 
@@ -409,6 +430,13 @@ impl<'a> Obs<'a> {
         &self.prefix
     }
 
+    /// Take new OBS tokens from `tokens` instead of the talk service.
+    #[cfg(test)]
+    pub(crate) fn with_tokens(mut self, tokens: &'a dyn token::ObsTokenSource) -> Self {
+        self.tokens = tokens;
+        self
+    }
+
     /// URL of a message's media (`/preview` for the thumbnail).
     pub fn message_data_url(&self, message_id: &str, preview: bool, square: bool) -> String {
         format!(
@@ -447,22 +475,39 @@ impl<'a> Obs<'a> {
     }
 
     /// GET `url` as LINE for Android's OBS accessor does (`sx3/g.i`): one
-    /// more try after HTTP 401, with the session token refreshed first, or
-    /// after HTTP 503. Any other failed status is an `ObsError` that keeps
-    /// the status ([`Error::http_status`], [`Error::is_media_expired`]).
+    /// more try after HTTP 401, with the token renewed first, or after
+    /// HTTP 503. Any other failed status is an `ObsError` that keeps the
+    /// status ([`Error::http_status`], [`Error::is_media_expired`]).
     /// `headers` is called for each try, so the second one carries the new
     /// token. Without `timeout` (a download) only the wait for the response
     /// head is limited, by `download_idle_timeout`.
+    ///
+    /// With [`ObjectAuth::Obs`] the request carries the OBS access token in
+    /// `x-line-access`, as the app's chat media downloads do (`e80/g0` →
+    /// `fl8/b.c`), and a 401 drops that token; while there is none, the
+    /// session token goes and a 401 refreshes it.
     async fn get_object(
         &self,
         url: &str,
         headers: impl Fn() -> Result<HeaderMap>,
         timeout: Option<Duration>,
         what: &str,
+        auth: ObjectAuth,
     ) -> Result<reqwest::Response> {
         let mut retried = false;
         loop {
-            let headers = headers()?;
+            let mut headers = headers()?;
+            let obs_token = match auth {
+                ObjectAuth::Obs => self.client.obs_state.token.get(self.tokens).await,
+                ObjectAuth::Session => None,
+            };
+            if let Some(token) = &obs_token {
+                headers.insert(
+                    "x-line-access",
+                    HeaderValue::from_str(token)
+                        .map_err(|e| Error::internal("ObsError", format!("invalid token: {e}")))?,
+                );
+            }
             let sent = headers
                 .get("x-line-access")
                 .and_then(|v| v.to_str().ok())
@@ -478,9 +523,12 @@ impl<'a> Obs<'a> {
                 return Ok(res);
             }
             retried = true;
-            if status == reqwest::StatusCode::UNAUTHORIZED
-                && let Err(e) = self.client.refresh_token_after(sent.as_deref()).await
-            {
+            if status != reqwest::StatusCode::UNAUTHORIZED {
+                continue;
+            }
+            if obs_token.is_some() {
+                self.client.obs_state.token.clear().await;
+            } else if let Err(e) = self.client.refresh_token_after(sent.as_deref()).await {
                 tracing::debug!("OBS 401: token refresh failed: {e}");
             }
         }
@@ -534,6 +582,7 @@ impl<'a> Obs<'a> {
                 || self.read_headers(),
                 None,
                 "Message data download failed",
+                ObjectAuth::chat(square),
             )
             .await?;
         self.write_body(res, out).await
@@ -574,6 +623,7 @@ impl<'a> Obs<'a> {
                 || self.read_headers(),
                 Some(self.client.config.timeout),
                 "Message metadata request failed",
+                ObjectAuth::chat(square),
             )
             .await?;
         Ok(res.json().await?)
@@ -823,6 +873,42 @@ impl<'a> Obs<'a> {
         oid: &str,
         add_headers: &[(String, String)],
     ) -> Result<reqwest::Response> {
+        self.get_object_as(obs_path, oid, add_headers, ObjectAuth::Session)
+            .await
+    }
+
+    /// [`get_raw_object`](Self::get_raw_object) for a chat's media, with the
+    /// OBS access token.
+    pub(crate) async fn get_chat_object(
+        &self,
+        obs_path: &str,
+        oid: &str,
+        add_headers: &[(String, String)],
+    ) -> Result<reqwest::Response> {
+        self.get_object_as(obs_path, oid, add_headers, ObjectAuth::Obs)
+            .await
+    }
+
+    /// A chat object into memory; see [`get_chat_object`](Self::get_chat_object).
+    pub(crate) async fn download_chat_object(
+        &self,
+        obs_path: &str,
+        oid: &str,
+        add_headers: &[(String, String)],
+    ) -> Result<Bytes> {
+        let res = self.get_chat_object(obs_path, oid, add_headers).await?;
+        let mut data = Vec::new();
+        self.write_body(res, &mut data).await?;
+        Ok(data.into())
+    }
+
+    async fn get_object_as(
+        &self,
+        obs_path: &str,
+        oid: &str,
+        add_headers: &[(String, String)],
+        auth: ObjectAuth,
+    ) -> Result<reqwest::Response> {
         let path = if obs_path.contains("{oid}") {
             obs_path.replacen("{oid}", oid, 1)
         } else {
@@ -840,6 +926,7 @@ impl<'a> Obs<'a> {
             },
             None,
             "Object download failed",
+            auth,
         )
         .await
     }

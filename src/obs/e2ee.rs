@@ -875,7 +875,7 @@ impl Obs<'_> {
         }
         let (sid, oid, meta) = e2ee_object(message)?;
         let res = self
-            .get_raw_object(&format!("talk/{sid}"), &oid, &meta)
+            .get_chat_object(&format!("talk/{sid}"), &oid, &meta)
             .await?;
         let mime = res
             .headers()
@@ -922,11 +922,11 @@ impl Obs<'_> {
         let (sid, oid, meta) = e2ee_object(message)?;
         let path = format!("talk/{sid}");
         let data = match self
-            .download_object_for_service(&path, &format!("{oid}/ud-preview"), meta.clone())
+            .download_chat_object(&path, &format!("{oid}/ud-preview"), &meta)
             .await
         {
             Err(e) if e.http_status() == Some(404) => {
-                self.download_object_for_service(&path, &format!("{oid}__ud-preview"), meta)
+                self.download_chat_object(&path, &format!("{oid}__ud-preview"), &meta)
                     .await?
             }
             other => other?,
