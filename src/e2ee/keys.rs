@@ -455,9 +455,10 @@ impl<'a> E2ee<'a> {
     }
 
     /// `xn8/g0.l`: the group's last key, registering one when the group has
-    /// none.
+    /// none, or registering a new one once when it is not wrapped for any of
+    /// our keys (as `g0.l` falls back to `g0.b`).
     async fn last_group_key(&self, chat_mid: &str) -> Result<GroupKey> {
-        let shared = match self
+        let mut shared = match self
             .host
             .get_last_e2ee_group_shared_key(KEY_VERSION, chat_mid)
             .await
@@ -468,6 +469,18 @@ impl<'a> E2ee<'a> {
             }
             Err(e) => return Err(e),
         };
+        let wrapped_for = key_id_of(&shared["receiverKeyId"]);
+        let ours = match wrapped_for {
+            Some(id) => self.get_self_key_by_key_id(id).await.is_some(),
+            None => false,
+        };
+        if !ours {
+            self.log(
+                "recreateE2EEGroupKey",
+                serde_json::json!({"receiverKeyId": wrapped_for}),
+            );
+            shared = self.try_register_group_key(chat_mid).await?;
+        }
         self.unwrap_group_shared_key(chat_mid, &shared).await
     }
 
@@ -486,7 +499,17 @@ impl<'a> E2ee<'a> {
         let encrypted = shared["encryptedSharedKey"].as_bytes().unwrap_or_default();
 
         let self_key = self.own_key(receiver_key_id).await?;
-        let creator_key = self.get_user_public_key(creator, creator_key_id).await?;
+        // A key we created ourselves was wrapped with one of our own keys.
+        let own_creator_key = match creator_key_id {
+            Some(id) if self.host.self_mid().as_deref() == Some(creator) => {
+                self.get_self_key_by_key_id(id).await
+            }
+            _ => None,
+        };
+        let creator_key = match own_creator_key {
+            Some(key) => key.public_key(),
+            None => self.get_user_public_key(creator, creator_key_id).await?,
+        };
         let secret = crypto::generate_shared_secret(&self_key.private_key(), &creator_key);
         let (key, iv) = crypto::derive_key_iv(&secret, &[]);
         let plain = crypto::decrypt_aes_cbc(&key, &iv, encrypted, true)?;
@@ -694,6 +717,10 @@ pub(crate) mod tests {
         pub register_key_id: i64,
         /// `getE2EEPublicKey`: (mid, keyId) → keyData.
         pub peer_keys: HashMap<(String, i64), Vec<u8>>,
+        /// `getLastE2EEPublicKeys` answer; `None` is NOT_FOUND.
+        pub last_public_keys: Option<Value>,
+        /// `registerE2EEGroupKey` answer; `None` is NOT_FOUND.
+        pub registered_group_key: Option<Value>,
     }
 
     impl FakeHost {
@@ -796,11 +823,11 @@ pub(crate) mod tests {
         }
         async fn get_last_e2ee_public_keys(&self, chat_mid: &str) -> Result<Value> {
             self.record("getLastE2EEPublicKeys", tv!({"chatMid": chat_mid}));
-            Err(not_found())
+            self.last_public_keys.clone().ok_or_else(not_found)
         }
         async fn register_e2ee_group_key(&self, args: Value) -> Result<Value> {
             self.record("registerE2EEGroupKey", args);
-            Err(not_found())
+            self.registered_group_key.clone().ok_or_else(not_found)
         }
         async fn register_e2ee_public_key(&self, public_key: Value) -> Result<Value> {
             self.record("registerE2EEPublicKey", public_key);
@@ -1152,6 +1179,79 @@ pub(crate) mod tests {
                 .await
                 .is_none()
         );
+    }
+
+    /// Our key 5, a last group key 9 wrapped for our key 4 (which we lack),
+    /// and a server that registers key 10 wrapped for key 5.
+    async fn recreate_fixture() -> (FakeHost, Vec<u8>) {
+        let mut host = group_fixture(&[9], 9).await;
+        host.group_keys
+            .get_mut(&9)
+            .unwrap()
+            .insert("receiverKeyId", 4);
+        let stored: E2eeKey =
+            serde_json::from_str(host.get("e2eeKeys:5").await.unwrap().as_str().unwrap()).unwrap();
+        let mut own = tv!({"keyId": 5});
+        own.insert("keyData", Value::Binary(stored.public_key()));
+        host.last_public_keys = Some(Value::Map(vec![("u-self".into(), own)]));
+        // What the server hands back for us: wrapped by ourselves for ourselves.
+        let fresh = vec![0x10; 32];
+        let (aes_key, iv) = crypto::derive_key_iv(
+            &crypto::generate_shared_secret(&stored.private_key(), &stored.public_key()),
+            &[],
+        );
+        let mut registered = tv!({
+            "keyVersion": 1, "groupKeyId": 10, "creator": "u-self", "creatorKeyId": 5,
+            "receiver": "u-self", "receiverKeyId": 5, "specVersion": 2
+        });
+        registered.insert(
+            "encryptedSharedKey",
+            crypto::encrypt_aes_cbc(&aes_key, &iv, &fresh).unwrap(),
+        );
+        host.registered_group_key = Some(registered);
+        (host, fresh)
+    }
+
+    #[tokio::test]
+    async fn last_group_key_not_wrapped_for_us_is_recreated_once() {
+        let (host, fresh) = recreate_fixture().await;
+        let state = E2eeState::default();
+        let key = E2ee::new(&host, &state)
+            .get_group_key(GROUP, None)
+            .await
+            .unwrap();
+        assert_eq!(key.key_id, 10);
+        assert_eq!(key.private_key(), fresh);
+        let names: Vec<_> = host.calls().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(
+            names,
+            [
+                "getLastE2EEGroupSharedKey",
+                "getLastE2EEPublicKeys",
+                "registerE2EEGroupKey"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn recreated_group_key_still_not_for_us_fails() {
+        let (mut host, _) = recreate_fixture().await;
+        host.registered_group_key
+            .as_mut()
+            .unwrap()
+            .insert("receiverKeyId", 4);
+        let state = E2eeState::default();
+        let err = E2ee::new(&host, &state)
+            .get_group_key(GROUP, None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("E2EEKeyMissing"), "{err}");
+        let registered = host
+            .calls()
+            .iter()
+            .filter(|(n, _)| n == "registerE2EEGroupKey")
+            .count();
+        assert_eq!(registered, 1);
     }
 
     // --- login_keychain.test.ts --------------------------------------------
