@@ -61,6 +61,15 @@ pub(crate) fn group_request_args(req_seq: i64, chat_mid: &str, targets: Option<&
     args
 }
 
+/// `GetMessageRequestBoxListResponse.chatMids`: chat mid → time.
+pub(crate) fn request_box_entries(res: &Value) -> Vec<(String, i64)> {
+    res["chatMids"]
+        .entries()
+        .into_iter()
+        .map(|(mid, time)| (mid, time.as_i64().unwrap_or(0)))
+        .collect()
+}
+
 fn mid_list(mids: &[&str]) -> Value {
     Value::List(mids.iter().map(|m| Value::from(*m)).collect())
 }
@@ -498,6 +507,31 @@ impl Client {
         Ok(Chat::new(self.clone(), res["chat"].clone()))
     }
 
+    /// Chats in the message request box (messages from people who are not
+    /// friends), with the time of each one's latest request: every page of
+    /// `getMessageRequestBoxList` for PEER, GROUP and ROOM chats, as the
+    /// app's full sync reads them (`zd2/l.java`). LINE's chat list leaves
+    /// these chats out until the user accepts them
+    /// (`updateChatStatusBulk` with `trusted`).
+    pub async fn message_request_chats(&self) -> Result<Vec<(String, i64)>> {
+        let talk = self.base.talk();
+        let mut out = Vec::new();
+        for kind in ["PEER", "GROUP", "ROOM"] {
+            let mut token: Option<String> = None;
+            for _ in 0..50 {
+                let res = talk
+                    .get_message_request_box_list(kind, token.as_deref())
+                    .await?;
+                out.extend(request_box_entries(&res));
+                match res["nextPageToken"].as_str().filter(|t| !t.is_empty()) {
+                    Some(next) if token.as_deref() != Some(next) => token = Some(next.into()),
+                    _ => break,
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Send a `linepostback://` URL to a chat's bot without a message, as a
     /// rich-menu tap does (see [`postback`](crate::client::postback)).
     pub async fn send_postback(&self, chat_mid: &str, url: &str) -> Result<Value> {
@@ -667,6 +701,25 @@ mod tests {
         assert_eq!(path(&c, &[1, 2]), Some(&TValue::I32(0)));
         assert_eq!(path(&c, &[1, 3]), Some(&s("team")));
         assert!(matches!(path(&c, &[1, 4]), Some(TValue::Set(_, v)) if v.len() == 1));
+    }
+
+    #[test]
+    fn request_box_maps_chats_to_times() {
+        use crate::thrift::{Schema, TType, decode_struct};
+        let reply = TValue::Struct(vec![(
+            1,
+            TValue::Map(
+                TType::String,
+                TType::I64,
+                vec![(TValue::string("u1"), TValue::I64(5))],
+            ),
+        )]);
+        let v = decode_struct(
+            Schema::line(),
+            Some("GetMessageRequestBoxListResponse"),
+            &reply,
+        );
+        assert_eq!(request_box_entries(&v), [("u1".to_string(), 5)]);
     }
 
     #[test]
