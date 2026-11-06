@@ -7632,6 +7632,7 @@ struct MessageBoxListRequest {
     5: bool withUnreadCount;
     6: i32 lastMessagesPerMessageBoxCount;
     7: bool unreadOnly;
+    8: i64 lastOpRevision;
 }
 
 struct MessageBoxV2MessageId {
