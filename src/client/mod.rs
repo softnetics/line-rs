@@ -25,6 +25,7 @@ pub mod liff;
 mod listen;
 mod login;
 pub mod message;
+pub mod postback;
 mod premium;
 mod profile;
 mod square;
@@ -238,6 +239,28 @@ impl Client {
             .as_list()
             .unwrap_or_default()
             .to_vec();
+        if mids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let res = self.get_chats(Value::List(mids)).await?;
+        Ok(list(&res["chats"])
+            .into_iter()
+            .map(|raw| Chat::new(self.clone(), raw))
+            .collect())
+    }
+
+    /// Groups we are invited to but have not joined
+    /// (`getAllChatMids` with `withInvitedChats`, as `wf3/e.java` asks).
+    pub async fn fetch_invited_chats(&self) -> Result<Vec<Chat>> {
+        let res = self
+            .base
+            .talk()
+            .call(
+                "getAllChatMids",
+                tv!({"request": {"withMemberChats": false, "withInvitedChats": true}, "syncReason": "INTERNAL"}),
+            )
+            .await?;
+        let mids: Vec<Value> = list(&res["invitedChatMids"]);
         if mids.is_empty() {
             return Ok(Vec::new());
         }
@@ -829,7 +852,7 @@ mod tests {
         check(
             "sendPostback",
             false,
-            crate::service::talk::postback_args("1", "u", "c", "o"),
+            crate::service::talk::postback_args(Some("1"), "u", "c", Some("o")),
         );
         check("getProfile", false, tv!({"syncReason": "INTERNAL"}));
         check(

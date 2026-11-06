@@ -97,6 +97,56 @@ pub struct GetChatsOptions {
     pub with_members: Option<bool>,
 }
 
+/// One page of [`TalkService::message_box_page`]. [`Default`] is what LINE
+/// for Android asks for (`ts8/qd.java`): active boxes only, 100 a page,
+/// with unread counts, no last messages.
+#[derive(Debug, Clone)]
+pub struct MessageBoxQuery {
+    /// Paging cursor: the id of the last box of the previous page.
+    pub min_chat_id: Option<String>,
+    /// Leave out boxes the user deleted or that have no messages left.
+    pub active_only: bool,
+    pub limit: i32,
+    pub with_unread_count: bool,
+    /// How many of each box's newest messages to include.
+    pub last_messages: i32,
+    pub unread_only: bool,
+    /// The operation revision the app sends on a full sync.
+    pub last_op_revision: Option<i64>,
+}
+
+impl Default for MessageBoxQuery {
+    fn default() -> Self {
+        Self {
+            min_chat_id: None,
+            active_only: true,
+            limit: 100,
+            with_unread_count: true,
+            last_messages: 0,
+            unread_only: false,
+            last_op_revision: None,
+        }
+    }
+}
+
+impl MessageBoxQuery {
+    /// `getMessageBoxes` arguments.
+    pub fn args(&self) -> Value {
+        let mut req = crate::tv!({
+            "activeOnly": self.active_only,
+            "messageBoxCountLimit": self.limit,
+            "withUnreadCount": self.with_unread_count,
+            "lastMessagesPerMessageBoxCount": self.last_messages,
+            "unreadOnly": self.unread_only,
+        });
+        req.insert("minChatId", self.min_chat_id.as_deref());
+        req.insert("lastOpRevision", self.last_op_revision);
+        let mut args = crate::tv!({"syncReason": "INTERNAL"});
+        args.insert("messageBoxListRequest", req);
+        args
+    }
+}
+
 /// Number of a `ContentType` given as a variant name or number.
 fn content_type_number(v: &Value) -> i32 {
     match v {
@@ -179,13 +229,21 @@ pub(crate) fn react_args(req_seq: i64, o: &ReactOptions) -> Value {
     args
 }
 
+/// `sendPostback` arguments. Empty `message_id` and `origin_mid` are left
+/// out, as LINE for Android leaves them unset for rich-menu taps
+/// (`vp1/d.java` passes no message).
 pub(crate) fn postback_args(
-    message_id: &str,
+    message_id: Option<&str>,
     url: &str,
     chat_mid: &str,
-    origin_mid: &str,
+    origin_mid: Option<&str>,
 ) -> Value {
-    crate::tv!({"request": {"messageId": message_id, "url": url, "chatMID": chat_mid, "originMID": origin_mid}})
+    let mut req = crate::tv!({"url": url, "chatMID": chat_mid});
+    req.insert("messageId", message_id.filter(|s| !s.is_empty()));
+    req.insert("originMID", origin_mid.filter(|s| !s.is_empty()));
+    let mut args = Value::object();
+    args.insert("request", req);
+    args
 }
 
 pub(crate) fn get_chats_args(o: &GetChatsOptions) -> Value {
@@ -411,27 +469,43 @@ impl TalkService<'_> {
         }
     }
 
-    /// Invite users into a group chat.
+    /// Invite users into a group chat. `reqSeq` auto.
     pub async fn invite_into_chat(
         &self,
         chat_mid: &str,
         target_user_mids: &[String],
     ) -> Result<Value> {
+        let seq = self.client.get_reqseq("talk").await?;
         self.call(
             "inviteIntoChat",
-            crate::tv!({"request": {"targetUserMids": target_user_mids, "chatMid": chat_mid}}),
+            crate::tv!({"request": {"reqSeq": seq, "targetUserMids": target_user_mids, "chatMid": chat_mid}}),
         )
         .await
     }
 
     /// Report a Flex message postback action (`sendPostback`): `url` is the
     /// action's postback URL, `origin_mid` the sender of the Flex message.
+    /// Build `url` with [`Postback`](crate::client::postback::Postback).
     pub async fn send_flex_postback(
         &self,
         message_id: &str,
         url: &str,
         chat_mid: &str,
         origin_mid: &str,
+    ) -> Result<Value> {
+        self.send_postback_url(url, chat_mid, Some(message_id), Some(origin_mid))
+            .await
+    }
+
+    /// `sendPostback` with an optional message and sender: rich-menu taps
+    /// have neither. `url` is a `linepostback://` URL (see
+    /// [`client::postback`](crate::client::postback)).
+    pub async fn send_postback_url(
+        &self,
+        url: &str,
+        chat_mid: &str,
+        message_id: Option<&str>,
+        origin_mid: Option<&str>,
     ) -> Result<Value> {
         self.call(
             "sendPostback",
@@ -453,6 +527,13 @@ impl TalkService<'_> {
             None => self.client.get_reqseq("talk").await?,
         };
         self.call("react", react_args(req_seq, &options)).await
+    }
+
+    /// One page of message boxes (`getMessageBoxes`): the chats with
+    /// history, their unread counts and, per box, `lastRemovedMessageId`
+    /// and `hiddenAtMessageId` from deletes and hides on other devices.
+    pub async fn message_box_page(&self, query: &MessageBoxQuery) -> Result<Value> {
+        self.call("getMessageBoxes", query.args()).await
     }
 
     /// `getChats` (members and invitees included by default).
@@ -1218,6 +1299,43 @@ mod tests {
     }
 
     #[test]
+    fn message_box_query_defaults_to_the_apps() {
+        let mut q = MessageBoxQuery::default();
+        let f = encode("getMessageBoxes_args", &q.args());
+        assert!(matches!(path(&f, &[2, 3]), Some(TValue::Bool(true))));
+        assert!(matches!(path(&f, &[2, 4]), Some(TValue::I32(100))));
+        assert!(matches!(path(&f, &[2, 6]), Some(TValue::I32(0))));
+        assert_eq!(path(&f, &[2, 1]), None);
+        assert_eq!(path(&f, &[2, 8]), None);
+        q.min_chat_id = Some("c9".into());
+        q.last_op_revision = Some(1 << 40);
+        let f = encode("getMessageBoxes_args", &q.args());
+        assert_eq!(path(&f, &[2, 1]), Some(&s("c9")));
+        assert_eq!(path(&f, &[2, 8]), Some(&TValue::I64(1 << 40)));
+    }
+
+    #[test]
+    fn rich_menu_postback_has_no_message_or_origin() {
+        let args = encode(
+            "sendPostback_args",
+            &postback_args(Some(""), "linepostback://postback?_data=x", "u1", None),
+        );
+        assert_eq!(path(&args, &[2, 1]), None);
+        assert_eq!(
+            path(&args, &[2, 2]),
+            Some(&s("linepostback://postback?_data=x"))
+        );
+        assert_eq!(path(&args, &[2, 3]), Some(&s("u1")));
+        assert_eq!(path(&args, &[2, 4]), None);
+        let flex = encode(
+            "sendPostback_args",
+            &postback_args(Some("9"), "u", "c1", Some("u2")),
+        );
+        assert_eq!(path(&flex, &[2, 1]), Some(&s("9")));
+        assert_eq!(path(&flex, &[2, 4]), Some(&s("u2")));
+    }
+
+    #[test]
     fn sync_args_defaults() {
         let f = encode(
             "sync_args",
@@ -1235,7 +1353,7 @@ mod tests {
     fn postback_args_encoding() {
         let f = encode(
             "sendPostback_args",
-            &postback_args("1", "https://p", "c1", "u1"),
+            &postback_args(Some("1"), "https://p", "c1", Some("u1")),
         );
         assert_eq!(path(&f, &[2, 1]), Some(&s("1")));
         assert_eq!(path(&f, &[2, 2]), Some(&s("https://p")));
