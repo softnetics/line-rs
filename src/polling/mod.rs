@@ -59,6 +59,7 @@ pub(crate) async fn run_pusher<H: PushHost>(
     reconnect_delay: Duration,
 ) {
     let manager = ConnManager::new(host.clone(), hub.clone());
+    host.restore_sync().await;
     while host.auth_token().is_some() {
         let conn = match manager.initialize_conn(targets) {
             Ok(c) => c,
@@ -128,16 +129,91 @@ where
     )
 }
 
+/// Storage key under which the client keeps its [`SyncData`] (JSON, the
+/// same shape as [`ClientEvent::UpdateSyncData`]).
+pub const SYNC_DATA_STORAGE_KEY: &str = "syncData";
+
 impl BaseClient {
-    /// Current sync cursors.
+    /// Current sync cursors (restored from storage first, see
+    /// [`set_sync_data`](Self::set_sync_data)).
     pub async fn sync_data(&self) -> SyncData {
+        self.load_sync_data().await;
         self.sync.lock().await.clone()
     }
 
-    /// Restore sync cursors (e.g. persisted from [`ClientEvent::UpdateSyncData`])
-    /// so listening resumes where it left off.
+    /// Set the sync cursors so listening resumes where it left off.
+    ///
+    /// The client saves its cursors to the configured
+    /// [`Storage`](crate::storage::Storage) (key [`SYNC_DATA_STORAGE_KEY`])
+    /// whenever they change and restores them before the first listen or
+    /// poll, so operations made while the app was closed (messages, unsends,
+    /// reads, reactions, edits) are delivered on the next start. Calling
+    /// this is only needed when the app keeps the cursors itself (e.g. from
+    /// [`ClientEvent::UpdateSyncData`]); the value given here wins over the
+    /// stored one and is saved too. Use the same storage for one account
+    /// only, or clear it on logout.
     pub async fn set_sync_data(&self, data: SyncData) {
-        *self.sync.lock().await = data;
+        self.sync_loaded
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        *self.sync.lock().await = data.clone();
+        self.persist_sync_data(&data).await;
+    }
+
+    /// Restore the cursors from storage once, unless the caller already set
+    /// them.
+    pub(crate) async fn load_sync_data(&self) {
+        use std::sync::atomic::Ordering;
+        if self.sync_loaded.load(Ordering::SeqCst) {
+            return;
+        }
+        let mut sync = self.sync.lock().await;
+        if self.sync_loaded.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let stored = match self.storage.get(SYNC_DATA_STORAGE_KEY).await {
+            Ok(v) => v,
+            Err(e) => {
+                self.log("SyncDataLoadError", json!({"error": e.to_string()}));
+                return;
+            }
+        };
+        let parsed = match stored {
+            None => return,
+            Some(serde_json::Value::String(s)) => serde_json::from_str::<SyncData>(&s),
+            Some(v) => serde_json::from_value::<SyncData>(v),
+        };
+        match parsed {
+            Ok(data) => {
+                *self.sync_saved.lock().await = Some(data.clone());
+                *sync = data;
+            }
+            Err(e) => self.log("SyncDataLoadError", json!({"error": e.to_string()})),
+        }
+    }
+
+    /// Write the cursors to storage unless they equal the last write.
+    async fn persist_sync_data(&self, data: &SyncData) {
+        let mut saved = self.sync_saved.lock().await;
+        if saved.as_ref() == Some(data) {
+            return;
+        }
+        let value = match serde_json::to_value(data) {
+            Ok(v) => v,
+            Err(e) => {
+                self.log("SyncDataSaveError", json!({"error": e.to_string()}));
+                return;
+            }
+        };
+        match self.storage.set(SYNC_DATA_STORAGE_KEY, value).await {
+            Ok(()) => *saved = Some(data.clone()),
+            Err(e) => self.log("SyncDataSaveError", json!({"error": e.to_string()})),
+        }
+    }
+
+    /// Save new cursors and emit [`ClientEvent::UpdateSyncData`].
+    pub(crate) async fn store_sync_data(&self, data: SyncData) {
+        self.persist_sync_data(&data).await;
+        self.emit(ClientEvent::UpdateSyncData(data));
     }
 
     /// Stream of talk `Operation`s delivered over the LEGY push connection.
@@ -146,7 +222,10 @@ impl BaseClient {
     /// and started on first use (requires a Tokio runtime); it reconnects
     /// while logged in and closes once every stream is dropped. Events that
     /// arrive while no talk stream exists are buffered (up to 1024) for the
-    /// next one. Emits [`ClientEvent::UpdateSyncData`] as cursors advance.
+    /// next one. Cursors are restored from storage before the first
+    /// connection and saved as they advance (see
+    /// [`set_sync_data`](Self::set_sync_data)); each change also emits
+    /// [`ClientEvent::UpdateSyncData`].
     pub fn listen_talk_events(&self) -> impl Stream<Item = Result<Value>> + Send + 'static {
         self.listen(Kind::Talk)
     }
@@ -213,6 +292,7 @@ impl BaseClient {
     }
 
     async fn poll_talk_once(&self) -> Result<Vec<Value>> {
+        self.load_sync_data().await;
         let args = talk_sync_args(&*self.sync.lock().await);
         let opts =
             RequestOptions::new("/SYNC4", Protocol::Compact).timeout(self.config.long_timeout);
@@ -221,11 +301,12 @@ impl BaseClient {
             let mut sync = self.sync.lock().await;
             (apply_sync_response(&mut sync, &res), sync.clone())
         };
-        self.emit(ClientEvent::UpdateSyncData(snapshot));
+        self.store_sync_data(snapshot).await;
         Ok(ops)
     }
 
     async fn poll_square_once(&self, continuation: &Mutex<Option<String>>) -> Result<Vec<Value>> {
+        self.load_sync_data().await;
         let sync_token = self.sync.lock().await.square.clone();
         let cont = continuation.lock().unwrap().clone();
         let res = self
@@ -238,7 +319,7 @@ impl BaseClient {
             sync.square = res["syncToken"].as_str().map(str::to_string);
             sync.clone()
         };
-        self.emit(ClientEvent::UpdateSyncData(snapshot));
+        self.store_sync_data(snapshot).await;
         Ok(res["events"]
             .as_list()
             .map(<[Value]>::to_vec)
@@ -301,6 +382,113 @@ mod tests {
         let back: SyncData = serde_json::from_value(json!({"talk": {"revision": 9}})).unwrap();
         assert_eq!(back.talk.revision, 9);
         assert_eq!(back.square, None);
+    }
+
+    fn storage_client(storage: Arc<crate::storage::MemoryStorage>) -> BaseClient {
+        BaseClient::builder(crate::Device::DesktopMac)
+            .storage_arc(storage)
+            .build()
+            .unwrap()
+    }
+
+    fn talk(revision: i64, global_rev: i64, individual_rev: i64) -> SyncData {
+        SyncData {
+            talk: TalkSync {
+                revision,
+                global_rev,
+                individual_rev,
+            },
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_data_is_saved_and_restored_across_clients() {
+        use crate::storage::{MemoryStorage, Storage};
+        let storage = Arc::new(MemoryStorage::new());
+        let first = storage_client(storage.clone());
+        let mut events = first.subscribe();
+        first.store_sync_data(talk(10, 2, 3)).await;
+        assert!(matches!(
+            events.try_recv(),
+            Ok(ClientEvent::UpdateSyncData(d)) if d.talk.revision == 10
+        ));
+        let stored = storage.get(SYNC_DATA_STORAGE_KEY).await.unwrap().unwrap();
+        assert_eq!(stored["talk"]["revision"], 10);
+
+        // A new client on the same storage resumes from the saved cursors.
+        let second = storage_client(storage.clone());
+        assert_eq!(second.sync_data().await, talk(10, 2, 3));
+
+        // A caller-provided value wins over the stored one and is saved.
+        let third = storage_client(storage.clone());
+        third.set_sync_data(talk(20, 0, 0)).await;
+        assert_eq!(third.sync_data().await.talk.revision, 20);
+        let stored = storage.get(SYNC_DATA_STORAGE_KEY).await.unwrap().unwrap();
+        assert_eq!(stored["talk"]["revision"], 20);
+    }
+
+    #[tokio::test]
+    async fn unchanged_sync_data_is_not_rewritten() {
+        use crate::storage::{MemoryStorage, Storage};
+        let storage = Arc::new(MemoryStorage::new());
+        let c = storage_client(storage.clone());
+        c.store_sync_data(talk(5, 0, 0)).await;
+        // Changed behind the client's back: an identical save must not
+        // touch storage again.
+        storage
+            .set(SYNC_DATA_STORAGE_KEY, json!({"talk": {"revision": 99}}))
+            .await
+            .unwrap();
+        c.store_sync_data(talk(5, 0, 0)).await;
+        let stored = storage.get(SYNC_DATA_STORAGE_KEY).await.unwrap().unwrap();
+        assert_eq!(stored["talk"]["revision"], 99);
+    }
+
+    #[tokio::test]
+    async fn corrupt_stored_sync_data_starts_from_zero() {
+        use crate::storage::{MemoryStorage, Storage};
+        let storage = Arc::new(MemoryStorage::new());
+        storage
+            .set(SYNC_DATA_STORAGE_KEY, json!("not json"))
+            .await
+            .unwrap();
+        let c = storage_client(storage);
+        assert_eq!(c.sync_data().await, SyncData::default());
+    }
+
+    #[tokio::test]
+    async fn pusher_restores_sync_data_before_connecting() {
+        use crate::storage::{MemoryStorage, Storage};
+        let storage = Arc::new(MemoryStorage::new());
+        storage
+            .set(
+                SYNC_DATA_STORAGE_KEY,
+                serde_json::to_value(talk(42, 1, 1)).unwrap(),
+            )
+            .await
+            .unwrap();
+        let c = storage_client(storage);
+        // No auth token: the pusher restores and stops right away.
+        let hub = c.push.hub.clone();
+        let _rx = hub.subscribe(Kind::Talk, |g| {
+            tokio::spawn(run_pusher(
+                c.clone(),
+                hub.clone(),
+                g,
+                LISTEN_TARGET,
+                RECONNECT_DELAY,
+            ))
+            .abort_handle()
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while hub.is_running() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(c.sync.lock().await.talk.revision, 42);
     }
 
     // A poll that yields nothing must still sleep between calls.

@@ -27,7 +27,10 @@ const PING_INTERVAL: u8 = 30;
 pub(crate) trait PushHost: Clone + Send + Sync + 'static {
     fn auth_token(&self) -> Option<String>;
     fn sync_state(&self) -> &tokio::sync::Mutex<SyncData>;
-    fn emit_sync(&self, data: SyncData);
+    /// Persist new cursors and emit `UpdateSyncData`.
+    fn save_sync(&self, data: SyncData) -> BoxFuture<'static, ()>;
+    /// Restore persisted cursors before the first connection.
+    fn restore_sync(&self) -> BoxFuture<'static, ()>;
     fn log(&self, kind: &str, data: serde_json::Value);
     /// Start the `/PUSH` request at `path`.
     fn open_conn(&self, path: &str) -> Result<Conn>;
@@ -237,7 +240,7 @@ impl<H: PushHost> ConnManager<H> {
             sync.square = Some(sync_token.clone());
             sync.clone()
         };
-        self.host.emit_sync(snapshot);
+        self.host.save_sync(snapshot).await;
         let first = {
             let mut st = self.state.lock().unwrap();
             st.subscription_id = subscription_id;
@@ -277,7 +280,7 @@ impl<H: PushHost> ConnManager<H> {
             self.hub.deliver(Kind::Talk, op);
         }
         let snapshot = self.host.sync_state().lock().await.clone();
-        self.host.emit_sync(snapshot.clone());
+        self.host.save_sync(snapshot.clone()).await;
         let args = talk_sync_args(&snapshot);
         self.log("request talk fetcher:", args.to_json());
         self.build_and_send_sign_on_request(w, service, &args)?;
@@ -320,7 +323,7 @@ impl<H: PushHost> ConnManager<H> {
             }
             sync.clone()
         };
-        self.host.emit_sync(snapshot);
+        self.host.save_sync(snapshot).await;
         let sub_id = res["subscription"]["subscriptionId"]
             .as_i64()
             .unwrap_or_default();
@@ -564,8 +567,12 @@ pub(crate) mod tests {
         fn sync_state(&self) -> &tokio::sync::Mutex<SyncData> {
             &self.sync
         }
-        fn emit_sync(&self, data: SyncData) {
+        fn save_sync(&self, data: SyncData) -> BoxFuture<'static, ()> {
             self.emitted.lock().unwrap().push(data);
+            async {}.boxed()
+        }
+        fn restore_sync(&self) -> BoxFuture<'static, ()> {
+            async {}.boxed()
         }
         fn log(&self, kind: &str, data: serde_json::Value) {
             self.logs.lock().unwrap().push((kind.to_string(), data));

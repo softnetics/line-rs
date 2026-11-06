@@ -204,6 +204,8 @@ impl ClientBuilder {
             refresh_lock: Mutex::new(()),
             e2ee: E2eeState::default(),
             sync: Mutex::new(SyncData::default()),
+            sync_loaded: AtomicBool::new(false),
+            sync_saved: Mutex::new(None),
             push: crate::push::PushState::default(),
         })))
     }
@@ -243,6 +245,10 @@ pub struct Inner {
     pub(crate) refresh_lock: Mutex<()>,
     pub(crate) e2ee: E2eeState,
     pub(crate) sync: Mutex<SyncData>,
+    /// Whether `sync` was restored from storage or set by the caller.
+    pub(crate) sync_loaded: AtomicBool,
+    /// Last `SyncData` written to storage (skips identical writes).
+    pub(crate) sync_saved: Mutex<Option<SyncData>>,
     pub(crate) push: crate::push::PushState,
 }
 

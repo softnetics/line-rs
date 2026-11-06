@@ -23,7 +23,7 @@ use futures::future::BoxFuture;
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 
-use crate::base::{BaseClient, ClientEvent};
+use crate::base::BaseClient;
 use crate::error::{Error, Result};
 use crate::polling::SyncData;
 use crate::request::RequestOptions;
@@ -219,8 +219,14 @@ impl PushHost for BaseClient {
         &self.sync
     }
 
-    fn emit_sync(&self, data: SyncData) {
-        self.emit(ClientEvent::UpdateSyncData(data));
+    fn save_sync(&self, data: SyncData) -> BoxFuture<'static, ()> {
+        let c = self.clone();
+        async move { c.store_sync_data(data).await }.boxed()
+    }
+
+    fn restore_sync(&self) -> BoxFuture<'static, ()> {
+        let c = self.clone();
+        async move { c.load_sync_data().await }.boxed()
     }
 
     fn log(&self, kind: &str, data: serde_json::Value) {
