@@ -6,7 +6,10 @@
 //!
 //! Covers listing calendars and events, and creating, updating and deleting
 //! events (`EventService/CreateEvents`, `UpdateEvents`, `DeleteEvents`),
-//! with their recurrence, changed occurrences, invitees and reminders.
+//! with their recurrence, changed occurrences, invitees and reminders;
+//! getting or making a chat's calendar (`CalendarService/GetChatCalendar`,
+//! `CreateChatCalendar`); and answering an invitation
+//! (`InvitationService/RespondToInvitation`).
 
 use crate::base::BaseClient;
 use crate::error::{Error, Result};
@@ -16,6 +19,7 @@ use crate::tv;
 
 const CALENDAR_SERVICE: &str = "/line.calendar.bff.CalendarService";
 const EVENT_SERVICE: &str = "/line.calendar.bff.EventService";
+const INVITATION_SERVICE: &str = "/line.calendar.bff.InvitationService";
 
 /// The LINE Calendar internal channel id (the production `realId` from the
 /// app's channel table). The gRPC services authenticate with a channel access
@@ -548,6 +552,79 @@ impl BaseClient {
         .await
     }
 
+    /// `CalendarService/GetChatCalendar`: the calendar of chat
+    /// `chatroom_id` (`{ chatroom_id = 1 }` → `{ meta = 1, calendar = 2 }`),
+    /// or `None` when the chat has none yet.
+    pub async fn get_chat_calendar(&self, chatroom_id: &str) -> Result<Option<Calendar>> {
+        let mut w = Writer::new();
+        w.string_always(1, chatroom_id);
+        let path = format!("{CALENDAR_SERVICE}/GetChatCalendar");
+        let result = self
+            .grpc_unary(&path, w.as_bytes(), |resp| calendar_field(resp, 2))
+            .await;
+        match result {
+            Err(e) if is_not_found(&e) => Ok(None),
+            other => other,
+        }
+    }
+
+    /// `CalendarService/CreateChatCalendar`: makes chat `chatroom_id`'s
+    /// calendar (`{ chatroom_id = 1 }` → `{ calendar = 1 }`).
+    pub async fn create_chat_calendar(&self, chatroom_id: &str) -> Result<Calendar> {
+        let mut w = Writer::new();
+        w.string_always(1, chatroom_id);
+        let path = format!("{CALENDAR_SERVICE}/CreateChatCalendar");
+        self.grpc_unary(&path, w.as_bytes(), |resp| calendar_field(resp, 1))
+            .await?
+            .ok_or_else(|| Error::internal("CalendarCreateChatCalendar", "no calendar returned"))
+    }
+
+    /// Chat `chatroom_id`'s calendar, made first if the chat has none. Call
+    /// it before the first write to a chat's calendar, as the app gets or
+    /// creates the calendar before it adds an event.
+    pub async fn ensure_chat_calendar(&self, chatroom_id: &str) -> Result<Calendar> {
+        match self.get_chat_calendar(chatroom_id).await? {
+            Some(c) => Ok(c),
+            None => self.create_chat_calendar(chatroom_id).await,
+        }
+    }
+
+    /// `InvitationService/RespondToInvitation`: answer an invitation to
+    /// event `event_id` in chat `chatroom_id`. `recur_id` picks one
+    /// occurrence of a recurring event ([`ChildEvent::recur_id`]); `None`
+    /// answers for the event. `previous_updated_at` is the user's
+    /// [`Invitee::client_updated_at`]. Returns the calendar's new
+    /// `event_updated_at`.
+    pub async fn respond_to_invitation(
+        &self,
+        chatroom_id: &str,
+        event_id: &str,
+        recur_id: Option<i64>,
+        status: InvitationStatus,
+        previous_updated_at: i64,
+    ) -> Result<i64> {
+        let body = respond_request(
+            chatroom_id,
+            event_id,
+            recur_id,
+            status,
+            next_client_updated_at(previous_updated_at),
+        );
+        let path = format!("{INVITATION_SERVICE}/RespondToInvitation");
+        self.grpc_unary(&path, &body, |resp| {
+            // { event_updated_at = 1 }
+            let mut r = Reader::new(resp);
+            let mut at = 0;
+            while let Some(f) = r.next_field()? {
+                if f.number == 1 {
+                    at = f.value.as_i64()?;
+                }
+            }
+            Ok(at)
+        })
+        .await
+    }
+
     /// `EventService/CreateEvents` with one event. `id` comes from
     /// [`new_event_id`]. `notify_chat` is the app's "post to the chat" flag
     /// (`notify_to_chatroom`); `None` leaves it to the server. Returns the
@@ -877,6 +954,45 @@ fn token_usable(expires: i64, now: i64) -> bool {
 fn is_token_error(e: &Error) -> bool {
     let text = e.to_string();
     text.contains("AUTHENTICATION_REQUIRED") || text.contains("gRPC status 16")
+}
+
+/// The `Calendar` in field `field` of a response, if there is one.
+fn calendar_field(resp: &[u8], field: u32) -> Result<Option<Calendar>> {
+    let mut r = Reader::new(resp);
+    while let Some(f) = r.next_field()? {
+        if f.number == field {
+            return Calendar::decode(f.value.as_bytes()?).map(Some);
+        }
+    }
+    Ok(None)
+}
+
+/// Whether an error says the chat has no calendar. How the server answers
+/// that is not known (gRPC NOT_FOUND, status 5, or a BFF NOT_FOUND code are
+/// all taken to mean it).
+fn is_not_found(e: &Error) -> bool {
+    let text = e.to_string();
+    text.contains("gRPC status 5:") || text.ends_with("gRPC status 5") || text.contains("NOT_FOUND")
+}
+
+/// `RespondToInvitationRequest { chatroom_id = 1, event_id = 2,
+/// recur_id = 3 (optional), status = 4, client_updated_at = 5 }`.
+fn respond_request(
+    chatroom_id: &str,
+    event_id: &str,
+    recur_id: Option<i64>,
+    status: InvitationStatus,
+    client_updated_at: i64,
+) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.string_always(1, chatroom_id);
+    w.string_always(2, event_id);
+    if let Some(r) = recur_id {
+        w.int64_always(3, r);
+    }
+    w.enumeration(4, status.raw());
+    w.int64(5, client_updated_at);
+    w.into_bytes()
 }
 
 /// Name of a `line.calendar.bff.ErrorCode`.
@@ -1300,6 +1416,51 @@ mod tests {
         resp.message(1, err.as_bytes());
         let e = write_response("UpdateEvents", resp.as_bytes()).unwrap_err();
         assert!(!is_token_error(&e));
+    }
+
+    #[test]
+    fn rsvp_and_chat_calendar_messages() {
+        let body = respond_request(
+            "c1",
+            "a-1",
+            Some(1_700_000_000),
+            InvitationStatus::Declined,
+            9,
+        );
+        assert_eq!(field_numbers(&body), [1, 2, 3, 4, 5]);
+        let mut r = Reader::new(&body);
+        let vals: Vec<u64> = std::iter::from_fn(|| r.next_field().unwrap())
+            .filter_map(|f| f.value.as_u64().ok())
+            .collect();
+        assert_eq!(vals, [1_700_000_000, 3, 9]);
+        assert_eq!(
+            field_numbers(&respond_request(
+                "c1",
+                "a-1",
+                None,
+                InvitationStatus::Accepted,
+                9
+            )),
+            [1, 2, 4, 5]
+        );
+
+        let mut cal = Writer::new();
+        cal.string(2, "cal-1");
+        cal.enumeration(5, CALENDAR_CHATROOM);
+        let mut resp = Writer::new();
+        resp.message(1, &[]);
+        resp.message(2, cal.as_bytes());
+        let c = calendar_field(resp.as_bytes(), 2).unwrap().unwrap();
+        assert_eq!((c.id.as_str(), c.kind), ("cal-1", CALENDAR_CHATROOM));
+        assert!(calendar_field(&[], 2).unwrap().is_none());
+        assert!(is_not_found(&Error::internal(
+            "GrpcError",
+            "gRPC status 5: no calendar"
+        )));
+        assert!(!is_not_found(&Error::internal(
+            "GrpcError",
+            "gRPC status 50"
+        )));
     }
 
     #[test]
