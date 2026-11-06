@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use futures::future::BoxFuture;
 
-use crate::base::{BaseClient, ClientEvent, LegyMode, LogoutReason};
+use crate::base::{BaseClient, ClientEvent, LegyMode};
 use crate::error::{Error, Result};
 use crate::thrift::{self, Protocol, Schema, TValue, Value};
 
@@ -201,7 +201,7 @@ impl BaseClient {
                     // session (login flows send other credentials).
                     if sent_token.is_some()
                         && !is_refresh_call
-                        && let Some(reason) = LogoutReason::from_error(&e)
+                        && let Some(reason) = self.logout_reason(&e)
                     {
                         self.kick_out(reason);
                     }
@@ -256,7 +256,7 @@ impl BaseClient {
 
     /// Reactive refresh after `MUST_REFRESH_V3_TOKEN`; skipped when another
     /// task already replaced the token the failed request used.
-    async fn refresh_token_after(&self, failed_token: Option<&str>) -> Result<()> {
+    pub(crate) async fn refresh_token_after(&self, failed_token: Option<&str>) -> Result<()> {
         let _guard = self.refresh_lock.lock().await;
         if self.auth_token().as_deref() != failed_token {
             return Ok(());

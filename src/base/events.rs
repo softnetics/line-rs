@@ -37,6 +37,15 @@ pub enum ClientEvent {
         /// What to re-pull; `[All]` for a full sync.
         categories: Vec<FullSyncCategory>,
     },
+    /// Diagnostics. Most kinds are debug output, but these are stable and
+    /// meant to be matched:
+    ///
+    /// * `LegyPusherError`: the push connection failed or a talk `sync` on
+    ///   it failed (`data.error`; for a sync also `data.method = "sync"` and
+    ///   `data.code`, the exception code). The listener reconnects by
+    ///   itself; apps may check the session (e.g. `getServerTime`).
+    /// * `RefreshError`: refreshing the access token failed (`data.error`).
+    /// * `Failover`: requests moved to another LEGY host (`data.host`).
     Log {
         kind: String,
         data: serde_json::Value,

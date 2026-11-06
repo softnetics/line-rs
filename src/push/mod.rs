@@ -244,6 +244,29 @@ impl PushHost for BaseClient {
         }
     }
 
+    fn recover_sync_error(&self, e: &Error, token: Option<String>) -> BoxFuture<'static, bool> {
+        let must_refresh = e.code() == Some("MUST_REFRESH_V3_TOKEN");
+        let logout = self.logout_reason(e);
+        let c = self.clone();
+        async move {
+            if let Some(reason) = logout {
+                c.kick_out(reason);
+                return false;
+            }
+            if !must_refresh {
+                return false;
+            }
+            match c.refresh_token_after(token.as_deref()).await {
+                Ok(()) => true,
+                Err(e) => {
+                    c.log("RefreshError", serde_json::json!({"error": e.to_string()}));
+                    false
+                }
+            }
+        }
+        .boxed()
+    }
+
     fn open_conn(&self, path: &str) -> Result<Conn> {
         let mut headers = self.line_headers("POST");
         headers.retain(|(k, _)| k != "content-type" && k != "accept");

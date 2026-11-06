@@ -361,6 +361,12 @@ impl BaseClient {
         self.emit(ClientEvent::End(self.profile()));
     }
 
+    /// Whether a server error made with this client's token means the
+    /// session is gone (see [`LogoutReason::from_error`]).
+    pub fn logout_reason(&self, e: &Error) -> Option<LogoutReason> {
+        LogoutReason::from_error(e)
+    }
+
     /// Host requests currently go to (primary or a backup after failover).
     pub fn current_endpoint(&self) -> &str {
         let i = self.active_endpoint.load(Ordering::Relaxed);

@@ -43,6 +43,10 @@ pub(crate) trait PushHost: Clone + Send + Sync + 'static {
     fn emit(&self, event: ClientEvent);
     /// Move to the next LEGY host after repeated connection failures.
     fn fail_over(&self);
+    /// React to a failed talk `sync` made with `token`: refresh the token
+    /// on `MUST_REFRESH_V3_TOKEN` (returns whether that worked) or end the
+    /// session when the error says it is gone.
+    fn recover_sync_error(&self, e: &Error, token: Option<String>) -> BoxFuture<'static, bool>;
     /// Start the `/PUSH` request at `path`.
     fn open_conn(&self, path: &str) -> Result<Conn>;
     /// `SquareService.fetchMyEvents(args)` over the normal RPC path.
@@ -53,8 +57,10 @@ pub(crate) trait PushHost: Clone + Send + Sync + 'static {
 
 #[derive(Debug, Default)]
 struct State {
-    /// request id → (service type, method name)
+    /// request id → (service type, method name); removed when answered.
     sign_on_requests: HashMap<u16, (u8, &'static str)>,
+    /// Last sign-on request id (ids run 1..=0x7fff, then wrap).
+    last_request_id: u16,
     /// square subscription id → last refresh (unix seconds)
     subscription_ids: HashMap<i64, f64>,
     subscription_id: i64,
@@ -149,6 +155,7 @@ impl<H: PushHost> ConnManager<H> {
         {
             let mut st = self.state.lock().unwrap();
             st.sign_on_requests.clear();
+            st.last_request_id = 0;
             st.auth_token = self.host.auth_token();
             st.alive = false;
         }
@@ -179,7 +186,9 @@ impl<H: PushHost> ConnManager<H> {
         };
         let id = {
             let mut st = self.state.lock().unwrap();
-            let id = st.sign_on_requests.len() as u16 + 1;
+            // The response carries the id in 15 bits.
+            let id = st.last_request_id % 0x7fff + 1;
+            st.last_request_id = id;
             st.sign_on_requests.insert(id, (service, method));
             id
         };
@@ -191,16 +200,13 @@ impl<H: PushHost> ConnManager<H> {
         Ok(id)
     }
 
-    /// Handle a complete sign-on response. Failures are logged; like linejs
-    /// they end that service's request chain on this connection.
+    /// Handle a complete sign-on response. A failed square request is
+    /// logged and ends the square chain (OpenChat may not support push). A
+    /// failed talk `sync` closes the connection so the listener reconnects
+    /// (after refreshing the token on `MUST_REFRESH_V3_TOKEN`), and is
+    /// reported as a `LegyPusherError` log event.
     pub async fn on_sign_on_response(&self, w: &ConnWriter, req_id: u16, data: &[u8]) {
-        let entry = self
-            .state
-            .lock()
-            .unwrap()
-            .sign_on_requests
-            .get(&req_id)
-            .copied();
+        let entry = self.state.lock().unwrap().sign_on_requests.remove(&req_id);
         let Some((service, _method)) = entry else {
             self.log(
                 &format!("[PUSH] unknown sign-on-response requestId:{req_id}"),
@@ -217,7 +223,12 @@ impl<H: PushHost> ConnManager<H> {
         );
         let res = match service {
             3 => self.on_square_sign_on(data).await,
-            5 | 8 => self.on_talk_sign_on(w, service, data).await,
+            5 | 8 => {
+                if let Err(e) = self.on_talk_sign_on(w, service, data).await {
+                    self.on_talk_sync_failure(w, e).await;
+                }
+                Ok(())
+            }
             _ => Err(Error::internal(
                 "LegyPusherError",
                 format!(
@@ -228,6 +239,23 @@ impl<H: PushHost> ConnManager<H> {
         if let Err(e) = res {
             self.log("sign-on-response failed", error_json(&e));
         }
+    }
+
+    /// A talk `sync` failed, so no further sync request is chained on this
+    /// connection: report it, recover what can be recovered and reconnect.
+    async fn on_talk_sync_failure(&self, w: &ConnWriter, e: Error) {
+        self.host.log(
+            "LegyPusherError",
+            json!({"error": e.to_string(), "method": "sync", "code": e.code()}),
+        );
+        let token = self.state.lock().unwrap().auth_token.clone();
+        let refreshed = self.host.recover_sync_error(&e, token).await;
+        if !refreshed {
+            // Not a sign of a healthy connection: let reconnects back off.
+            self.state.lock().unwrap().alive = false;
+        }
+        self.log("closing push conn after a failed sync", json!(""));
+        w.close();
     }
 
     async fn on_square_sign_on(&self, data: &[u8]) -> Result<()> {
@@ -301,8 +329,11 @@ impl<H: PushHost> ConnManager<H> {
         };
         let res = thrift::decode_struct(Schema::line(), Some("sync_result"), &body);
         if !res["e"].is_null() {
-            self.log("sync error:", res["e"].to_json());
-            return Ok(());
+            return Err(Error::Request {
+                method: "sync".into(),
+                path: "/PUSH/1/subs".into(),
+                data: res["e"].clone(),
+            });
         }
         let response = &res["success"];
         if response.is_null() {
@@ -627,6 +658,9 @@ pub(crate) mod tests {
 
     type Responder = Arc<dyn Fn() -> Result<Value> + Send + Sync>;
 
+    /// `(error code, token)` passed to `recover_sync_error`.
+    type Recovered = (Option<String>, Option<String>);
+
     #[derive(Clone)]
     pub(crate) struct FakeHost {
         pub token: Arc<Mutex<Option<String>>>,
@@ -638,6 +672,8 @@ pub(crate) mod tests {
         pub noop_ok: bool,
         pub opens: Arc<AtomicUsize>,
         pub failovers: Arc<AtomicUsize>,
+        pub recovered: Arc<Mutex<Vec<Recovered>>>,
+        pub refresh_ok: bool,
         /// Connections handed out by `open_conn`; `None` → fail to open.
         pub conns: Arc<Mutex<Vec<Conn>>>,
     }
@@ -654,6 +690,8 @@ pub(crate) mod tests {
                 noop_ok: true,
                 opens: Arc::default(),
                 failovers: Arc::default(),
+                recovered: Arc::default(),
+                refresh_ok: true,
                 conns: Arc::default(),
             }
         }
@@ -689,6 +727,14 @@ pub(crate) mod tests {
         }
         fn fail_over(&self) {
             self.failovers.fetch_add(1, Ordering::SeqCst);
+        }
+        fn recover_sync_error(&self, e: &Error, token: Option<String>) -> BoxFuture<'static, bool> {
+            self.recovered
+                .lock()
+                .unwrap()
+                .push((e.code().map(str::to_string), token));
+            let ok = self.refresh_ok && e.code() == Some("MUST_REFRESH_V3_TOKEN");
+            async move { ok }.boxed()
         }
         fn open_conn(&self, _path: &str) -> Result<Conn> {
             self.opens.fetch_add(1, Ordering::SeqCst);
@@ -966,6 +1012,82 @@ pub(crate) mod tests {
             async { Err(Error::internal("LegyPusherError", "fetch failed")) }.boxed(),
         );
         assert!(m.init_and_read(conn, &[3, 8]).await.is_err());
+    }
+
+    /// `sync_result { e: TalkException { code } }` as a sign-on response
+    /// payload.
+    fn sync_exception(code: i32) -> Vec<u8> {
+        compact_result(
+            "sync",
+            vec![(1, TValue::Struct(vec![(1, TValue::I32(code))]))],
+        )
+    }
+
+    async fn failed_sync(host: &FakeHost, code: i32) -> (ConnManager<FakeHost>, ConnWriter) {
+        let (m, _hub) = manager(host);
+        m.state.lock().unwrap().auth_token = Some("push-token".into());
+        m.state.lock().unwrap().alive = true;
+        let (w, mut written) = ConnWriter::channel();
+        let id = m
+            .build_and_send_sign_on_request(&w, 8, &talk_sync_args(&SyncData::default()))
+            .unwrap();
+        drain(&mut written);
+        m.on_sign_on_response(&w, id, &sync_exception(code)).await;
+        // No new sync request is chained after a failure.
+        assert!(drain(&mut written).is_empty());
+        (m, w)
+    }
+
+    #[tokio::test]
+    async fn must_refresh_during_sync_refreshes_and_reconnects() {
+        let host = FakeHost::new();
+        // 119 = MUST_REFRESH_V3_TOKEN
+        let (m, w) = failed_sync(&host, 119).await;
+        assert_eq!(
+            host.recovered.lock().unwrap().as_slice(),
+            [(
+                Some("MUST_REFRESH_V3_TOKEN".to_string()),
+                Some("push-token".to_string())
+            )]
+        );
+        tokio::time::timeout(Duration::from_millis(100), w.closed())
+            .await
+            .unwrap();
+        // A successful refresh reconnects right away.
+        assert!(m.was_alive());
+        assert!(host.log_kinds().contains(&"LegyPusherError".to_string()));
+    }
+
+    #[tokio::test]
+    async fn other_sync_errors_close_the_connection_and_are_reported() {
+        let host = FakeHost::new();
+        // 20 = INTERNAL_ERROR
+        let (m, w) = failed_sync(&host, 20).await;
+        tokio::time::timeout(Duration::from_millis(100), w.closed())
+            .await
+            .unwrap();
+        assert!(!m.was_alive());
+        let logs = host.logs.lock().unwrap();
+        let (_, data) = logs
+            .iter()
+            .find(|(k, _)| k == "LegyPusherError")
+            .expect("sync error is reported");
+        assert_eq!(data["method"], "sync");
+        assert_eq!(data["code"], "INTERNAL_ERROR");
+    }
+
+    #[test]
+    fn sign_on_request_ids_wrap_and_are_released() {
+        let host = FakeHost::new();
+        let (m, _) = manager(&host);
+        let (w, _written) = ConnWriter::channel();
+        m.state.lock().unwrap().last_request_id = 0x7ffe;
+        let args = talk_sync_args(&SyncData::default());
+        assert_eq!(
+            m.build_and_send_sign_on_request(&w, 8, &args).unwrap(),
+            0x7fff
+        );
+        assert_eq!(m.build_and_send_sign_on_request(&w, 8, &args).unwrap(), 1);
     }
 
     #[tokio::test(start_paused = true)]
