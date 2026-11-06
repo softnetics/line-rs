@@ -613,7 +613,9 @@ impl BaseClient {
 }
 
 /// The fields of an event to create, or to replace on update. LINE's
-/// update takes the whole event, not a diff.
+/// update takes the whole event, not a diff: build an edit with
+/// [`EventInput::from_event`] so the fields you don't touch go back as they
+/// were.
 ///
 /// Times are epoch seconds. An all-day event starts at midnight of its
 /// first day in `timezone` and ends at midnight after its last day.
@@ -629,12 +631,52 @@ pub struct EventInput {
     pub url: String,
     pub description: String,
     pub color_id: i32,
+    /// How the event repeats. On update, LINE for Android sends the rule
+    /// without `except_ids` (the server keeps the series' exceptions), and
+    /// so does this.
+    pub recurrence: Option<Recurrence>,
+    pub reminders: Vec<Reminder>,
+    /// Invitee mids the event should have.
+    pub invitees: Vec<String>,
+    /// The invitees the event had when fetched. An update sends what was
+    /// added to and removed from this list (`add_invitees`,
+    /// `remove_invitees`); a create ignores it.
+    pub original_invitees: Vec<String>,
+    /// The chat message the event was made from.
+    pub message_id: Option<String>,
+    pub stamp_id: String,
+    /// See [`Event::app_reminders`].
+    pub app_reminders: Option<Vec<i32>>,
 }
 
 impl EventInput {
-    /// The `line.calendar.bff` create/update event message. Both share
-    /// fields 1 to 9; client_updated_at and the notify flag differ (create:
-    /// 15 and 16, update: 16 and 17) and colour too (create 17, update 18).
+    /// The event as it is, ready to change and send back with
+    /// [`BaseClient::update_event`].
+    pub fn from_event(e: &Event) -> Self {
+        let invitees: Vec<String> = e.invitees.iter().map(|i| i.invitee_id.clone()).collect();
+        EventInput {
+            title: e.title.clone(),
+            start_time: e.start_time,
+            end_time: e.end_time,
+            timezone: e.timezone.clone(),
+            is_all_day: e.is_all_day,
+            location: e.location.clone(),
+            url: e.url.clone(),
+            description: e.description.clone(),
+            color_id: e.color_id,
+            recurrence: e.recurrence.clone(),
+            reminders: e.reminders.clone(),
+            original_invitees: invitees.clone(),
+            invitees,
+            message_id: e.message_id.clone(),
+            stamp_id: e.stamp_id.clone(),
+            app_reminders: e.app_reminders.clone(),
+        }
+    }
+
+    /// The `line.calendar.bff` create (`CreateEvent`) or update
+    /// (`UpdateEvent`) message. Both share fields 1 to 10; from there the
+    /// update has one more invitee list, so the rest sit one number later.
     fn encode(
         &self,
         id: &str,
@@ -642,10 +684,6 @@ impl EventInput {
         client_updated_at: i64,
         notify: Option<bool>,
     ) -> Vec<u8> {
-        let (updated_at, notify_field, color) = match write {
-            Write::Create => (15, 16, 17),
-            Write::Update => (16, 17, 18),
-        };
         let mut w = Writer::new();
         w.string_always(1, id);
         w.int64(2, self.start_time);
@@ -656,11 +694,80 @@ impl EventInput {
         w.string(7, &self.location);
         w.string(8, &self.url);
         w.string(9, &self.description);
-        w.int64(updated_at, client_updated_at);
-        if let Some(n) = notify {
-            w.bool_always(notify_field, n);
+        if let Some(r) = &self.recurrence {
+            w.message(10, &r.encode(matches!(write, Write::Create)));
         }
-        w.uint32(color, self.color_id.max(0) as u32);
+        let reminders = self.reminders.iter().map(|r| r.raw() as i64 as u64);
+        let next = match write {
+            Write::Create => {
+                for id in &self.invitees {
+                    // `{ invitee_id = 1, status = 3 }`
+                    let mut i = Writer::new();
+                    i.string_always(1, id);
+                    i.enumeration(3, InvitationStatus::NeedsAction.raw());
+                    w.message(11, i.as_bytes());
+                }
+                w.packed_varints(12, reminders);
+                13
+            }
+            Write::Update => {
+                let added = self
+                    .invitees
+                    .iter()
+                    .filter(|i| !self.original_invitees.contains(i));
+                let removed = self
+                    .original_invitees
+                    .iter()
+                    .filter(|i| !self.invitees.contains(i));
+                for (field, ids) in [(11, added.collect::<Vec<_>>()), (12, removed.collect())] {
+                    for id in ids {
+                        let mut i = Writer::new();
+                        i.string_always(1, id);
+                        w.message(field, i.as_bytes());
+                    }
+                }
+                w.packed_varints(13, reminders);
+                14
+            }
+        };
+        // Then: message_id, recurrence_child_events (not sent; the app
+        // leaves them out of an update too), client_updated_at,
+        // notify_to_chatroom, color_id, app_reminders, stamp_id.
+        if let Some(m) = &self.message_id {
+            w.string_always(next, m);
+        }
+        w.int64(next + 2, client_updated_at);
+        if let Some(n) = notify {
+            w.bool_always(next + 3, n);
+        }
+        w.uint32(next + 4, self.color_id.max(0) as u32);
+        if let Some(offsets) = &self.app_reminders {
+            let mut a = Writer::new();
+            a.packed_varints(1, offsets.iter().map(|o| *o as i64 as u64));
+            w.message(next + 5, a.as_bytes());
+        }
+        if !self.stamp_id.is_empty() {
+            w.string_always(next + 6, &self.stamp_id);
+        }
+        w.into_bytes()
+    }
+}
+
+impl Recurrence {
+    /// `Recurrence`, with `except_ids` only when `with_except_ids`.
+    fn encode(&self, with_except_ids: bool) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.enumeration(1, self.frequency.raw());
+        w.uint32(2, self.interval);
+        if let Some(until) = self.until.filter(|u| *u > 0) {
+            w.int64_always(3, until);
+        }
+        for d in &self.by_day {
+            w.string_always(4, d);
+        }
+        if with_except_ids {
+            w.packed_varints(5, self.except_ids.iter().map(|v| *v as u64));
+        }
         w.into_bytes()
     }
 }
@@ -925,6 +1032,15 @@ mod tests {
         assert_ne!(id, new_event_id());
     }
 
+    fn field_numbers(b: &[u8]) -> Vec<u32> {
+        let mut r = Reader::new(b);
+        let mut n = Vec::new();
+        while let Some(f) = r.next_field().unwrap() {
+            n.push(f.number);
+        }
+        n
+    }
+
     #[test]
     fn create_and_update_put_the_trailing_fields_in_different_places() {
         let e = EventInput {
@@ -935,26 +1051,107 @@ mod tests {
             color_id: 3,
             ..Default::default()
         };
-        let fields = |b: &[u8]| {
-            let mut r = Reader::new(b);
-            let mut n = Vec::new();
-            while let Some(f) = r.next_field().unwrap() {
-                n.push(f.number);
-            }
-            n
-        };
         assert_eq!(
-            fields(&e.encode("a-x", Write::Create, 9, Some(true))),
+            field_numbers(&e.encode("a-x", Write::Create, 9, Some(true))),
             [1, 2, 3, 4, 5, 15, 16, 17]
         );
         assert_eq!(
-            fields(&e.encode("a-x", Write::Update, 9, Some(false))),
+            field_numbers(&e.encode("a-x", Write::Update, 9, Some(false))),
             [1, 2, 3, 4, 5, 16, 17, 18]
         );
         assert_eq!(
-            fields(&e.encode("a-x", Write::Create, 9, None)),
+            field_numbers(&e.encode("a-x", Write::Create, 9, None)),
             [1, 2, 3, 4, 5, 15, 17]
         );
+    }
+
+    /// A fetched event, edited and sent back, keeps every field an update
+    /// can carry.
+    #[test]
+    fn an_update_sends_the_whole_fetched_event_back() {
+        let fetched = Event {
+            id: "a-1".into(),
+            start_time: 100,
+            end_time: 200,
+            timezone: "Asia/Tokyo".into(),
+            title: "Standup".into(),
+            recurrence: Some(Recurrence {
+                frequency: Frequency::Weekly,
+                interval: 1,
+                until: Some(9_000),
+                by_day: vec!["MO".into(), "TH".into()],
+                except_ids: vec![700],
+            }),
+            invitees: vec![
+                Invitee {
+                    invitee_id: "u1".into(),
+                    ..Default::default()
+                },
+                Invitee {
+                    invitee_id: "u2".into(),
+                    ..Default::default()
+                },
+            ],
+            reminders: vec![Reminder::OneHourBefore, Reminder::Other(9)],
+            message_id: Some("m1".into()),
+            color_id: 5,
+            app_reminders: Some(vec![-10]),
+            stamp_id: "s1".into(),
+            ..Default::default()
+        };
+        let mut input = EventInput::from_event(&fetched);
+        input.title = "Daily standup".into();
+        input.invitees.retain(|i| i != "u1");
+        input.invitees.push("u3".into());
+        let body = input.encode("a-1", Write::Update, 42, None);
+        assert_eq!(
+            field_numbers(&body),
+            [1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 16, 18, 19, 20]
+        );
+
+        let mut r = Reader::new(&body);
+        while let Some(f) = r.next_field().unwrap() {
+            match f.number {
+                5 => assert_eq!(f.value.as_str().unwrap(), "Daily standup"),
+                10 => {
+                    let rec = Recurrence::decode(f.value.as_bytes().unwrap()).unwrap();
+                    // Exceptions stay on the server; the rule goes back.
+                    assert_eq!(
+                        rec,
+                        Recurrence {
+                            except_ids: vec![],
+                            ..fetched.recurrence.clone().unwrap()
+                        }
+                    );
+                }
+                11 | 12 => {
+                    let mut i = f.value.as_message().unwrap();
+                    let id = i.next_field().unwrap().unwrap().value.as_str().unwrap();
+                    assert_eq!(id, if f.number == 11 { "u3" } else { "u1" });
+                }
+                13 => assert_eq!(repeated_varints(f.value).unwrap(), [1, 9]),
+                14 => assert_eq!(f.value.as_str().unwrap(), "m1"),
+                16 => assert_eq!(f.value.as_i64().unwrap(), 42),
+                18 => assert_eq!(f.value.as_i32().unwrap(), 5),
+                19 => assert_eq!(app_reminders(f.value.as_bytes().unwrap()).unwrap(), [-10]),
+                20 => assert_eq!(f.value.as_str().unwrap(), "s1"),
+                _ => {}
+            }
+        }
+
+        // A create sends the rule with its exceptions, and invitees whole.
+        let body = input.encode("a-2", Write::Create, 42, Some(true));
+        assert_eq!(
+            field_numbers(&body),
+            [1, 2, 3, 4, 5, 10, 11, 11, 12, 13, 15, 16, 17, 18, 19]
+        );
+        let mut r = Reader::new(&body);
+        while let Some(f) = r.next_field().unwrap() {
+            if f.number == 10 {
+                let rec = Recurrence::decode(f.value.as_bytes().unwrap()).unwrap();
+                assert_eq!(rec.except_ids, [700]);
+            }
+        }
     }
 
     #[test]
