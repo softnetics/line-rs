@@ -3,24 +3,10 @@
 use super::message::{MessageInput, TalkMessage};
 use super::{Client, list};
 use crate::error::{Error, Result};
-use crate::obs::{E2eeMediaUpload, ObjType, ObsFile};
+pub use crate::obs::SentMedia;
+use crate::obs::{MediaOptions, ObjType, ObsFile};
 use crate::thrift::Value;
 use crate::tv;
-
-/// Result of [`Chat::send_media`].
-#[derive(Debug, Clone)]
-pub enum SentMedia {
-    /// Plain OBS upload in "reqseq" mode: the server created the message.
-    Plain { obj_id: String, obj_hash: String },
-    /// Letter Sealing upload: the sent (still encrypted) `Message`.
-    E2ee(Value),
-}
-
-/// Whether media to `mid` goes through the E2EE path: requested, and the
-/// mid is a user or group (rooms have no Letter Sealing media path).
-pub(crate) fn uses_e2ee_media(mid: &str, e2ee: bool) -> bool {
-    e2ee && (mid.starts_with('u') || mid.starts_with('c'))
-}
 
 /// `setChatHiddenStatus` arguments.
 pub(crate) fn hidden_status_args(
@@ -81,10 +67,13 @@ impl Chat {
         self.client.send_compact_message(self.mid(), text).await
     }
 
-    /// Send media (image / gif / video / audio / file). With `e2ee` (and a
-    /// user or group mid) it is encrypted and uploaded with Letter Sealing,
-    /// otherwise uploaded in "reqseq" mode so the server creates the
-    /// message (not a reply). `duration_ms` is the audio/video length.
+    /// Send media (image / gif / video / audio / file). With `e2ee` the
+    /// chat's flow decides, as in the official app: LINE says per chat
+    /// whether media goes encrypted (Letter Sealing) or plain; rooms always
+    /// go plain. Without `e2ee` it is uploaded in "reqseq" mode so the
+    /// server creates the message. `duration_ms` is the audio/video length.
+    /// See [`send_media_with`](Self::send_media_with) for previews and
+    /// image sizes.
     pub async fn send_media(
         &self,
         o_type: ObjType,
@@ -92,26 +81,35 @@ impl Chat {
         duration_ms: Option<u64>,
         e2ee: bool,
     ) -> Result<SentMedia> {
-        let obs = self.client.base.obs();
-        if uses_e2ee_media(self.mid(), e2ee) {
-            let sent = obs
-                .upload_media_by_e2ee(E2eeMediaUpload {
-                    file,
-                    o_type,
-                    to: self.mid().to_string(),
-                    preview: None,
-                    duration_ms: duration_ms.map(|d| d as f64),
-                })
-                .await?;
-            return Ok(SentMedia::E2ee(sent));
-        }
-        let up = obs
-            .upload_obj_talk(self.mid(), o_type, file, None, duration_ms)
-            .await?;
-        Ok(SentMedia::Plain {
-            obj_id: up.obj_id,
-            obj_hash: up.obj_hash,
-        })
+        let opts = MediaOptions {
+            duration_ms,
+            e2ee: (!e2ee).then_some(false),
+            ..Default::default()
+        };
+        self.send_media_with(o_type, file, opts).await
+    }
+
+    /// Send media with a preview, duration, size or flow choice:
+    ///
+    /// ```no_run
+    /// # async fn f(chat: line_rs::client::Chat, mp4: Vec<u8>, jpeg: Vec<u8>) -> line_rs::Result<()> {
+    /// use line_rs::obs::{MediaOptions, ObjType, ObsFile};
+    /// let opts = MediaOptions::new().preview(jpeg).duration_ms(4200);
+    /// chat.send_media_with(ObjType::Video, ObsFile::new(mp4).name("clip.mp4"), opts)
+    ///     .await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn send_media_with(
+        &self,
+        o_type: ObjType,
+        file: ObsFile,
+        opts: MediaOptions,
+    ) -> Result<SentMedia> {
+        self.client
+            .base
+            .obs()
+            .send_media(self.mid(), o_type, file, opts)
+            .await
     }
 
     fn named(data: Vec<u8>, filename: Option<&str>) -> ObsFile {
@@ -489,11 +487,7 @@ mod tests {
     use crate::device::Device;
 
     #[test]
-    fn media_route_and_marker_args() {
-        assert!(uses_e2ee_media("c-group", true));
-        assert!(uses_e2ee_media("u-user", true));
-        assert!(!uses_e2ee_media("r-room", true));
-        assert!(!uses_e2ee_media("c-group", false));
+    fn marker_args() {
         let a = hidden_status_args(3, "c1", 9_007_199_254_740_993, true);
         assert_eq!(
             a["setChatHiddenStatusRequest"]["lastMessageId"].as_i64(),

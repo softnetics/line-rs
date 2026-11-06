@@ -243,7 +243,7 @@ pub struct Inner {
     token_expire: RwLock<Option<Option<i64>>>,
     pub(crate) refresh_lock: Mutex<()>,
     pub(crate) e2ee: E2eeState,
-    /// OBS access token.
+    /// OBS access token and per-chat media flows.
     pub(crate) obs_state: crate::obs::ObsState,
     pub(crate) sync: Mutex<SyncData>,
     pub(crate) push: crate::push::PushState,

@@ -14,11 +14,18 @@
 
 pub mod crypto;
 mod e2ee;
+mod flow;
 pub mod mime;
 mod token;
 
-pub use e2ee::{E2eeMediaUpload, e2ee_content_metadata, e2ee_duration};
+pub use e2ee::{
+    E2eeMediaUpload, MAX_FILE_SIZE, MAX_MEDIA_SEND_ATTEMPTS, MAX_VIDEO_SIZE, MediaOptions,
+    SentMedia, check_media_size, e2ee_content_metadata, e2ee_duration,
+};
+pub use flow::{MediaFlow, MediaFlows};
 pub use token::{OBS_TOKEN_ATTEMPTS, parse_obs_token};
+
+use std::time::Instant;
 
 use bytes::Bytes;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -226,10 +233,12 @@ pub struct ObjectUpload {
     pub add_headers: Vec<(String, String)>,
 }
 
-/// Per-client OBS state: the OBS access token.
+/// Per-client OBS state: the OBS access token and the media flow of each
+/// chat.
 #[derive(Debug, Default)]
 pub(crate) struct ObsState {
     pub(crate) token: token::ObsTokenCache,
+    pub(crate) flows: flow::MediaFlowCache,
 }
 
 /// OBS operations bound to a client.
@@ -246,6 +255,13 @@ impl BaseClient {
             client: self,
             prefix: OBS_PREFIX.to_string(),
         }
+    }
+
+    /// Forget the cached media flow of `chat_mid` (every chat with `None`),
+    /// so the next media send asks `determineMediaMessageFlow` again. Call
+    /// it when LINE says `REFRESH_MEDIA_FLOW`.
+    pub fn drop_media_flow(&self, chat_mid: Option<&str>) {
+        self.obs_state.flows.remove(chat_mid);
     }
 
     /// Forget the OBS access token so the next upload acquires a new one.
@@ -428,12 +444,29 @@ impl<'a> Obs<'a> {
         duration_ms: Option<u64>,
     ) -> Result<ObsUpload> {
         self.client.require_token()?;
+        let reqseq = self.client.get_reqseq("talk").await?;
+        self.upload_obj_talk_with_seq(to, o_type, file, oid, duration_ms, reqseq, self.client)
+            .await
+    }
+
+    /// [`upload_obj_talk`](Self::upload_obj_talk) with a given `reqseq`, so
+    /// a media send keeps one request number across its retries.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn upload_obj_talk_with_seq(
+        &self,
+        to: &str,
+        o_type: ObjType,
+        file: ObsFile,
+        oid: Option<&str>,
+        duration_ms: Option<u64>,
+        reqseq: i64,
+        tokens: &dyn token::ObsTokenSource,
+    ) -> Result<ObsUpload> {
         let ext = file
             .mime
             .as_deref()
             .and_then(mime::extension)
             .unwrap_or("undefined");
-        let reqseq = self.client.get_reqseq("talk").await?;
         let name = file.name.clone().unwrap_or_else(|| format!("linejs.{ext}"));
         let mut params: Vec<(String, String)> = vec![
             ("ver".into(), "2.0".into()),
@@ -476,7 +509,7 @@ impl<'a> Obs<'a> {
             // Square uploads keep the session token they have always used.
             self.upload_object_for_service(opts).await
         } else {
-            self.upload_with_obs_token(opts, self.client).await
+            self.upload_with_obs_token(opts, tokens).await
         }
     }
 
@@ -500,6 +533,22 @@ impl<'a> Obs<'a> {
         }
         ensure_ok(status, "Object upload failed")?;
         Ok(up)
+    }
+
+    /// Cached flows of `chat_mid`, or ask `determineMediaMessageFlow`.
+    pub async fn media_flows(&self, chat_mid: &str) -> Result<MediaFlows> {
+        let cache = &self.client.obs_state.flows;
+        if let Some(flows) = cache.get(chat_mid, Instant::now()) {
+            return Ok(flows);
+        }
+        let res = self
+            .client
+            .talk()
+            .determine_media_message_flow(crate::tv!({"request": {"chatMid": chat_mid}}))
+            .await?;
+        let (flows, ttl) = MediaFlows::from_response(&res);
+        cache.insert(chat_mid, flows, ttl, Instant::now());
+        Ok(flows)
     }
 
     /// Raw upload to `/r/{obs_path}` with the session token.

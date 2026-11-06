@@ -1,4 +1,5 @@
-//! Ports of linejs `obs/upload_e2ee.test.ts` and `obs/download_status.test.ts`.
+//! Media send flow (ports of linejs `obs/upload_e2ee.test.ts`, extended to
+//! the Android flow) and `obs/download_status.test.ts`.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -10,182 +11,424 @@ use indexmap::IndexMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-use super::e2ee::{E2eeMediaBackend, upload_media_by_e2ee};
+use super::e2ee::{MediaBackend, MediaSend, send_media, upload_media_by_e2ee, v2_params};
+use super::flow::MediaFlowCache;
 use super::token::{ObsTokenCache, ObsTokenSource};
 use super::*;
 use crate::device::Device;
+use crate::e2ee::E2eeSendRecovery;
+use crate::e2ee::media::{MEDIA_CHUNK_SIZE, MediaHmacVersion, decrypt_media};
 use crate::thrift::Value;
 
-type Sent = (String, i32, Vec<Vec<u8>>, IndexMap<String, String>);
+/// One `send` call: `(to, contentType, metadata, seq)`.
+type Sent = (String, i32, IndexMap<String, String>, i64);
+/// One V2 upload: `(data, obs_path, params)`.
+type Upload = (Bytes, String, Vec<(String, String)>);
+/// One V1 upload: `(o_type, size, duration, reqseq)`.
+type PlainUpload = (ObjType, usize, Option<u64>, i64);
 
-#[derive(Default)]
+/// Records every side effect; answers with `flows` and fails sends with
+/// the codes in `send_errors`, in order.
 struct Fake {
-    /// `(size, obs_path)` per upload.
-    records: Mutex<Vec<(usize, String)>>,
-    /// Key material passed to message encryption.
-    key_materials: Mutex<Vec<String>>,
+    flows: Result<MediaFlows>,
+    flow_calls: Mutex<u32>,
+    dropped: Mutex<Vec<String>>,
+    uploads: Mutex<Vec<Upload>>,
+    plain: Mutex<Vec<PlainUpload>>,
+    /// `(key material, file name)` per encryption.
+    encrypted: Mutex<Vec<(String, Option<String>)>>,
+    prepared: Mutex<Vec<E2eeSendRecovery>>,
+    send_errors: Mutex<VecDeque<&'static str>>,
     sent: Mutex<Vec<Sent>>,
 }
 
+impl Default for Fake {
+    fn default() -> Self {
+        Self::with_flows(MediaFlows::all(MediaFlow::V2))
+    }
+}
+
+impl Fake {
+    fn with_flows(flows: MediaFlows) -> Self {
+        Self {
+            flows: Ok(flows),
+            flow_calls: Mutex::default(),
+            dropped: Mutex::default(),
+            uploads: Mutex::default(),
+            plain: Mutex::default(),
+            encrypted: Mutex::default(),
+            prepared: Mutex::default(),
+            send_errors: Mutex::default(),
+            sent: Mutex::default(),
+        }
+    }
+    fn failing_sends(codes: &[&'static str]) -> Self {
+        let fake = Self::default();
+        fake.send_errors.lock().unwrap().extend(codes);
+        fake
+    }
+    fn sizes(&self) -> Vec<usize> {
+        self.uploads
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|u| u.0.len())
+            .collect()
+    }
+    fn path(&self, i: usize) -> String {
+        self.uploads.lock().unwrap()[i].1.clone()
+    }
+    fn blob(&self, i: usize) -> Bytes {
+        self.uploads.lock().unwrap()[i].0.clone()
+    }
+    fn param(&self, i: usize, key: &str) -> String {
+        self.uploads.lock().unwrap()[i]
+            .2
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default()
+    }
+    fn key_material(&self) -> String {
+        self.encrypted.lock().unwrap()[0].0.clone()
+    }
+    fn metadata(&self) -> IndexMap<String, String> {
+        let sent = self.sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        sent[0].2.clone()
+    }
+}
+
+fn talk_error(code: &str) -> Error {
+    Error::Request {
+        method: "sendMessage".into(),
+        path: "/S4".into(),
+        data: crate::tv!({"code": code}),
+    }
+}
+
 #[async_trait]
-impl E2eeMediaBackend for Fake {
+impl MediaBackend for Fake {
+    async fn reqseq(&self) -> Result<i64> {
+        Ok(41)
+    }
+    async fn media_flows(&self, _chat: &str) -> Result<MediaFlows> {
+        *self.flow_calls.lock().unwrap() += 1;
+        match &self.flows {
+            Ok(f) => Ok(*f),
+            Err(_) => Err(Error::internal("RequestError", "offline")),
+        }
+    }
+    fn drop_media_flow(&self, chat: &str) {
+        self.dropped.lock().unwrap().push(chat.to_string());
+    }
     async fn upload(
         &self,
         data: Bytes,
         obs_path: String,
-        _params: Vec<(String, String)>,
+        params: Vec<(String, String)>,
     ) -> Result<String> {
-        self.records.lock().unwrap().push((data.len(), obs_path));
+        self.uploads.lock().unwrap().push((data, obs_path, params));
         Ok("OBJ-1".into())
+    }
+    async fn upload_plain(
+        &self,
+        _to: &str,
+        o_type: ObjType,
+        file: ObsFile,
+        duration_ms: Option<u64>,
+        reqseq: i64,
+    ) -> Result<ObsUpload> {
+        self.plain
+            .lock()
+            .unwrap()
+            .push((o_type, file.len(), duration_ms, reqseq));
+        Ok(ObsUpload {
+            obj_id: "PLAIN-1".into(),
+            obj_hash: "HASH".into(),
+            headers: Default::default(),
+        })
     }
     async fn encrypt_message(
         &self,
         _to: &str,
         key_material: &str,
-        _name: &str,
+        file_name: Option<&str>,
         _ct: i32,
     ) -> Result<Vec<Vec<u8>>> {
-        self.key_materials
+        self.encrypted
             .lock()
             .unwrap()
-            .push(key_material.to_string());
+            .push((key_material.to_string(), file_name.map(str::to_string)));
         Ok(vec![Vec::new()])
+    }
+    async fn prepare_resend(&self, _to: &str, recovery: E2eeSendRecovery) -> Result<()> {
+        self.prepared.lock().unwrap().push(recovery);
+        Ok(())
     }
     async fn send(
         &self,
         to: &str,
-        chunks: Vec<Vec<u8>>,
+        _chunks: Vec<Vec<u8>>,
         content_type: i32,
         metadata: IndexMap<String, String>,
+        seq: i64,
     ) -> Result<Value> {
         self.sent
             .lock()
             .unwrap()
-            .push((to.to_string(), content_type, chunks, metadata));
-        Ok(crate::tv!({"id": "m-1"}))
+            .push((to.to_string(), content_type, metadata, seq));
+        match self.send_errors.lock().unwrap().pop_front() {
+            Some(code) => Err(talk_error(code)),
+            None => Ok(crate::tv!({"id": "m-1"})),
+        }
     }
 }
 
-impl Fake {
-    fn sizes(&self) -> Vec<usize> {
-        self.records.lock().unwrap().iter().map(|r| r.0).collect()
-    }
-    fn path(&self, i: usize) -> String {
-        self.records.lock().unwrap()[i].1.clone()
-    }
-    fn metadata(&self) -> IndexMap<String, String> {
-        let sent = self.sent.lock().unwrap();
-        assert_eq!(sent.len(), 1);
-        sent[0].3.clone()
-    }
-}
-
-fn upload(data: &[u8], o_type: ObjType) -> E2eeMediaUpload {
-    E2eeMediaUpload {
-        file: ObsFile::new(data.to_vec()),
-        o_type,
+fn media(data: &[u8], o_type: ObjType) -> MediaSend {
+    MediaSend {
         to: "u-recipient".into(),
-        ..Default::default()
+        o_type,
+        file: ObsFile::new(data.to_vec()),
+        opts: MediaOptions::default(),
     }
 }
 
-async fn run(opts: E2eeMediaUpload) -> Fake {
-    let fake = Fake::default();
-    upload_media_by_e2ee(&fake, opts).await.unwrap();
+async fn run_with(fake: Fake, m: MediaSend) -> (Fake, Result<SentMedia>) {
+    let res = send_media(&fake, m).await;
+    (fake, res)
+}
+
+async fn run(m: MediaSend) -> Fake {
+    let (fake, res) = run_with(Fake::default(), m).await;
+    res.unwrap();
     fake
 }
 
+// --- uploads ---------------------------------------------------------------
+
 #[tokio::test]
-async fn without_preview_full_edata_uploaded_twice() {
-    let fake = run(upload(&[0; 100_000], ObjType::Image)).await;
+async fn image_without_preview_is_its_own_preview() {
+    let fake = run(media(&[0; 100_000], ObjType::Image)).await;
     let sizes = fake.sizes();
-    assert_eq!(sizes.len(), 2);
-    assert_eq!(sizes[0], sizes[1]);
-    assert!(fake.path(1).ends_with("__ud-preview"));
+    assert_eq!(sizes, [100_032, 100_032]);
+    assert!(fake.path(0).starts_with("talk/emi/reqid-"));
+    assert_eq!(fake.path(1), "talk/emi/OBJ-1__ud-preview");
 }
 
 #[tokio::test]
-async fn with_preview_uses_small_blob_and_same_key() {
-    let mut opts = upload(&[0; 100_000], ObjType::Image);
-    opts.preview = Some(Bytes::from(vec![0u8; 2_000]));
-    let fake = run(opts).await;
-    assert_eq!(fake.sizes(), [100_032, 2_032]);
-    assert!(fake.path(1).ends_with("__ud-preview"));
-}
-
-#[tokio::test]
-async fn preview_is_encrypted_with_the_message_key_material() {
-    // Same key material ⇒ the preview ciphertext opens with the key sent in
-    // the message.
-    let preview = b"thumbnail".to_vec();
-    struct Capture(Fake, Mutex<Vec<Bytes>>);
-    #[async_trait]
-    impl E2eeMediaBackend for Capture {
-        async fn upload(&self, data: Bytes, p: String, q: Vec<(String, String)>) -> Result<String> {
-            self.1.lock().unwrap().push(data.clone());
-            self.0.upload(data, p, q).await
-        }
-        async fn encrypt_message(
-            &self,
-            to: &str,
-            k: &str,
-            n: &str,
-            ct: i32,
-        ) -> Result<Vec<Vec<u8>>> {
-            self.0.encrypt_message(to, k, n, ct).await
-        }
-        async fn send(
-            &self,
-            to: &str,
-            c: Vec<Vec<u8>>,
-            ct: i32,
-            m: IndexMap<String, String>,
-        ) -> Result<Value> {
-            self.0.send(to, c, ct, m).await
-        }
-    }
-    let cap = Capture(Fake::default(), Mutex::default());
-    let mut opts = upload(b"full image", ObjType::Image);
-    opts.preview = Some(Bytes::from(preview.clone()));
-    upload_media_by_e2ee(&cap, opts).await.unwrap();
-    let key = cap.0.key_materials.lock().unwrap()[0].clone();
-    let blobs = cap.1.lock().unwrap();
+async fn image_preview_is_small_and_opens_with_the_message_key() {
+    let mut m = media(b"full image", ObjType::Image);
+    m.opts = MediaOptions::new().preview(b"thumbnail".to_vec());
+    let fake = run(m).await;
+    assert_eq!(fake.sizes(), [10 + 32, 9 + 32]);
+    let key = fake.key_material();
     assert_eq!(
-        crypto::decrypt_by_key_material_b64(&blobs[0], &key).unwrap(),
+        crypto::decrypt_by_key_material_b64(&fake.blob(0), &key).unwrap(),
         b"full image"
     );
     assert_eq!(
-        crypto::decrypt_by_key_material_b64(&blobs[1], &key).unwrap(),
-        preview
+        crypto::decrypt_by_key_material_b64(&fake.blob(1), &key).unwrap(),
+        b"thumbnail"
     );
 }
 
 #[tokio::test]
-async fn file_type_has_no_preview_upload() {
-    let mut opts = upload(&[0; 50_000], ObjType::File);
-    opts.file = opts.file.name("report.pdf");
-    let fake = run(opts).await;
-    assert_eq!(fake.sizes().len(), 1);
+async fn file_and_audio_have_no_preview() {
+    for o_type in [ObjType::File, ObjType::Audio] {
+        let mut m = media(&[0; 50_000], o_type);
+        m.opts = MediaOptions::new().preview(vec![1u8; 10]);
+        assert_eq!(run(m).await.sizes(), [50_032], "{o_type}");
+    }
 }
 
 #[tokio::test]
-async fn video_carries_duration() {
-    let mut opts = upload(&[0; 1_000], ObjType::Video);
-    opts.duration_ms = Some(4200.4);
-    assert_eq!(run(opts).await.metadata()["DURATION"], "4200");
-}
-
-#[tokio::test]
-async fn no_duration_when_omitted_or_on_image() {
+async fn video_uses_chunk_hashes_and_no_fake_preview() {
+    let raw: Vec<u8> = (0..2 * MEDIA_CHUNK_SIZE + 5).map(|i| i as u8).collect();
+    let mut m = media(&raw, ObjType::Video);
+    m.file = m.file.name("holiday.mov");
+    let fake = run(m).await;
+    // Main object and hash object; no preview without a thumbnail.
+    assert_eq!(fake.sizes(), [raw.len() + 32, 3 * 32]);
+    assert!(fake.path(0).starts_with("talk/emv/reqid-"));
+    assert_eq!(fake.path(1), "talk/emv/OBJ-1__ud-hash");
+    assert_eq!(fake.param(1, "name"), "hash");
+    // The local name is not uploaded; the extension is kept.
+    let name = fake.param(0, "name");
     assert!(
-        !run(upload(&[0; 1_000], ObjType::Video))
-            .await
-            .metadata()
-            .contains_key("DURATION")
+        name.ends_with(".mov") && !name.contains("holiday"),
+        "{name}"
     );
-    let mut opts = upload(&[0; 1_000], ObjType::Image);
-    opts.duration_ms = Some(4200.0);
-    assert!(!run(opts).await.metadata().contains_key("DURATION"));
+
+    use base64::Engine;
+    let key = base64::engine::general_purpose::STANDARD
+        .decode(fake.key_material())
+        .unwrap();
+    let main = fake.blob(0);
+    let (plain, version) = decrypt_media(&main, &key).unwrap();
+    assert_eq!(plain, raw);
+    assert_eq!(version, MediaHmacVersion::V2);
+    // The hash object is the digests of the ciphertext chunks.
+    let body = &main[..raw.len()];
+    let digests: Vec<u8> = crate::e2ee::media::chunk_hashes(body)
+        .into_iter()
+        .flatten()
+        .collect();
+    assert_eq!(fake.blob(1).as_ref(), digests.as_slice());
+}
+
+#[tokio::test]
+async fn video_with_thumbnail_uploads_preview_then_hash() {
+    let mut m = media(&[7; 1000], ObjType::Video);
+    m.opts = MediaOptions::new()
+        .preview(vec![0xffu8; 20])
+        .duration_ms(4200);
+    let fake = run(m).await;
+    assert_eq!(fake.sizes(), [1032, 52, 32]);
+    assert_eq!(fake.path(1), "talk/emv/OBJ-1__ud-preview");
+    assert_eq!(fake.param(1, "name"), "preview.jpg");
+    assert_eq!(fake.path(2), "talk/emv/OBJ-1__ud-hash");
+    let preview = crypto::decrypt_by_key_material_b64(&fake.blob(1), &fake.key_material());
+    assert_eq!(preview.unwrap(), vec![0xffu8; 20]);
+}
+
+#[tokio::test]
+async fn v2_upload_params_match_the_app() {
+    let mut m = media(&[0; 10], ObjType::File);
+    m.file = m.file.name("report.pdf");
+    let fake = run(m).await;
+    assert_eq!(fake.param(0, "type"), "FILE");
+    assert_eq!(fake.param(0, "ver"), "2.0");
+    assert_eq!(fake.param(0, "name"), "report.pdf");
+    assert_eq!(fake.param(0, "range"), "bytes 0-41/42");
+    assert_eq!(fake.param(0, "cat"), "");
+    assert_eq!(
+        v2_params("hash", 64),
+        [
+            ("ver".to_string(), "2.0".to_string()),
+            ("name".to_string(), "hash".to_string()),
+            ("type".to_string(), "FILE".to_string()),
+            ("range".to_string(), "bytes 0-63/64".to_string()),
+        ]
+    );
+}
+
+// --- metadata --------------------------------------------------------------
+
+fn meta(pairs: &[(&str, &str)]) -> IndexMap<String, String> {
+    pairs
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+}
+
+#[tokio::test]
+async fn image_metadata() {
+    let mut m = media(&[0; 1000], ObjType::Image);
+    m.file = m.file.name("Photo.JPEG");
+    m.opts = MediaOptions::new().size(640, 480);
+    assert_eq!(
+        run(m).await.metadata(),
+        meta(&[
+            ("SID", "emi"),
+            ("OID", "OBJ-1"),
+            ("FILE_SIZE", "1000"),
+            ("e2eeVersion", "2"),
+            (
+                "MEDIA_CONTENT_INFO",
+                r#"{"category":"original","fileSize":1000,"extension":"jpeg","width":640,"height":480}"#
+            ),
+        ])
+    );
+}
+
+#[tokio::test]
+async fn gif_is_animated() {
+    let fake = run(media(&[0; 10], ObjType::Gif)).await;
+    assert_eq!(
+        fake.metadata()["MEDIA_CONTENT_INFO"],
+        r#"{"category":"original","fileSize":10,"extension":"gif","animated":true}"#
+    );
+}
+
+#[tokio::test]
+async fn video_and_audio_metadata() {
+    let mut m = media(&[0; 1000], ObjType::Video);
+    m.opts = MediaOptions::new().duration_ms(4200).size(1, 1);
+    m.to = "c-group".into();
+    let fake = run(m).await;
+    assert_eq!(
+        fake.metadata(),
+        meta(&[
+            ("SID", "emv"),
+            ("OID", "OBJ-1"),
+            ("FILE_SIZE", "1000"),
+            ("e2eeVersion", "2"),
+            ("DURATION", "4200"),
+        ])
+    );
+    {
+        let sent = fake.sent.lock().unwrap();
+        assert_eq!((sent[0].0.as_str(), sent[0].1), ("c-group", 2));
+    }
+
+    let mut m = media(&[0; 10], ObjType::Audio);
+    m.opts = MediaOptions::new().duration_ms(900);
+    let fake = run(m).await;
+    assert_eq!(fake.metadata()["SID"], "ema");
+    assert_eq!(fake.metadata()["DURATION"], "900");
+}
+
+#[tokio::test]
+async fn file_name_only_in_file_payloads() {
+    let mut m = media(&[0; 10], ObjType::File);
+    m.file = m.file.name("report.pdf");
+    let fake = run(m).await;
+    assert_eq!(
+        fake.encrypted.lock().unwrap()[0].1.as_deref(),
+        Some("report.pdf")
+    );
+    assert!(!fake.metadata().contains_key("FILE_NAME"));
+    assert!(!fake.metadata().contains_key("MEDIA_CONTENT_INFO"));
+
+    let mut m = media(&[0; 10], ObjType::Image);
+    m.file = m.file.name("cat.png");
+    let fake = run(m).await;
+    assert_eq!(fake.encrypted.lock().unwrap()[0].1, None);
+}
+
+#[test]
+fn content_metadata_without_size_or_duration() {
+    let m = e2ee_content_metadata(ObjType::Audio, "O", 0, None, &MediaOptions::default());
+    assert_eq!(
+        m,
+        meta(&[("SID", "ema"), ("OID", "O"), ("e2eeVersion", "2")])
+    );
+    let m = e2ee_content_metadata(ObjType::Image, "O", 5, None, &MediaOptions::default());
+    assert_eq!(
+        m["MEDIA_CONTENT_INFO"],
+        r#"{"category":"original","fileSize":5,"extension":"jpg"}"#
+    );
+}
+
+#[tokio::test]
+async fn upload_media_by_e2ee_rounds_durations() {
+    let fake = Fake::default();
+    upload_media_by_e2ee(
+        &fake,
+        E2eeMediaUpload {
+            file: ObsFile::new(vec![0u8; 10]),
+            o_type: ObjType::Video,
+            to: "u-recipient".into(),
+            duration_ms: Some(4200.5),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(fake.metadata()["DURATION"], "4201");
+    // Forced E2EE does not ask for the chat's flow.
+    assert_eq!(*fake.flow_calls.lock().unwrap(), 0);
 }
 
 #[test]
@@ -225,64 +468,257 @@ fn valid_durations_round_like_math_round() {
             Some(expected)
         );
     }
+    assert_eq!(
+        e2ee_duration(ObjType::Audio, Some(10.0)).as_deref(),
+        Some("10")
+    );
+    assert_eq!(e2ee_duration(ObjType::Image, Some(10.0)), None);
 }
 
 #[tokio::test]
-async fn duration_does_not_change_non_video_metadata() {
-    for o_type in [ObjType::Audio, ObjType::File, ObjType::Image, ObjType::Gif] {
-        let mut with = upload(b"media", o_type);
-        with.duration_ms = Some(4200.0);
+async fn invalid_mid_is_rejected_when_e2ee_is_forced() {
+    let fake = Fake::default();
+    let err = upload_media_by_e2ee(
+        &fake,
+        E2eeMediaUpload {
+            file: ObsFile::new(b"x".to_vec()),
+            to: "s-square".into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.to_string(), "ObsError: Invalid mid");
+}
+
+// --- size limits -----------------------------------------------------------
+
+#[test]
+fn size_limits() {
+    assert!(check_media_size(ObjType::File, MAX_FILE_SIZE).is_ok());
+    let err = check_media_size(ObjType::File, MAX_FILE_SIZE + 1).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "MediaTooLarge: The file is larger than 1GB."
+    );
+    assert!(check_media_size(ObjType::Video, MAX_VIDEO_SIZE).is_ok());
+    let err = check_media_size(ObjType::Video, MAX_VIDEO_SIZE + 1).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "MediaTooLarge: The video is larger than 200MB."
+    );
+    assert!(check_media_size(ObjType::Image, MAX_VIDEO_SIZE + 1).is_ok());
+}
+
+#[tokio::test]
+async fn oversized_video_fails_before_upload() {
+    let (fake, res) = run_with(
+        Fake::default(),
+        media(&vec![0u8; MAX_VIDEO_SIZE + 1], ObjType::Video),
+    )
+    .await;
+    assert!(res.unwrap_err().to_string().starts_with("MediaTooLarge"));
+    assert!(fake.sizes().is_empty());
+    assert!(fake.plain.lock().unwrap().is_empty());
+}
+
+// --- flow selection --------------------------------------------------------
+
+#[tokio::test]
+async fn v1_flow_uploads_plain_with_one_reqseq() {
+    let flows = MediaFlows {
+        image: MediaFlow::V2,
+        ..MediaFlows::all(MediaFlow::V1)
+    };
+    let mut m = media(&[0; 10], ObjType::Video);
+    m.opts = MediaOptions::new().duration_ms(1500);
+    let (fake, res) = run_with(Fake::with_flows(flows), m).await;
+    assert!(matches!(res.unwrap(), SentMedia::Plain { obj_id, .. } if obj_id == "PLAIN-1"));
+    assert_eq!(
+        *fake.plain.lock().unwrap(),
+        [(ObjType::Video, 10, Some(1500), 41)]
+    );
+    assert!(fake.sizes().is_empty());
+    assert!(fake.sent.lock().unwrap().is_empty());
+
+    let (fake, res) = run_with(Fake::with_flows(flows), media(&[0; 10], ObjType::Gif)).await;
+    assert!(matches!(res.unwrap(), SentMedia::E2ee(_)));
+    assert_eq!(fake.sizes().len(), 2);
+}
+
+#[tokio::test]
+async fn plain_requests_and_rooms_skip_the_flow_call() {
+    let mut m = media(&[0; 10], ObjType::Image);
+    m.opts = MediaOptions::new().e2ee(false);
+    let (fake, res) = run_with(Fake::default(), m).await;
+    assert!(matches!(res.unwrap(), SentMedia::Plain { .. }));
+    assert_eq!(*fake.flow_calls.lock().unwrap(), 0);
+
+    let mut m = media(&[0; 10], ObjType::Image);
+    m.to = "r-room".into();
+    let (fake, res) = run_with(Fake::default(), m).await;
+    assert!(matches!(res.unwrap(), SentMedia::Plain { .. }));
+    assert_eq!(*fake.flow_calls.lock().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn flow_lookup_failure_keeps_encrypting() {
+    let fake = Fake {
+        flows: Err(Error::internal("x", "y")),
+        ..Fake::default()
+    };
+    let (fake, res) = run_with(fake, media(&[0; 10], ObjType::File)).await;
+    assert!(matches!(res.unwrap(), SentMedia::E2ee(_)));
+    assert_eq!(*fake.flow_calls.lock().unwrap(), 1);
+}
+
+#[test]
+fn flows_from_response_default_to_v1() {
+    let res = crate::tv!({"cacheTtlMillis": 60_000});
+    let mut res = res;
+    res.insert(
+        "flowMap",
+        Value::Map(vec![
+            (Value::Int(1), Value::Int(2)),
+            (Value::Int(2), Value::Int(1)),
+            (Value::Int(14), Value::Int(2)),
+            (Value::Int(3), Value::Int(9)),
+        ]),
+    );
+    let (flows, ttl) = MediaFlows::from_response(&res);
+    assert_eq!(
+        flows,
+        MediaFlows {
+            image: MediaFlow::V2,
+            video: MediaFlow::V1,
+            audio: MediaFlow::V1,
+            file: MediaFlow::V2,
+        }
+    );
+    assert_eq!(flows.get(ObjType::Gif), MediaFlow::V2);
+    assert_eq!(ttl, Duration::from_secs(60));
+
+    let (flows, ttl) = MediaFlows::from_response(&Value::object());
+    assert_eq!(flows, MediaFlows::all(MediaFlow::V1));
+    assert_eq!(ttl, Duration::ZERO);
+}
+
+#[test]
+fn flow_cache_honours_ttl_and_drops() {
+    let cache = MediaFlowCache::default();
+    let t0 = Instant::now();
+    let v2 = MediaFlows::all(MediaFlow::V2);
+    cache.insert("c1", v2, Duration::from_secs(10), t0);
+    cache.insert("c2", v2, Duration::from_secs(10), t0);
+    cache.insert("c3", v2, Duration::ZERO, t0);
+    assert_eq!(cache.get("c1", t0 + Duration::from_secs(9)), Some(v2));
+    assert_eq!(cache.get("c1", t0 + Duration::from_secs(10)), None);
+    assert_eq!(cache.get("c3", t0), None);
+    cache.remove(Some("c2"));
+    assert_eq!(cache.get("c2", t0), None);
+    cache.insert("c1", v2, Duration::from_secs(10), t0);
+    cache.remove(None);
+    assert_eq!(cache.get("c1", t0), None);
+}
+
+#[tokio::test]
+async fn media_flows_are_cached_per_chat() {
+    let c = client();
+    let v1 = MediaFlows::all(MediaFlow::V1);
+    c.obs_state
+        .flows
+        .insert("c-group", v1, Duration::from_secs(60), Instant::now());
+    // Served from the cache: no request to LINE.
+    assert_eq!(c.obs().media_flows("c-group").await.unwrap(), v1);
+    c.drop_media_flow(Some("c-group"));
+    assert_eq!(c.obs_state.flows.get("c-group", Instant::now()), None);
+}
+
+// --- E2EE send recovery ----------------------------------------------------
+
+#[tokio::test]
+async fn reencrypts_and_resends_without_uploading_again() {
+    let (fake, res) = run_with(
+        Fake::failing_sends(&["E2EE_RETRY_ENCRYPT", "E2EE_UPDATE_RECEIVER_KEY"]),
+        media(&[0; 10], ObjType::File),
+    )
+    .await;
+    assert!(matches!(res.unwrap(), SentMedia::E2ee(_)));
+    assert_eq!(fake.sizes().len(), 1);
+    let encrypted = fake.encrypted.lock().unwrap();
+    assert_eq!(encrypted.len(), 3);
+    assert!(encrypted.iter().all(|e| e.0 == encrypted[0].0));
+    let sent = fake.sent.lock().unwrap();
+    assert!(sent.iter().all(|s| s.3 == 41 && s.2["OID"] == "OBJ-1"));
+    assert_eq!(
+        *fake.prepared.lock().unwrap(),
+        [E2eeSendRecovery::Reencrypt, E2eeSendRecovery::Reencrypt]
+    );
+}
+
+#[tokio::test]
+async fn recreates_the_group_key() {
+    let mut m = media(&[0; 10], ObjType::Image);
+    m.to = "c-group".into();
+    let (fake, res) = run_with(Fake::failing_sends(&["E2EE_RECREATE_GROUP_KEY"]), m).await;
+    assert!(matches!(res.unwrap(), SentMedia::E2ee(_)));
+    assert_eq!(
+        *fake.prepared.lock().unwrap(),
+        [E2eeSendRecovery::RecreateGroupKey]
+    );
+    assert_eq!(fake.sent.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn gives_up_after_three_sends() {
+    let (fake, res) = run_with(
+        Fake::failing_sends(&["E2EE_RETRY_ENCRYPT"; 5]),
+        media(&[0; 10], ObjType::File),
+    )
+    .await;
+    assert_eq!(res.unwrap_err().code(), Some("E2EE_RETRY_ENCRYPT"));
+    assert_eq!(fake.sent.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn other_errors_are_returned_at_once() {
+    let (fake, res) = run_with(
+        Fake::failing_sends(&["NOT_A_MEMBER"]),
+        media(&[0; 10], ObjType::File),
+    )
+    .await;
+    assert_eq!(res.unwrap_err().code(), Some("NOT_A_MEMBER"));
+    assert_eq!(fake.sent.lock().unwrap().len(), 1);
+    assert!(fake.plain.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn plain_codes_drop_the_flow_and_upload_v1() {
+    for code in [
+        "E2EE_RETRY_PLAIN",
+        "E2EE_GROUP_TOO_MANY_MEMBERS",
+        "REFRESH_MEDIA_FLOW",
+    ] {
+        let mut m = media(&[0; 10], ObjType::Audio);
+        m.opts = MediaOptions::new().duration_ms(700);
+        let (fake, res) = run_with(Fake::failing_sends(&[code]), m).await;
+        assert!(matches!(res.unwrap(), SentMedia::Plain { .. }), "{code}");
+        assert_eq!(*fake.dropped.lock().unwrap(), ["u-recipient"]);
         assert_eq!(
-            run(with).await.metadata(),
-            run(upload(b"media", o_type)).await.metadata()
+            *fake.plain.lock().unwrap(),
+            [(ObjType::Audio, 10, Some(700), 41)]
         );
+        assert_eq!(fake.sent.lock().unwrap().len(), 1);
     }
 }
 
 #[tokio::test]
-async fn video_metadata_and_preview() {
-    let fake = run(E2eeMediaUpload {
-        file: ObsFile::new(vec![0u8; 1000])
-            .mime("video/mp4")
-            .name("clip.mp4"),
-        o_type: ObjType::Video,
-        to: "c-group".into(),
-        preview: Some(Bytes::from(vec![0u8; 20])),
-        duration_ms: Some(4200.0),
-    })
-    .await;
-    let expected: IndexMap<String, String> = [
-        ("SID", "emv"),
-        ("OID", "OBJ-1"),
-        ("FILE_SIZE", "1032"),
-        ("e2eeVersion", "2"),
-        (
-            "MEDIA_CONTENT_INFO",
-            r#"{"category":"original","fileSize":1032,"extension":"mp4","animated":false}"#,
-        ),
-        ("DURATION", "4200"),
-    ]
-    .into_iter()
-    .map(|(k, v)| (k.to_string(), v.to_string()))
-    .collect();
-    assert_eq!(fake.metadata(), expected);
-    assert_eq!(fake.sizes(), [1032, 52]);
-    assert!(fake.path(0).starts_with("talk/emv/reqid-"));
-    assert_eq!(fake.path(1), "talk/emv/OBJ-1__ud-preview");
-    let sent = fake.sent.lock().unwrap();
-    assert_eq!(sent[0].0, "c-group");
-    assert_eq!(sent[0].1, 2);
-    assert_eq!(sent[0].2, vec![Vec::<u8>::new()]);
-}
-
-#[tokio::test]
-async fn invalid_mid_is_rejected() {
-    let mut opts = upload(b"x", ObjType::Image);
-    opts.to = "s-square".into();
-    let err = upload_media_by_e2ee(&Fake::default(), opts)
-        .await
-        .unwrap_err();
-    assert_eq!(err.to_string(), "ObsError: Invalid mid");
+async fn forced_e2ee_does_not_fall_back_to_plain() {
+    let mut m = media(&[0; 10], ObjType::File);
+    m.opts = MediaOptions::new().e2ee(true);
+    let (fake, res) = run_with(Fake::failing_sends(&["E2EE_RETRY_PLAIN"]), m).await;
+    assert_eq!(res.unwrap_err().code(), Some("E2EE_RETRY_PLAIN"));
+    assert!(fake.plain.lock().unwrap().is_empty());
 }
 
 // --- OBS token -------------------------------------------------------------
@@ -648,6 +1084,59 @@ async fn upload_without_object_id_is_obs_error() {
 }
 
 #[tokio::test]
+async fn v2_upload_sends_obs_token_params_and_content_type() {
+    use base64::Engine;
+    let (prefix, urls, heads) = serve_heads(vec![uploaded("OID-9")]).await;
+    let c = client();
+    c.obs_state
+        .token
+        .set("obs-token", Duration::from_secs(60))
+        .await;
+    let oid = c
+        .obs()
+        .with_prefix(prefix)
+        .upload(
+            Bytes::from_static(b"data"),
+            "talk/emi/reqid-1".into(),
+            v2_params("cat.PNG", 4),
+        )
+        .await
+        .unwrap();
+    assert_eq!(oid, "OID-9");
+    assert_eq!(*urls.lock().unwrap(), ["/r/talk/emi/reqid-1"]);
+    let head = heads.lock().unwrap()[0].clone();
+    assert_eq!(header(&head, "x-line-access"), Some("obs-token"));
+    assert_eq!(header(&head, "content-type"), Some("image/png"));
+    let params = base64::engine::general_purpose::STANDARD
+        .decode(header(&head, "x-obs-params").unwrap())
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(params).unwrap(),
+        r#"{"type":"FILE","ver":"2.0","name":"cat.PNG","range":"bytes 0-3/4"}"#
+    );
+}
+
+#[tokio::test]
+async fn hash_upload_has_empty_content_type() {
+    let (prefix, _, heads) = serve_heads(vec![uploaded("OID-9")]).await;
+    let c = client();
+    c.obs_state
+        .token
+        .set("obs-token", Duration::from_secs(60))
+        .await;
+    c.obs()
+        .with_prefix(prefix)
+        .upload(
+            Bytes::from_static(b"data"),
+            "talk/emv/OID-9__ud-hash".into(),
+            v2_params("hash", 4),
+        )
+        .await
+        .unwrap();
+    assert_eq!(header(&heads.lock().unwrap()[0], "content-type"), Some(""));
+}
+
+#[tokio::test]
 async fn upload_401_gets_a_new_token_and_uploads_once_more() {
     let (prefix, urls, heads) = serve_heads(vec![canned(401, None, b""), uploaded("OID-2")]).await;
     let c = client();
@@ -718,6 +1207,38 @@ async fn without_obs_token_the_session_token_is_used() {
         header(&heads.lock().unwrap()[0], "x-line-access"),
         Some("token")
     );
+}
+
+#[tokio::test]
+async fn v1_talk_upload_uses_the_obs_token_and_given_reqseq() {
+    use base64::Engine;
+    let (prefix, urls, heads) = serve_heads(vec![uploaded("OID-4")]).await;
+    let c = client();
+    c.obs_state
+        .token
+        .set("obs-token", Duration::from_secs(60))
+        .await;
+    let obs = c.obs().with_prefix(prefix);
+    MediaBackend::upload_plain(
+        &obs,
+        "c-group",
+        ObjType::Video,
+        ObsFile::new(b"mp4".to_vec()).name("a.mp4"),
+        Some(3000),
+        77,
+    )
+    .await
+    .unwrap();
+    assert_eq!(*urls.lock().unwrap(), ["/r/talk/m/reqseq"]);
+    let head = heads.lock().unwrap()[0].clone();
+    assert_eq!(header(&head, "x-line-access"), Some("obs-token"));
+    let params = base64::engine::general_purpose::STANDARD
+        .decode(header(&head, "x-obs-params").unwrap())
+        .unwrap();
+    let params: serde_json::Value = serde_json::from_slice(&params).unwrap();
+    assert_eq!(params["reqseq"], "77");
+    assert_eq!(params["tomid"], "c-group");
+    assert_eq!(params["duration"], "3000");
 }
 
 #[tokio::test]
