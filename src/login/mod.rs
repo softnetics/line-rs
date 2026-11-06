@@ -15,7 +15,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use crate::base::{BaseClient, ClientEvent};
 use crate::device::Device;
 use crate::e2ee;
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorCode, Result};
 use crate::request::auth_token::parse_auth_token_input;
 use crate::request::{Parse, RequestOptions};
 use crate::thrift::{Protocol, TValue, Value};
@@ -169,6 +169,74 @@ pub fn is_valid_password(pw: &str) -> bool {
         && pw
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || "!@#$%^&*()_+-=[]{};':\"\\|,.<>/?".contains(c))
+}
+
+/// Check the E2EE key chain of a login response before it is used, as
+/// LINE for Android does (`p95/w0.java`).
+///
+/// `info` is the response's E2EE metadata (`metaData` of
+/// `qrCodeLoginV2ForSecure`, the `/LF1` `metadata`): a map, or JSON text.
+///
+/// * `errorCode = E2EE_INVALID_VERSION` (the phone can't share keys with
+///   this E2EE version) fails as an [`Error::Request`] from `method` and
+///   `path` whose [`Error::error_code`] is
+///   [`ErrorCode::E2eeInvalidVersion`](crate::error::ErrorCode::E2eeInvalidVersion).
+/// * `hashKeyChain` must equal `AES-ECB(sha256(shared ‖ "Key"),
+///   xor(sha256(encryptedKeyChain)))`, with `shared` the X25519 secret of
+///   `secret` and `publicKey`. A mismatch fails with [`Error::Crypto`]
+///   (so [`Error::is_e2ee`] is true) and the key chain is not used.
+///
+/// A response without a key chain, or without `hashKeyChain` (older
+/// flows), passes.
+pub(crate) fn check_login_key_chain(
+    info: &Value,
+    secret: &[u8],
+    method: &str,
+    path: &str,
+) -> Result<()> {
+    let parsed;
+    let meta = match info {
+        Value::String(text) => match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(v) => {
+                parsed = Value::from(v);
+                &parsed
+            }
+            Err(_) => return Ok(()),
+        },
+        v => v,
+    };
+    let error_code = match &meta["errorCode"] {
+        Value::Int(n) => Some(ErrorCode::from_number(*n)),
+        v => v.as_str().map(ErrorCode::parse),
+    };
+    if error_code == Some(ErrorCode::E2eeInvalidVersion) {
+        return Err(Error::Request {
+            method: method.to_string(),
+            path: path.to_string(),
+            data: crate::tv!({
+                "code": "E2EE_INVALID_VERSION",
+                "reason": "the phone cannot share Letter Sealing keys with this E2EE version",
+            }),
+        });
+    }
+    let bytes = |v: &Value| match v {
+        Value::String(s) => e2ee::crypto::decode_base64(s),
+        Value::Binary(b) => b.clone(),
+        _ => Vec::new(),
+    };
+    let chain = bytes(&meta["encryptedKeyChain"]);
+    let hash = bytes(&meta["hashKeyChain"]);
+    if chain.is_empty() || hash.is_empty() {
+        return Ok(());
+    }
+    let public_key = bytes(&meta["publicKey"]);
+    let expected = e2ee::crypto::encrypt_device_secret(&public_key, secret, &chain);
+    if expected != hash {
+        return Err(Error::Crypto(
+            "E2EE login key chain failed its hashKeyChain check; it was not used".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// `LoginRequest` for `loginZ` / `loginV2`, with the fields LINE for
@@ -354,7 +422,8 @@ impl BaseClient {
             self.emit(ClientEvent::UpdateQrCert(pem.to_string()));
             self.register_qr_cert(pem).await?;
         }
-        self.finish_e2ee_login(&res["4"], &secret).await?;
+        self.finish_e2ee_login(&res["4"], &secret, "qrCodeLogin")
+            .await?;
         res["2"]
             .as_str()
             .map(str::to_string)
@@ -395,7 +464,8 @@ impl BaseClient {
         } else {
             res["10"].clone()
         };
-        self.finish_e2ee_login(&e2ee_info, &secret).await?;
+        self.finish_e2ee_login(&e2ee_info, &secret, "qrCodeLoginV2ForSecure")
+            .await?;
         let token_info = &res["3"];
         self.store_v3_token(token_info).await?;
         token_info["1"].as_str().map(str::to_string).ok_or_else(|| {
@@ -418,9 +488,15 @@ impl BaseClient {
         Ok(())
     }
 
-    async fn finish_e2ee_login(&self, e2ee_info: &Value, secret: &[u8]) -> Result<()> {
+    async fn finish_e2ee_login(
+        &self,
+        e2ee_info: &Value,
+        secret: &[u8],
+        method: &str,
+    ) -> Result<()> {
         let mut decoded = None;
         if !e2ee_info.is_null() {
+            check_login_key_chain(e2ee_info, secret, method, SQR_PATH)?;
             decoded = self.decode_e2ee_key_v1(e2ee_info, secret).await?;
         }
         if decoded.is_none() {
@@ -627,6 +703,12 @@ impl BaseClient {
             .get_json("/LF1", self.verifier_headers(verifier))
             .await?;
         let meta = info["result"]["metadata"].clone();
+        check_login_key_chain(
+            &Value::from(meta.clone()),
+            secret,
+            "confirmE2EELogin",
+            "/LF1",
+        )?;
         self.decode_e2ee_key_v1(&Value::from(meta.clone()), secret)
             .await?;
         let pk = B64
@@ -976,5 +1058,52 @@ mod tests {
         assert_eq!(field(req, 3), Some(&s("Test Mac")));
         assert_eq!(field(req, 4), Some(&TValue::Bool(true)));
         assert_eq!(field(req, 5), Some(&s("nonce")));
+    }
+
+    #[test]
+    fn login_key_chain_hash_is_checked() {
+        use crate::e2ee::crypto::{encrypt_device_secret, generate_key_pair};
+        let (secret, our_public) = generate_key_pair();
+        let (phone_private, phone_public) = generate_key_pair();
+        let chain = vec![7u8; 48];
+        // The phone hashes the chain with its own private key and our
+        // public key; the shared secret is the same.
+        let hash = encrypt_device_secret(&our_public, &phone_private, &chain);
+        let meta = |hash: &[u8]| {
+            let mut m = Value::object();
+            m.insert("encryptedKeyChain", B64.encode(&chain));
+            m.insert("publicKey", B64.encode(&phone_public));
+            m.insert("hashKeyChain", B64.encode(hash));
+            m
+        };
+        assert!(check_login_key_chain(&meta(&hash), &secret, "m", SQR_PATH).is_ok());
+
+        let mut bad = hash.clone();
+        bad[0] ^= 1;
+        let err = check_login_key_chain(&meta(&bad), &secret, "m", SQR_PATH).unwrap_err();
+        assert!(matches!(err, Error::Crypto(_)) && err.is_e2ee(), "{err}");
+
+        // The same check on a JSON-text metadata.
+        let json = Value::String(meta(&bad).to_json().to_string());
+        assert!(check_login_key_chain(&json, &secret, "m", SQR_PATH).is_err());
+
+        // Without hashKeyChain (older flows) or a key chain, nothing to check.
+        let mut no_hash = Value::object();
+        no_hash.insert("encryptedKeyChain", B64.encode(&chain));
+        assert!(check_login_key_chain(&no_hash, &secret, "m", SQR_PATH).is_ok());
+        assert!(check_login_key_chain(&Value::object(), &secret, "m", SQR_PATH).is_ok());
+    }
+
+    #[test]
+    fn login_e2ee_invalid_version_is_a_typed_error() {
+        let mut meta = Value::object();
+        meta.insert("errorCode", "E2EE_INVALID_VERSION");
+        let err =
+            check_login_key_chain(&meta, &[0; 32], "qrCodeLoginV2ForSecure", SQR_PATH).unwrap_err();
+        assert_eq!(err.error_code(), Some(ErrorCode::E2eeInvalidVersion));
+        assert!(err.is_e2ee() && !err.is_auth_dead());
+        let mut numeric = Value::object();
+        numeric.insert("errorCode", 86);
+        assert!(check_login_key_chain(&numeric, &[0; 32], "m", SQR_PATH).is_err());
     }
 }
