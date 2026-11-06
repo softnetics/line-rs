@@ -286,6 +286,10 @@ async fn home_requests() {
 
     let s = seen.lock().unwrap();
     assert_eq!(s[0].target, "/hm/api/v1/home/profile?homeId=u1");
+    // /hm takes the Timeline channel, as LINE for Android (ul6/a.java).
+    assert_eq!(s[0].header("x-line-channeltoken"), Some("TOKEN-1341209950"));
+    assert_eq!(s[3].header("x-line-channeltoken"), Some("TOKEN-1341209950"));
+    assert_eq!(s[4].header("x-line-channeltoken"), Some("TOKEN-1341209850"));
     assert_eq!(s[1].target, "/hm/api/v1/home/groupprofile?homeId=c1");
     assert_eq!(s[2].json(), json!({"homeId": "u1", "coverObjectId": "O"}));
     assert_eq!(

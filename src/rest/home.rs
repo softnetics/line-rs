@@ -8,8 +8,12 @@
 //! (18 → `/PAGEPOKER`) at `0x105e56fe0..0x105e57b20`. Method enum 4 is
 //! `DELETE` (method-name switch at `0x10120e0a0`).
 //!
-//! **Auth.** Same caveat as [`super::note`]: the per-command channel was not
-//! recovered, so the MyHome channel token is used.
+//! **Auth.** `/hm` requests carry the Timeline channel token and `/ma`
+//! the MyHome one, as LINE for Android picks them per routing prefix
+//! (`ul6/a.java`: `MYHOME` `/mh` and `HOMEAPI` `/ma` use `ul6/h.c()`,
+//! 1341209850; every other prefix, `MYHOME_RENEWAL` `/hm` included, falls
+//! to `ul6/h.f()`, 1341209950). `/PAGEPOKER` is not in that table and keeps
+//! the MyHome token.
 
 use reqwest::Method;
 use serde_json::{Map, Value as Json};
@@ -17,7 +21,10 @@ use serde_json::{Map, Value as Json};
 use super::{RestAuth, RestClient, RestPrefix, RestRequest, channels};
 use crate::error::Result;
 
-const AUTH: RestAuth = RestAuth::Channel(channels::MYHOME);
+/// `/hm` (`MYHOME_RENEWAL`).
+const AUTH: RestAuth = RestAuth::Channel(channels::TIMELINE);
+/// `/ma` (`HOMEAPI`) and `/PAGEPOKER`.
+const MYHOME_AUTH: RestAuth = RestAuth::Channel(channels::MYHOME);
 
 pub const HOME_PROFILE: &str = "/api/v1/home/profile";
 pub const GROUP_PROFILE: &str = "/api/v1/home/groupprofile";
@@ -138,7 +145,8 @@ impl Home<'_> {
     pub async fn user_detail(&self, user_mid: &str) -> Result<Json> {
         self.rest
             .send(
-                RestRequest::get(RestPrefix::HomeApi, USER_DETAIL, AUTH).query("userMid", user_mid),
+                RestRequest::get(RestPrefix::HomeApi, USER_DETAIL, MYHOME_AUTH)
+                    .query("userMid", user_mid),
             )
             .await
     }
@@ -146,7 +154,7 @@ impl Home<'_> {
     /// `GET /PAGEPOKER/api/v2/pageinfo/get.json?url&caller&lang&phishingCheck`
     /// — URL preview.
     pub async fn page_info(&self, q: PageInfoQuery) -> Result<Json> {
-        let req = RestRequest::get(RestPrefix::PagePoker, PAGE_INFO, AUTH)
+        let req = RestRequest::get(RestPrefix::PagePoker, PAGE_INFO, MYHOME_AUTH)
             .query("url", &q.url)
             .query_opt("caller", q.caller)
             .query_opt("lang", q.lang)

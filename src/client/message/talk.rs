@@ -5,10 +5,12 @@ use super::types::{
     AppLinkInfo, CallInfo, ChatEventInfo, ContactMeta, Decoration, FileInfo, FlexMeta, GiftInfo,
     MentionTarget, Mid, PostNotificationInfo, ReactionType,
 };
-use super::utils::{Content, MessageInput, fetch_bytes, reply_target, type_error};
+use super::utils::{Content, MessageInput, reply_target, type_error};
+
 use crate::client::Client;
 use crate::e2ee::{E2eeContent, E2eeSendOptions};
 use crate::error::Result;
+use crate::obs::{DownloadSink, ObsDownload};
 use crate::thrift::Value;
 use crate::tv;
 
@@ -394,12 +396,31 @@ impl TalkMessage {
         reply_target(&self.raw)
     }
 
-    /// Download the attached media (image / video / audio / file).
+    /// Download the attached media (image / video / audio / file), or with
+    /// `preview` its thumbnail, into memory. See
+    /// [`download_to`](Self::download_to).
     pub async fn data(&self, preview: bool) -> Result<Vec<u8>> {
+        let mut data = Vec::new();
+        self.download_to(preview, &mut data).await?;
+        Ok(data)
+    }
+
+    /// Stream the attached media (image / video / audio / file), or with
+    /// `preview` its thumbnail, into `out`. Big files never sit in memory
+    /// whole. An E2EE thumbnail is the one the sender uploaded (see
+    /// [`Obs::download_e2ee_preview`]); only an image without one falls
+    /// back to the image itself, never a video. On an error, discard what
+    /// was written; [`Error::is_media_expired`] tells whether the file is
+    /// gone from LINE's servers.
+    ///
+    /// [`Obs::download_e2ee_preview`]: crate::obs::Obs::download_e2ee_preview
+    /// [`Error::is_media_expired`]: crate::Error::is_media_expired
+    pub async fn download_to(&self, preview: bool, out: DownloadSink<'_>) -> Result<ObsDownload> {
         let content = self.content();
         if !content.has_media() {
             return Err(type_error("message have no contents"));
         }
+        let obs = self.client.base.obs();
         if content.metadata.contains_key("DOWNLOAD_URL") {
             let key = if preview {
                 "PREVIEW_URL"
@@ -407,19 +428,27 @@ impl TalkMessage {
                 "DOWNLOAD_URL"
             };
             let url = content.metadata.get(key).cloned().unwrap_or_default();
-            return fetch_bytes(&self.client.base.http, &url).await;
+            return obs.download_url_to(&url, out).await;
         }
-        let obs = self.client.base.obs();
-        if self.raw["chunks"].as_list().is_some_and(|c| !c.is_empty())
-            && let Some(file) = obs.download_e2ee_message_media(&self.raw).await?
-        {
-            return Ok(file.data.to_vec());
+        let e2ee = self.raw["chunks"].as_list().is_some_and(|c| !c.is_empty());
+        if e2ee && preview {
+            match obs.download_e2ee_message_preview(&self.raw).await {
+                Err(e) if e.http_status() == Some(404) && content.content_type == "IMAGE" => {}
+                Err(e) => return Err(e),
+                Ok(thumb) => {
+                    out.write_all(&thumb)?;
+                    return Ok(ObsDownload {
+                        len: thumb.len() as u64,
+                        mime: None,
+                    });
+                }
+            }
         }
-        Ok(obs
-            .download_message_data(self.id(), preview, false)
-            .await?
-            .data
-            .to_vec())
+        if e2ee && let Some(dl) = obs.download_e2ee_message_media_to(&self.raw, out).await? {
+            return Ok(dl);
+        }
+        obs.download_message_data_to(self.id(), preview, false, out)
+            .await
     }
 }
 
