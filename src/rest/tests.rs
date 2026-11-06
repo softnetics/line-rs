@@ -294,7 +294,9 @@ async fn home_requests() {
     // /hm takes the Timeline channel, as LINE for Android (ul6/a.java).
     assert_eq!(s[0].header("x-line-channeltoken"), Some("TOKEN-1341209950"));
     assert_eq!(s[3].header("x-line-channeltoken"), Some("TOKEN-1341209950"));
-    assert_eq!(s[4].header("x-line-channeltoken"), Some("TOKEN-1341209850"));
+    // /PAGEPOKER: the session token only.
+    assert_eq!(s[4].header("x-line-channeltoken"), None);
+    assert_eq!(s[4].header("x-line-access"), Some("ACCESS"));
     assert_eq!(s[1].target, "/hm/api/v1/home/groupprofile?homeId=c1");
     assert_eq!(s[2].json(), json!({"homeId": "u1", "coverObjectId": "O"}));
     assert_eq!(
@@ -302,9 +304,68 @@ async fn home_requests() {
         ("DELETE", "/hm/api/v1/home/cover")
     );
     assert_eq!(s[3].header("x-lhm"), Some("DELETE"));
+    assert_eq!(s[4].target, "/PAGEPOKER/api/v2/pageinfo/get.json");
+    assert_eq!(s[4].method, "POST");
     assert_eq!(
-        s[4].target,
-        "/PAGEPOKER/api/v2/pageinfo/get.json?url=https%3A%2F%2Fexample.com%2F%3Fa%3D1&phishingCheck=true"
+        s[4].json(),
+        json!({"url": "https://example.com/?a=1", "caller": "TALK_ANDROID", "unescape": "true", "phishingCheck": true})
+    );
+}
+
+#[tokio::test]
+async fn page_preview_reads_the_result_and_refusals() {
+    let (base, seen) = serve(vec![
+        (
+            200,
+            r#"{"result":{"title":"T","summary":"S","domain":"example.com","url":"","ogUrl":"https://example.com/a","image":"/0hIMG","image_width":640,"image_height":320,"isvideo":true}}"#,
+        ),
+        (
+            200,
+            r#"{"result":{"title":"T","obs":{"cdn":"https://cdn.example/","hash":"H"},"image":"/x"}}"#,
+        ),
+        (451, r#"{"code":451}"#),
+        (500, ""),
+    ])
+    .await;
+    let r = rest(&base);
+    let q = |url: &str| PageInfoQuery {
+        url: url.into(),
+        lang: Some("th_TH".into()),
+        ..Default::default()
+    };
+    let p = r
+        .home()
+        .page_preview(q("https://example.com/a"))
+        .await
+        .unwrap();
+    assert_eq!(p.title, "T");
+    assert_eq!(p.url, "https://example.com/a");
+    assert_eq!(p.image.as_deref(), Some("https://obs.line-scdn.net/0hIMG"));
+    assert_eq!(
+        (p.image_width, p.image_height, p.is_video),
+        (640, 320, true)
+    );
+    let p = r
+        .home()
+        .page_preview(q("https://example.com/b"))
+        .await
+        .unwrap();
+    assert_eq!(p.image.as_deref(), Some("https://cdn.example/H"));
+    let e = r
+        .home()
+        .page_preview(q("https://bad.example"))
+        .await
+        .unwrap_err();
+    assert_eq!(e.http_status(), Some(451));
+    let e = r
+        .home()
+        .page_preview(q("https://down.example"))
+        .await
+        .unwrap_err();
+    assert_eq!(e.http_status(), Some(500));
+    assert_eq!(
+        seen.lock().unwrap()[0].header("accept-language"),
+        Some("th-TH")
     );
 }
 

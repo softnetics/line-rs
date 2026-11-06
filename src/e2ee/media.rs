@@ -393,6 +393,90 @@ impl ChunkHashes {
     }
 }
 
+/// Streaming decryption of a v2 file checked chunk by chunk against its
+/// [`ChunkHashes`], as LINE for Android plays an E2EE video while it
+/// downloads (`kc8/d`, `ay3/c`): every byte handed out belongs to a chunk
+/// whose digest matched, so a player can use it at once. Feed
+/// `ciphertext ‖ HMAC` in any split with [`push`](Self::push), take what is
+/// ready with [`next_chunk`](Self::next_chunk), then
+/// [`finish`](Self::finish), which
+/// checks the last chunk, the chunk count and that the file's trailing
+/// HMAC is the one the hashes were checked against.
+pub struct VerifiedMediaDecryptor {
+    hashes: ChunkHashes,
+    ctr: Aes256Ctr32,
+    buf: Vec<u8>,
+    index: usize,
+}
+
+impl VerifiedMediaDecryptor {
+    pub fn new(key_material: &[u8], hashes: ChunkHashes) -> Self {
+        let keys = derive_key_material(key_material);
+        Self {
+            hashes,
+            ctr: Aes256Ctr32::new_from_slices(&keys.enc_key, &keys.nonce)
+                .expect("derived key/nonce sizes are valid"),
+            buf: Vec::new(),
+            index: 0,
+        }
+    }
+
+    /// Plaintext bytes handed out so far.
+    pub fn verified_len(&self) -> u64 {
+        (self.index * MEDIA_CHUNK_SIZE) as u64
+    }
+
+    fn open_chunk(&mut self, n: usize) -> Result<Vec<u8>> {
+        if !self.hashes.check_chunk(self.index, &self.buf[..n]) {
+            return Err(media_error(format!(
+                "chunk {} failed validation",
+                self.index
+            )));
+        }
+        let mut plain: Vec<u8> = self.buf.drain(..n).collect();
+        self.ctr.apply_keystream(&mut plain);
+        self.index += 1;
+        Ok(plain)
+    }
+
+    /// Take the next bytes of the file.
+    pub fn push(&mut self, data: &[u8]) {
+        self.buf.extend_from_slice(data);
+    }
+
+    /// The plaintext of the next whole chunk known not to be the last one,
+    /// if one has arrived; an error if its digest doesn't match.
+    pub fn next_chunk(&mut self) -> Option<Result<Vec<u8>>> {
+        // A full chunk followed by more than the HMAC is not the last one.
+        (self.buf.len() > MEDIA_CHUNK_SIZE + MEDIA_HMAC_LEN)
+            .then(|| self.open_chunk(MEDIA_CHUNK_SIZE))
+    }
+
+    /// Check and decrypt the last chunk.
+    pub fn finish(mut self) -> Result<Vec<u8>> {
+        if self.buf.len() < MEDIA_HMAC_LEN {
+            return Err(media_error("encrypted data too short to contain HMAC"));
+        }
+        let body = self.buf.len() - MEDIA_HMAC_LEN;
+        if self.buf[body..] != *self.hashes.hmac() {
+            return Err(media_error(
+                "media HMAC does not match the chunk hash object",
+            ));
+        }
+        let plain = if body > 0 {
+            self.open_chunk(body)?
+        } else {
+            Vec::new()
+        };
+        if self.index != self.hashes.len() {
+            return Err(media_error(
+                "chunk count does not match the chunk hash object",
+            ));
+        }
+        Ok(plain)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,5 +695,71 @@ mod tests {
         // Without the file's HMAC the digests alone cannot be checked.
         assert!(ChunkHashes::parse(digests, &mac_key, None).is_err());
         assert!(ChunkHashes::parse(digests, &[1; 32], Some(trailer)).is_err());
+    }
+
+    fn verified(raw: &[u8], km: &[u8; 32]) -> (EncryptedMedia, ChunkHashes) {
+        let enc = encrypt_media(raw, Some(km), MediaHmacVersion::V2);
+        let mac_key = derive_key_material(km).mac_key;
+        let hashes = ChunkHashes::parse(enc.hash_object.as_ref().unwrap(), &mac_key, None).unwrap();
+        (enc, hashes)
+    }
+
+    #[test]
+    fn verified_decryptor_hands_out_checked_chunks_only() {
+        let km = [3u8; 32];
+        for len in [
+            0,
+            5,
+            MEDIA_CHUNK_SIZE,
+            MEDIA_CHUNK_SIZE + MEDIA_HMAC_LEN,
+            3 * MEDIA_CHUNK_SIZE,
+            3 * MEDIA_CHUNK_SIZE + 7,
+        ] {
+            let raw = sample(len);
+            let (enc, hashes) = verified(&raw, &km);
+            for split in [1000, 7, MEDIA_CHUNK_SIZE, enc.data.len().max(1)] {
+                let mut dec = VerifiedMediaDecryptor::new(&km, hashes.clone());
+                let mut out = Vec::new();
+                for part in enc.data.chunks(split) {
+                    dec.push(part);
+                    while let Some(plain) = dec.next_chunk() {
+                        out.extend(plain.unwrap());
+                    }
+                    // Never more than whole chunks before the end.
+                    assert_eq!(out.len() as u64, dec.verified_len());
+                }
+                out.extend(dec.finish().unwrap());
+                assert_eq!(out, raw, "len {len}, split {split}");
+            }
+        }
+    }
+
+    #[test]
+    fn verified_decryptor_stops_at_a_bad_chunk() {
+        let km = [4u8; 32];
+        let raw = sample(3 * MEDIA_CHUNK_SIZE + 9);
+        let (enc, hashes) = verified(&raw, &km);
+
+        let mut bad = enc.data.clone();
+        bad[MEDIA_CHUNK_SIZE + 3] ^= 1;
+        let mut dec = VerifiedMediaDecryptor::new(&km, hashes.clone());
+        dec.push(&bad[..2 * MEDIA_CHUNK_SIZE + 100]);
+        assert_eq!(dec.next_chunk().unwrap().unwrap(), raw[..MEDIA_CHUNK_SIZE]);
+        let second = dec.next_chunk().unwrap();
+        assert!(second.unwrap_err().to_string().contains("chunk 1"));
+
+        // A changed last chunk, a different trailer, a missing chunk.
+        let mut last = enc.data.clone();
+        last[3 * MEDIA_CHUNK_SIZE + 2] ^= 1;
+        let mut trailer = enc.data.clone();
+        *trailer.last_mut().unwrap() ^= 1;
+        let mut short = enc.data[..2 * MEDIA_CHUNK_SIZE].to_vec();
+        short.extend_from_slice(&enc.data[enc.data.len() - MEDIA_HMAC_LEN..]);
+        for data in [last, trailer, short] {
+            let mut dec = VerifiedMediaDecryptor::new(&km, hashes.clone());
+            dec.push(&data);
+            while let Some(Ok(_)) = dec.next_chunk() {}
+            assert!(dec.finish().is_err());
+        }
     }
 }

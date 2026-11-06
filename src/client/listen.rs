@@ -8,7 +8,7 @@
 use futures::stream::{BoxStream, StreamExt};
 use tokio::task::JoinHandle;
 
-use super::message::{ReactionType, SquareMessage, TalkMessage};
+use super::message::{PaidReaction, ReactionType, SquareMessage, TalkMessage};
 use super::{Client, ClientEvent};
 use crate::error::{Error, Result};
 use crate::thrift::Value;
@@ -71,6 +71,8 @@ pub struct ReactionEvent {
     /// `curr.predefinedReactionType` of the `param2` JSON; `None` when it
     /// is missing or unknown (e.g. a paid reaction).
     pub reaction: Option<ReactionType>,
+    /// `curr.paidReactionType`: a reaction with a LINE emoji.
+    pub paid: Option<PaidReaction>,
     /// `param2` parsed as JSON (`Null` if it is not JSON).
     pub detail: serde_json::Value,
 }
@@ -200,6 +202,7 @@ impl TalkEvent {
                     chat_mid: detail["chatMid"].as_str().map(str::to_string),
                     reactor_mid: p(3),
                     reaction,
+                    paid: PaidReaction::from_json(&detail["curr"]["paidReactionType"]),
                     detail,
                 })
             }
@@ -565,7 +568,32 @@ mod tests {
         else {
             panic!("not a reaction")
         };
-        assert_eq!((r.reaction, r.chat_mid), (None, None));
+        assert_eq!((r.reaction, r.chat_mid, r.paid), (None, None, None));
+        let Some(TalkEvent::Reaction(r)) = ev(tv!({"type": 140, "param1": "1",
+            "param2": r#"{"curr":{"paidReactionType":{"productId":"p1","emojiId":"007","resourceType":2,"version":4}}}"#}))
+        else {
+            panic!("not a reaction")
+        };
+        assert_eq!(r.reaction, None);
+        let paid = r.paid.unwrap();
+        assert_eq!(
+            (
+                paid.product_id.as_str(),
+                paid.emoji_id.as_str(),
+                paid.animated,
+                paid.version
+            ),
+            ("p1", "007", true, 4)
+        );
+        assert!(
+            paid.image_url()
+                .ends_with("/p1/sticon/android/007_animation.png?v=4")
+        );
+        // Numbered fields, as a schema without field 2 decoded them.
+        let numbered =
+            PaidReaction::from_json(&serde_json::json!({"1": "p2", "2": "001", "3": 1})).unwrap();
+        assert_eq!((numbered.animated, numbered.version), (false, 1));
+        assert!(PaidReaction::from_json(&serde_json::Value::Null).is_none());
         assert_eq!(
             ev(tv!({"type": 65, "param1": "c1", "param2": "100"})),
             Some(TalkEvent::Unsend {

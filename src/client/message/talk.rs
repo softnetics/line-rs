@@ -450,6 +450,39 @@ impl TalkMessage {
         obs.download_message_data_to(self.id(), preview, false, out)
             .await
     }
+
+    /// Stream the attached media into `out` to play it while it downloads.
+    /// An E2EE video is written chunk by chunk as each chunk's digest
+    /// checks out (see [`Obs::stream_media_by_e2ee_to`]), so what is
+    /// written is always good even before the download ends. `on_len`
+    /// hears the file's length before the first byte, when the server
+    /// says it. Otherwise like [`download_to`](Self::download_to).
+    ///
+    /// [`Obs::stream_media_by_e2ee_to`]: crate::obs::Obs::stream_media_by_e2ee_to
+    pub async fn stream_to(
+        &self,
+        out: DownloadSink<'_>,
+        on_len: &mut (dyn FnMut(u64) + Send),
+    ) -> Result<ObsDownload> {
+        let content = self.content();
+        if !content.has_media() {
+            return Err(type_error("message have no contents"));
+        }
+        if content.metadata.contains_key("DOWNLOAD_URL") {
+            return self.download_to(false, out).await;
+        }
+        let obs = self.client.base.obs();
+        let e2ee = self.raw["chunks"].as_list().is_some_and(|c| !c.is_empty());
+        if e2ee
+            && let Some(dl) = obs
+                .stream_e2ee_message_media_to(&self.raw, out, on_len)
+                .await?
+        {
+            return Ok(dl);
+        }
+        obs.stream_message_data_to(self.id(), false, false, out, on_len)
+            .await
+    }
 }
 
 #[cfg(test)]
