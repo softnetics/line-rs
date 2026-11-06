@@ -108,12 +108,57 @@ pub struct PostLocation {
     pub name: String,
 }
 
-/// Uploaded media (see [`Timeline::upload_note_media`]).
-#[derive(Debug, Clone, PartialEq)]
+/// Uploaded media (see [`Timeline::upload_note_media`]). LINE for Android
+/// also sends where the object lives and its size (`vs3/k.java`); the
+/// optional fields are left out when unset.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct PostMedia {
     pub object_id: String,
     /// `PHOTO` or `VIDEO`.
     pub kind: String,
+    /// The OBS service, `myhome` for [`Timeline::upload_note_media`].
+    pub service_name: Option<String>,
+    /// The OBS namespace, `h` for [`Timeline::upload_note_media`].
+    pub obs_namespace: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    /// Bytes.
+    pub size: Option<u64>,
+}
+
+impl PostMedia {
+    /// Media uploaded with [`Timeline::upload_note_media`] (`myhome/h`).
+    /// The service and namespace names are read from the upload path; the
+    /// app takes them from its upload result, so they are unverified.
+    pub fn note(object_id: impl Into<String>, video: bool) -> Self {
+        Self {
+            object_id: object_id.into(),
+            kind: if video { "VIDEO" } else { "PHOTO" }.into(),
+            service_name: Some("myhome".into()),
+            obs_namespace: Some("h".into()),
+            ..Default::default()
+        }
+    }
+
+    fn json(&self) -> Json {
+        let mut m = json!({"objectId": self.object_id, "type": self.kind, "obsFace": "[]"});
+        if let Some(v) = &self.service_name {
+            m["serviceName"] = v.as_str().into();
+        }
+        if let Some(v) = &self.obs_namespace {
+            m["obsNamespace"] = v.as_str().into();
+        }
+        if let Some(v) = self.width {
+            m["width"] = v.into();
+        }
+        if let Some(v) = self.height {
+            m["height"] = v.into();
+        }
+        if let Some(v) = self.size {
+            m["size"] = v.into();
+        }
+        m
+    }
 }
 
 /// Content shared by [`CreatePost`] and [`UpdatePost`].
@@ -156,11 +201,7 @@ impl PostContents {
             .iter()
             .map(|l| json!({"latitude": l.latitude, "longitude": l.longitude, "name": l.name}))
             .collect();
-        let media = self
-            .media
-            .iter()
-            .map(|m| json!({"objectId": m.object_id, "type": m.kind, "obsFace": "[]"}))
-            .collect();
+        let media = self.media.iter().map(PostMedia::json).collect();
         (
             Json::Array(stickers),
             Json::Array(locations),
@@ -267,7 +308,9 @@ impl UpdatePost {
     }
 }
 
-/// Options for [`Timeline::list_post`].
+/// Options for [`Timeline::list_post`]. To page, pass the `postId` and
+/// `updatedTime` of the last post of the previous page, as LINE for Android
+/// does (`vs3/k.java`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ListPost {
     pub home_id: String,
@@ -275,6 +318,47 @@ pub struct ListPost {
     pub updated_time: Option<i64>,
     /// Default `TALKROOM`.
     pub source_type: Option<String>,
+    /// Posts per page (`postLimit`); the server's default when `None`.
+    pub post_limit: Option<u32>,
+}
+
+impl ListPost {
+    /// Query of `post/list.json`.
+    pub fn query(&self) -> Vec<(&'static str, String)> {
+        let mut query = vec![("homeId", self.home_id.clone())];
+        if let Some(limit) = self.post_limit {
+            query.push(("postLimit", limit.to_string()));
+        }
+        query.push(("likeLimit", "0".into()));
+        query.push(("commentLimit", "0".into()));
+        query.push((
+            "sourceType",
+            self.source_type.as_deref().unwrap_or("TALKROOM").into(),
+        ));
+        if let Some(id) = self.post_id.as_deref().filter(|s| !s.is_empty()) {
+            query.push(("postId", id.into()));
+            if let Some(t) = self.updated_time.filter(|t| *t != 0) {
+                query.push(("updatedTime", t.to_string()));
+            }
+        }
+        query
+    }
+}
+
+/// The next page of a [`Timeline::list_post`] result: the last post's
+/// `postId` and `updatedTime` (`createdTime` when it has none), or `None`
+/// when the page was empty.
+pub fn next_page(result: &Json, previous: &ListPost) -> Option<ListPost> {
+    let info = &result["feeds"].as_array()?.last()?["post"]["postInfo"];
+    let post_id = info["postId"].as_str()?.to_string();
+    let time = info["updatedTime"]
+        .as_i64()
+        .or_else(|| info["createdTime"].as_i64())?;
+    Some(ListPost {
+        post_id: Some(post_id),
+        updated_time: Some(time),
+        ..previous.clone()
+    })
 }
 
 /// Note/timeline client; caches the timeline channel token and headers.
@@ -312,6 +396,35 @@ fn post_prefix(home_id: &str) -> &'static str {
     } else {
         "ext/note/nt"
     }
+}
+
+/// Body of `comment/create.json`.
+fn comment_body(content_id: &str, actor_id: &str, text: &str, contents_list: Vec<Json>) -> Json {
+    json!({
+        "contentId": content_id,
+        "actorId": actor_id,
+        "commentText": text,
+        "contentsList": contents_list,
+    })
+}
+
+/// Query of `comment/getList.json`.
+fn comment_list_query<'a>(
+    home_id: &'a str,
+    post_id: &'a str,
+    actor_id: &'a str,
+    scroll_id: Option<&'a str>,
+) -> Vec<(&'static str, &'a str)> {
+    let mut q = vec![
+        ("homeId", home_id),
+        ("contentId", post_id),
+        ("actorId", actor_id),
+    ];
+    if let Some(s) = scroll_id.filter(|s| !s.is_empty()) {
+        q.push(("scrollId", s));
+    }
+    q.push(("limit", "-1"));
+    q
 }
 
 fn note_object_id(mid: &str) -> String {
@@ -458,20 +571,8 @@ impl Timeline {
     }
 
     pub async fn list_post(&self, opts: ListPost) -> Result<TimelineResponse> {
-        let source = opts.source_type.as_deref().unwrap_or("TALKROOM");
-        let updated = opts.updated_time.filter(|t| *t != 0).map(|t| t.to_string());
-        let mut query = vec![
-            ("homeId", opts.home_id.as_str()),
-            ("sourceType", source),
-            ("likeLimit", "0"),
-            ("commentLimit", "0"),
-        ];
-        if let Some(id) = opts.post_id.as_deref().filter(|s| !s.is_empty()) {
-            query.push(("postId", id));
-        }
-        if let Some(t) = updated.as_deref() {
-            query.push(("updatedTime", t));
-        }
+        let query = opts.query();
+        let query: Vec<(&str, &str)> = query.iter().map(|(k, v)| (*k, v.as_str())).collect();
         let path = format!("/{}/api/v57/post/list.json", post_prefix(&opts.home_id));
         self.send(Method::GET, &path, &query, "GET", None).await
     }
@@ -517,27 +618,46 @@ impl Timeline {
         .await
     }
 
-    /// Comment on a post. `contents_list` holds media/sticker entries (see
-    /// [`Timeline::upload_note_comment_image`]).
+    /// Comment on a post. `actor_id` is the mid of the post's author, as
+    /// LINE for Android sends it (`vs3/a.java`). `contents_list` holds
+    /// media/sticker entries (see [`Timeline::upload_note_comment_image`]).
     pub async fn create_comment(
         &self,
         content_id: &str,
+        actor_id: &str,
         comment_text: &str,
         home_id: &str,
         source_type: Option<&str>,
         contents_list: Vec<Json>,
     ) -> Result<TimelineResponse> {
-        let body = json!({"commentText": comment_text, "contentId": content_id, "contentsList": contents_list});
+        let body = comment_body(content_id, actor_id, comment_text, contents_list);
         let query = [
-            ("sourceType", source_type.unwrap_or("TIMELINE")),
             ("homeId", home_id),
+            ("sourceType", source_type.unwrap_or("TIMELINE")),
         ];
+        let path = format!("/{}/api/v57/comment/create.json", post_prefix(home_id));
+        self.send(Method::POST, &path, &query, "POST", Some(body))
+            .await
+    }
+
+    /// A post's comments (`comment/getList.json`, all of them: `limit`
+    /// -1). `actor_id` is the mid of the post's author (`vs3/a.java`);
+    /// `scroll_id` continues a previous page. Sent as POST with `x-lhm:
+    /// GET`, the form LINE's note server was seen to answer.
+    pub async fn list_comments(
+        &self,
+        home_id: &str,
+        post_id: &str,
+        actor_id: &str,
+        scroll_id: Option<&str>,
+    ) -> Result<TimelineResponse> {
+        let path = format!("/{}/api/v57/comment/getList.json", post_prefix(home_id));
         self.send(
             Method::POST,
-            "/ext/note/nt/api/v57/comment/create.json",
-            &query,
-            "POST",
-            Some(body),
+            &path,
+            &comment_list_query(home_id, post_id, actor_id, scroll_id),
+            "GET",
+            None,
         )
         .await
     }
@@ -658,6 +778,7 @@ mod tests {
         p.contents.media.push(PostMedia {
             object_id: "o".into(),
             kind: "PHOTO".into(),
+            ..Default::default()
         });
         let b = p.body();
         assert_eq!(
@@ -697,6 +818,58 @@ mod tests {
         assert_eq!(home_prefix("c1"), "mh");
         assert_eq!(post_prefix("s1"), "sn");
         assert_eq!(post_prefix("c1"), "ext/note/nt");
+    }
+
+    #[test]
+    fn note_media_carries_where_and_how_big() {
+        let mut m = PostMedia::note("o1", false);
+        m.width = Some(640);
+        m.height = Some(480);
+        m.size = Some(1234);
+        let mut p = CreatePost::new("c1");
+        p.contents.media.push(m);
+        let media = &p.body()["contents"]["media"][0];
+        assert_eq!(media["serviceName"], "myhome");
+        assert_eq!(media["obsNamespace"], "h");
+        assert_eq!(media["type"], "PHOTO");
+        assert_eq!(
+            (media["width"].as_u64(), media["height"].as_u64()),
+            (Some(640), Some(480))
+        );
+        assert_eq!(media["size"], 1234);
+    }
+
+    #[test]
+    fn list_pages_with_limit_and_cursor() {
+        let first = ListPost {
+            home_id: "c1".into(),
+            post_limit: Some(20),
+            ..Default::default()
+        };
+        let q = first.query();
+        assert!(q.contains(&("postLimit", "20".into())));
+        assert!(!q.iter().any(|(k, _)| *k == "postId"));
+        let result = json!({"feeds": [
+            {"post": {"postInfo": {"postId": "p1", "updatedTime": 5}}},
+            {"post": {"postInfo": {"postId": "p2", "createdTime": 3}}},
+        ]});
+        let next = next_page(&result, &first).unwrap();
+        let q = next.query();
+        assert!(q.contains(&("postId", "p2".into())));
+        assert!(q.contains(&("updatedTime", "3".into())));
+        assert!(q.contains(&("postLimit", "20".into())));
+        assert_eq!(next_page(&json!({"feeds": []}), &first), None);
+    }
+
+    #[test]
+    fn comments_name_the_post_author() {
+        let b = comment_body("p1", "u-author", "hi", vec![]);
+        assert_eq!(b["actorId"], "u-author");
+        assert_eq!(b["contentId"], "p1");
+        let q = comment_list_query("c1", "p1", "u-author", None);
+        assert!(q.contains(&("actorId", "u-author")));
+        assert!(q.contains(&("limit", "-1")));
+        assert!(!q.iter().any(|(k, _)| *k == "scrollId"));
     }
 
     #[test]
