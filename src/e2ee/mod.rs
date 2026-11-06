@@ -75,6 +75,8 @@ pub struct E2eeState {
     /// Own key ids whose stored private key matched the public key LINE
     /// has registered, so [`E2ee::check_sealed`] asks the server once per id.
     pub(crate) confirmed_keys: Mutex<std::collections::HashSet<i64>>,
+    /// Key ids LINE could not resolve; see [`keys::Unresolvable`].
+    pub(crate) unresolvable: keys::Unresolvable,
 }
 
 impl BaseClient {
@@ -131,6 +133,14 @@ impl BaseClient {
     /// Generate and register a key pair, storing it as the current key.
     pub async fn try_register_e2ee_key_pair(&self) -> Result<E2eeKey> {
         self.e2ee().register_key_pair().await
+    }
+
+    /// Forget the peer and group key ids remembered as unresolvable, so the
+    /// next message that names one asks LINE again. line-rs does this on a
+    /// login and when it registers a key; call it when keys may have changed
+    /// otherwise (the client does on E2EE key operations).
+    pub fn forget_unresolvable_e2ee_keys(&self) {
+        self.e2ee.unresolvable.clear();
     }
 
     /// Verify the key selected at login against the server-registered public
