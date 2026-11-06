@@ -231,6 +231,7 @@ impl ClientBuilder {
             sync_loaded: AtomicBool::new(false),
             sync_saved: Mutex::new(None),
             push: crate::push::PushState::default(),
+            calendar_token: Mutex::new(None),
         })))
     }
 }
@@ -280,6 +281,8 @@ pub struct Inner {
     /// Last `SyncData` written to storage (skips identical writes).
     pub(crate) sync_saved: Mutex<Option<SyncData>>,
     pub(crate) push: crate::push::PushState,
+    /// LINE Calendar channel token and its expiry (epoch ms).
+    pub(crate) calendar_token: Mutex<Option<(String, i64)>>,
 }
 
 impl Deref for BaseClient {

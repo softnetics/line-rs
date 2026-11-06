@@ -413,10 +413,23 @@ impl Event {
 
 impl BaseClient {
     /// A channel access token for the LINE Calendar channel, for the
-    /// `x-line-channeltoken` header. Tries `issueChannelToken` and falls back
-    /// to `approveChannelAndIssueChannelToken` (first use grants consent, as
+    /// `x-line-channeltoken` header. Kept until its `expiration`, as the app
+    /// keeps it (`ak8/m`); `fresh` issues a new one regardless. Issuing
+    /// tries `issueChannelToken` and falls back to
+    /// `approveChannelAndIssueChannelToken` (first use grants consent, as
     /// the app does automatically for this first-party channel).
-    async fn calendar_channel_token(&self) -> Result<String> {
+    ///
+    /// The cache lock is held while issuing, so calls made at once (every
+    /// calendar of the all-calendars view) share one token.
+    async fn calendar_channel_token(&self, fresh: bool) -> Result<String> {
+        let mut cache = self.calendar_token.lock().await;
+        let now = now_ms();
+        if !fresh
+            && let Some((token, expires)) = cache.as_ref()
+            && token_usable(*expires, now)
+        {
+            return Ok(token.clone());
+        }
         let args = tv!({ "channelId": CALENDAR_CHANNEL_ID });
         let token = match self.channel().issue_channel_token(args.clone()).await {
             Ok(t) => t,
@@ -432,14 +445,17 @@ impl BaseClient {
             .as_str()
             .filter(|s| !s.is_empty())
             .or_else(|| token["token"].as_str())
-            .unwrap_or_default();
-        Ok(value.to_string())
+            .unwrap_or_default()
+            .to_string();
+        let expires = token["expiration"].as_i64().unwrap_or_default();
+        *cache = (!value.is_empty()).then(|| (value.clone(), cache_until(expires, now)));
+        Ok(value)
     }
 
     /// gRPC metadata headers: the same identity headers as a Thrift call, but
     /// split out the way the app sends them for gRPC (not the tab-joined
     /// `x-line-application`), plus the LINE Calendar channel token.
-    async fn grpc_headers(&self) -> Result<Vec<(String, String)>> {
+    async fn grpc_headers(&self, fresh_token: bool) -> Result<Vec<(String, String)>> {
         let d = &self.device_details;
         let mut h = vec![
             ("user-agent".to_string(), d.user_agent()),
@@ -469,37 +485,67 @@ impl BaseClient {
         }
         h.push((
             "x-line-channeltoken".to_string(),
-            self.calendar_channel_token().await?,
+            self.calendar_channel_token(fresh_token).await?,
         ));
         Ok(h)
     }
 
-    async fn grpc_unary(&self, path: &str, body: &[u8]) -> Result<bytes::Bytes> {
-        let headers = self.grpc_headers().await?;
-        let mut msgs = grpc::call(GrpcRequest {
-            host: self.current_endpoint(),
-            path,
-            headers: &headers,
-            body,
+    /// One LINE Calendar call, decoded by `decode`. When the server turns
+    /// down the channel token (`AUTHENTICATION_REQUIRED`, or gRPC
+    /// `UNAUTHENTICATED`), the token is issued again and the call made once
+    /// more.
+    async fn calendar_call<T>(
+        &self,
+        path: &str,
+        body: &[u8],
+        decode: impl Fn(Vec<bytes::Bytes>) -> Result<T>,
+    ) -> Result<T> {
+        let mut fresh = false;
+        loop {
+            let headers = self.grpc_headers(fresh).await?;
+            let result = grpc::call(GrpcRequest {
+                host: self.current_endpoint(),
+                path,
+                headers: &headers,
+                body,
+            })
+            .await
+            .and_then(&decode);
+            match result {
+                Err(e) if !fresh && is_token_error(&e) => fresh = true,
+                other => return other,
+            }
+        }
+    }
+
+    async fn grpc_unary<T>(
+        &self,
+        path: &str,
+        body: &[u8],
+        decode: impl Fn(&[u8]) -> Result<T>,
+    ) -> Result<T> {
+        self.calendar_call(path, body, |mut msgs| {
+            decode(&msgs.drain(..).next().unwrap_or_default())
         })
-        .await?;
-        Ok(msgs.drain(..).next().unwrap_or_default())
+        .await
     }
 
     /// `CalendarService/ListAllCalendars`: every calendar the user can see.
     pub async fn list_all_calendars(&self) -> Result<Vec<Calendar>> {
         let path = format!("{CALENDAR_SERVICE}/ListAllCalendars");
         // Request is empty (a bare ListAllCalendarsRequest).
-        let resp = self.grpc_unary(&path, &[]).await?;
         // Response: { meta = 1, calendars = repeated 2 }.
-        let mut out = Vec::new();
-        let mut r = Reader::new(&resp);
-        while let Some(f) = r.next_field()? {
-            if f.number == 2 {
-                out.push(Calendar::decode(f.value.as_bytes()?)?);
+        self.grpc_unary(&path, &[], |resp| {
+            let mut out = Vec::new();
+            let mut r = Reader::new(resp);
+            while let Some(f) = r.next_field()? {
+                if f.number == 2 {
+                    out.push(Calendar::decode(f.value.as_bytes()?)?);
+                }
             }
-        }
-        Ok(out)
+            Ok(out)
+        })
+        .await
     }
 
     /// `EventService/CreateEvents` with one event. `id` comes from
@@ -515,10 +561,10 @@ impl BaseClient {
     ) -> Result<i64> {
         let body = event.encode(id, Write::Create, next_client_updated_at(0), notify_chat);
         let path = format!("{EVENT_SERVICE}/CreateEvents");
-        let resp = self
-            .grpc_unary(&path, &write_request(target, &[body]))
-            .await?;
-        write_response("CreateEvents", &resp)
+        self.grpc_unary(&path, &write_request(target, &[body]), |resp| {
+            write_response("CreateEvents", resp)
+        })
+        .await
     }
 
     /// `EventService/UpdateEvents`: replaces event `id` with `event`.
@@ -538,10 +584,10 @@ impl BaseClient {
             notify_chat,
         );
         let path = format!("{EVENT_SERVICE}/UpdateEvents");
-        let resp = self
-            .grpc_unary(&path, &write_request(target, &[body]))
-            .await?;
-        write_response("UpdateEvents", &resp)
+        self.grpc_unary(&path, &write_request(target, &[body]), |resp| {
+            write_response("UpdateEvents", resp)
+        })
+        .await
     }
 
     /// `EventService/DeleteEvents` with one event:
@@ -560,10 +606,10 @@ impl BaseClient {
             w.bool_always(3, n);
         }
         let path = format!("{EVENT_SERVICE}/DeleteEvents");
-        let resp = self
-            .grpc_unary(&path, &write_request(target, &[w.into_bytes()]))
-            .await?;
-        write_response("DeleteEvents", &resp)
+        self.grpc_unary(&path, &write_request(target, &[w.into_bytes()]), |resp| {
+            write_response("DeleteEvents", resp)
+        })
+        .await
     }
 
     /// `EventService/ListEventsStream`: events for one calendar (by calendar
@@ -583,32 +629,26 @@ impl BaseClient {
         }
         w.int64(3, client_last_get_time);
 
-        let headers = self.grpc_headers().await?;
         let path = format!("{EVENT_SERVICE}/ListEventsStream");
-        let chunks = grpc::call(GrpcRequest {
-            host: self.current_endpoint(),
-            path: &path,
-            headers: &headers,
-            body: w.as_bytes(),
-        })
-        .await?;
-
-        // Each streamed message: { meta = 1, chunk = 2 { events = repeated 1 } }.
-        let mut out = Vec::new();
-        for msg in chunks {
-            let mut r = Reader::new(&msg);
-            while let Some(f) = r.next_field()? {
-                if f.number == 2 {
-                    let mut chunk = f.value.as_message()?;
-                    while let Some(cf) = chunk.next_field()? {
-                        if cf.number == 1 {
-                            out.push(Event::decode(cf.value.as_bytes()?)?);
+        self.calendar_call(&path, w.as_bytes(), |chunks| {
+            // Each streamed message: { meta = 1, chunk = 2 { events = repeated 1 } }.
+            let mut out = Vec::new();
+            for msg in chunks {
+                let mut r = Reader::new(&msg);
+                while let Some(f) = r.next_field()? {
+                    if f.number == 2 {
+                        let mut chunk = f.value.as_message()?;
+                        while let Some(cf) = chunk.next_field()? {
+                            if cf.number == 1 {
+                                out.push(Event::decode(cf.value.as_bytes()?)?);
+                            }
                         }
                     }
                 }
             }
-        }
-        Ok(out)
+            Ok(out)
+        })
+        .await
     }
 }
 
@@ -801,6 +841,42 @@ fn next_client_updated_at(previous: i64) -> i64 {
         .map(|d| d.as_secs() as i64)
         .unwrap_or_default();
     now.max(previous + 1)
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or_default()
+}
+
+/// How long to keep a token whose answer had no `expiration`.
+const TOKEN_FALLBACK_TTL_MS: i64 = 10 * 60 * 1000;
+/// A token this close to its expiry is issued again rather than sent.
+const TOKEN_MARGIN_MS: i64 = 60 * 1000;
+
+/// When to stop using a token the server said expires at `expiration`
+/// (epoch ms; 0 when it didn't say).
+fn cache_until(expiration: i64, now: i64) -> i64 {
+    if expiration > 0 {
+        expiration
+    } else {
+        now + TOKEN_FALLBACK_TTL_MS
+    }
+}
+
+/// The app sends a cached token while `expiration >= now` (`ak8/m` `e()`);
+/// this stops a minute early so a call doesn't race the expiry.
+fn token_usable(expires: i64, now: i64) -> bool {
+    expires - TOKEN_MARGIN_MS >= now
+}
+
+/// Whether LINE Calendar turned down the channel token: the BFF's
+/// `AUTHENTICATION_REQUIRED` (71) in a write's errors, or gRPC status 16
+/// (`UNAUTHENTICATED`).
+fn is_token_error(e: &Error) -> bool {
+    let text = e.to_string();
+    text.contains("AUTHENTICATION_REQUIRED") || text.contains("gRPC status 16")
 }
 
 /// Name of a `line.calendar.bff.ErrorCode`.
@@ -1185,6 +1261,45 @@ mod tests {
         let now = next_client_updated_at(0);
         // Seconds, not milliseconds: the server rejects a value over a day ahead.
         assert!(now > 1_700_000_000 && now < 10_000_000_000, "{now}");
+    }
+
+    #[test]
+    fn channel_tokens_are_kept_until_they_expire() {
+        let now = 1_800_000_000_000;
+        // The server's expiry, in milliseconds.
+        let until = cache_until(now + 3_600_000, now);
+        assert!(token_usable(until, now));
+        assert!(token_usable(until, now + 3_500_000));
+        assert!(!token_usable(until, now + 3_590_000));
+        assert!(!token_usable(until, now + 3_600_000));
+        // No expiry given: kept for a while, not forever.
+        let until = cache_until(0, now);
+        assert!(token_usable(until, now + 60_000));
+        assert!(!token_usable(until, now + 3_600_000));
+    }
+
+    #[test]
+    fn token_errors_are_told_apart() {
+        let mut err = Writer::new();
+        err.enumeration(1, 71);
+        let mut resp = Writer::new();
+        resp.message(1, err.as_bytes());
+        let e = write_response("UpdateEvents", resp.as_bytes()).unwrap_err();
+        assert!(is_token_error(&e), "{e}");
+        assert!(is_token_error(&Error::internal(
+            "GrpcError",
+            "gRPC status 16: token expired"
+        )));
+        assert!(!is_token_error(&Error::internal(
+            "GrpcError",
+            "gRPC status 14"
+        )));
+        let mut err = Writer::new();
+        err.enumeration(1, 33);
+        let mut resp = Writer::new();
+        resp.message(1, err.as_bytes());
+        let e = write_response("UpdateEvents", resp.as_bytes()).unwrap_err();
+        assert!(!is_token_error(&e));
     }
 
     #[test]
