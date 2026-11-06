@@ -27,6 +27,7 @@ mod login;
 pub mod message;
 mod premium;
 mod profile;
+pub mod settings;
 mod square;
 mod user;
 pub mod voom;
