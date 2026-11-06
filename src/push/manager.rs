@@ -2,7 +2,7 @@
 //! square `fetchMyEvents` (service 3) and talk `sync` (services 5/8), ping
 //! handling, push frames and the read loop of one connection.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -14,8 +14,9 @@ use tokio::task::JoinSet;
 use super::conn::{ByteStream, Conn, ConnWriter, FrameDecoder, Packet};
 use super::frame::{AckType, PushFrame, services_mask, sign_on_request_packet, status_packet};
 use super::{Hub, Kind, tmc};
+use crate::base::ClientEvent;
 use crate::error::{Error, Result};
-use crate::polling::SyncData;
+use crate::polling::{FullSyncCategory, FullSyncReason, SyncData};
 use crate::thrift::{self, Protocol, Schema, TValue, Value};
 use crate::tv;
 
@@ -32,6 +33,7 @@ pub(crate) trait PushHost: Clone + Send + Sync + 'static {
     /// Restore persisted cursors before the first connection.
     fn restore_sync(&self) -> BoxFuture<'static, ()>;
     fn log(&self, kind: &str, data: serde_json::Value);
+    fn emit(&self, event: ClientEvent);
     /// Start the `/PUSH` request at `path`.
     fn open_conn(&self, path: &str) -> Result<Conn>;
     /// `SquareService.fetchMyEvents(args)` over the normal RPC path.
@@ -78,13 +80,29 @@ fn now_secs() -> f64 {
         .unwrap_or_default()
 }
 
+/// `sync(SyncRequest)` args (`qq8/f.java` builds the same fields).
 pub(crate) fn talk_sync_args(sync: &SyncData) -> Value {
-    tv!({"request": {
+    let mut req = tv!({
         "lastRevision": sync.talk.revision,
         "count": 100,
         "lastGlobalRevision": sync.talk.global_rev,
         "lastIndividualRevision": sync.talk.individual_rev,
-    }})
+    });
+    if let Some(reason) = sync.full_sync_request {
+        req.insert("fullSyncRequestReason", reason.as_str());
+    }
+    if !sync.last_partial_full_syncs.is_empty() {
+        req.insert(
+            "lastPartialFullSyncs",
+            Value::Map(
+                sync.last_partial_full_syncs
+                    .iter()
+                    .map(|(&k, &v)| (Value::Int(k.into()), Value::Int(v)))
+                    .collect(),
+            ),
+        );
+    }
+    tv!({ "request": req })
 }
 
 fn error_json(e: &Error) -> serde_json::Value {
@@ -272,15 +290,19 @@ impl<H: PushHost> ConnManager<H> {
         if response.is_null() {
             return Ok(());
         }
-        let ops = {
+        let (applied, snapshot) = {
             let mut sync = self.host.sync_state().lock().await;
-            apply_sync_response(&mut sync, response)
+            (apply_sync_response(&mut sync, response), sync.clone())
         };
-        for op in ops {
+        let full_sync = applied.full_sync_event();
+        for op in applied.ops {
             self.hub.deliver(Kind::Talk, op);
         }
-        let snapshot = self.host.sync_state().lock().await.clone();
         self.host.save_sync(snapshot.clone()).await;
+        if let Some(event) = full_sync {
+            self.log("full sync required", json!(""));
+            self.host.emit(event);
+        }
         let args = talk_sync_args(&snapshot);
         self.log("request talk fetcher:", args.to_json());
         self.build_and_send_sign_on_request(w, service, &args)?;
@@ -484,12 +506,62 @@ impl<H: PushHost> ConnManager<H> {
     }
 }
 
-/// Fold a talk `sync` response into the cursors and return its operations
-/// (shared with the polling path).
-pub(crate) fn apply_sync_response(sync: &mut SyncData, response: &Value) -> Vec<Value> {
+/// What a talk `sync` response changed.
+#[derive(Debug, Default)]
+pub(crate) struct AppliedSync {
+    pub ops: Vec<Value>,
+    /// `(reasons, categories)` of a full or partial full sync.
+    pub full_sync: Option<(Vec<FullSyncReason>, Vec<FullSyncCategory>)>,
+}
+
+impl AppliedSync {
+    pub fn full_sync_event(&self) -> Option<ClientEvent> {
+        self.full_sync
+            .clone()
+            .map(|(reasons, categories)| ClientEvent::FullSyncRequired {
+                reasons,
+                categories,
+            })
+    }
+}
+
+/// Fold a talk `sync` response (a union of `operationResponse`,
+/// `fullSyncResponse` and `partialFullSyncResponse`; `qq8/f.java` `i()`)
+/// into the cursors and return its operations (shared with the polling
+/// path).
+pub(crate) fn apply_sync_response(sync: &mut SyncData, response: &Value) -> AppliedSync {
     let nonzero = |v: &Value| v.as_i64().filter(|&n| n != 0);
-    if let Some(r) = nonzero(&response["fullSyncResponse"]["nextRevision"]) {
-        sync.talk.revision = r;
+    // Any answer means the pending full-sync request reached the server.
+    sync.full_sync_request = None;
+    let mut out = AppliedSync::default();
+    let full = &response["fullSyncResponse"];
+    if !full.is_null() {
+        if let Some(r) = nonzero(&full["nextRevision"]) {
+            sync.talk.revision = r;
+        }
+        let reasons = full["reasons"]
+            .as_list()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|r| r.as_i64())
+            .map(|r| FullSyncReason::from_i32(r as i32))
+            .collect();
+        out.full_sync = Some((reasons, vec![FullSyncCategory::All]));
+    }
+    let partial = &response["partialFullSyncResponse"];
+    if !partial.is_null() {
+        let targets: BTreeMap<i32, i64> = partial["targetCategories"]
+            .as_map()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|(k, v)| Some((k.as_i64()? as i32, v.as_i64().unwrap_or_default())))
+            .collect();
+        let categories = targets
+            .keys()
+            .map(|&k| FullSyncCategory::from_i32(k))
+            .collect();
+        sync.last_partial_full_syncs = targets;
+        out.full_sync = Some((Vec::new(), categories));
     }
     let ops_res = &response["operationResponse"];
     if let Some(r) = nonzero(&ops_res["globalEvents"]["lastRevision"]) {
@@ -498,16 +570,16 @@ pub(crate) fn apply_sync_response(sync: &mut SyncData, response: &Value) -> Vec<
     if let Some(r) = nonzero(&ops_res["individualEvents"]["lastRevision"]) {
         sync.talk.individual_rev = r;
     }
-    let ops = ops_res["operations"]
+    out.ops = ops_res["operations"]
         .as_list()
         .map(<[Value]>::to_vec)
         .unwrap_or_default();
-    for op in &ops {
+    for op in &out.ops {
         if let Some(r) = op["revision"].as_i64() {
             sync.talk.revision = r;
         }
     }
-    ops
+    out
 }
 
 #[cfg(test)]
@@ -530,6 +602,7 @@ pub(crate) mod tests {
         pub sync: Arc<tokio::sync::Mutex<SyncData>>,
         pub logs: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
         pub emitted: Arc<Mutex<Vec<SyncData>>>,
+        pub events: Arc<Mutex<Vec<ClientEvent>>>,
         pub fetch: Responder,
         pub noop_ok: bool,
         pub opens: Arc<AtomicUsize>,
@@ -544,6 +617,7 @@ pub(crate) mod tests {
                 sync: Arc::default(),
                 logs: Arc::default(),
                 emitted: Arc::default(),
+                events: Arc::default(),
                 fetch: Arc::new(|| Err(Error::internal("TestError", "unexpected fetchMyEvents"))),
                 noop_ok: true,
                 opens: Arc::default(),
@@ -576,6 +650,9 @@ pub(crate) mod tests {
         }
         fn log(&self, kind: &str, data: serde_json::Value) {
             self.logs.lock().unwrap().push((kind.to_string(), data));
+        }
+        fn emit(&self, event: ClientEvent) {
+            self.events.lock().unwrap().push(event);
         }
         fn open_conn(&self, _path: &str) -> Result<Conn> {
             self.opens.fetch_add(1, Ordering::SeqCst);
@@ -872,12 +949,113 @@ pub(crate) mod tests {
             "globalEvents": {"lastRevision": 7},
             "individualEvents": {"lastRevision": 0},
         }});
-        let ops = apply_sync_response(&mut sync, &res);
-        assert_eq!(ops.len(), 2);
+        let applied = apply_sync_response(&mut sync, &res);
+        assert_eq!(applied.ops.len(), 2);
+        assert!(applied.full_sync.is_none());
         assert_eq!(sync.talk.revision, 11);
         assert_eq!(sync.talk.global_rev, 7);
         assert_eq!(sync.talk.individual_rev, 0);
         apply_sync_response(&mut sync, &tv!({}));
         assert_eq!(sync.talk.revision, 11);
+    }
+
+    #[test]
+    fn full_sync_response_moves_revision_and_reports_reasons() {
+        let mut sync = SyncData::default();
+        sync.talk.revision = 3;
+        sync.full_sync_request = Some(crate::polling::FullSyncRequestReason::Other);
+        let res = tv!({"fullSyncResponse": {"reasons": [1, 4, 77], "nextRevision": 500}});
+        let applied = apply_sync_response(&mut sync, &res);
+        assert!(applied.ops.is_empty());
+        assert_eq!(sync.talk.revision, 500);
+        assert_eq!(sync.full_sync_request, None);
+        let Some(ClientEvent::FullSyncRequired {
+            reasons,
+            categories,
+        }) = applied.full_sync_event()
+        else {
+            panic!("no full sync event")
+        };
+        assert_eq!(
+            reasons,
+            [
+                FullSyncReason::RevisionGapTooLargeClient,
+                FullSyncReason::RevisionHole,
+                FullSyncReason::Other(77)
+            ]
+        );
+        assert_eq!(categories, [FullSyncCategory::All]);
+    }
+
+    #[test]
+    fn partial_full_sync_is_remembered_and_sent_back() {
+        let mut sync = SyncData::default();
+        sync.talk.revision = 9;
+        let mut partial = Value::object();
+        partial.insert(
+            "targetCategories",
+            Value::Map(vec![
+                (Value::Int(7), Value::Int(1000)),
+                (Value::Int(4), Value::Int(900)),
+            ]),
+        );
+        let mut res = Value::object();
+        res.insert("partialFullSyncResponse", partial);
+        let applied = apply_sync_response(&mut sync, &res);
+        // The revision stays; only the categories are re-pulled.
+        assert_eq!(sync.talk.revision, 9);
+        assert_eq!(
+            sync.last_partial_full_syncs,
+            BTreeMap::from([(4, 900), (7, 1000)])
+        );
+        assert!(matches!(
+            applied.full_sync_event(),
+            Some(ClientEvent::FullSyncRequired { reasons, categories })
+                if reasons.is_empty()
+                    && categories == [FullSyncCategory::Contact, FullSyncCategory::Message]
+        ));
+        // The next request carries `lastPartialFullSyncs` on the wire.
+        let fields =
+            thrift::encode_struct(Schema::line(), "sync_args", &talk_sync_args(&sync)).unwrap();
+        let decoded =
+            thrift::decode_struct(Schema::line(), Some("sync_args"), &TValue::Struct(fields));
+        let sent = decoded["request"]["lastPartialFullSyncs"].as_map().unwrap();
+        assert_eq!(sent.len(), 2);
+        assert!(sent.contains(&(Value::Int(7), Value::Int(1000))));
+    }
+
+    #[tokio::test]
+    async fn push_sign_on_full_sync_emits_event() {
+        let host = FakeHost::new();
+        let (m, hub) = manager(&host);
+        let _talk = hub.subscribe_raw(Kind::Talk);
+        let (w, mut written) = ConnWriter::channel();
+        let id = m
+            .build_and_send_sign_on_request(&w, 8, &talk_sync_args(&SyncData::default()))
+            .unwrap();
+        drain(&mut written);
+        // sync_result { success: { fullSyncResponse: { reasons: {5}, nextRevision: 77 } } }
+        let full = TValue::Struct(vec![
+            (
+                1,
+                TValue::Set(crate::thrift::TType::I32, vec![TValue::I32(5)]),
+            ),
+            (2, TValue::I64(77)),
+        ]);
+        let body = compact_result("sync", vec![(0, TValue::Struct(vec![(2, full)]))]);
+        m.on_sign_on_response(&w, id, &body).await;
+        assert_eq!(host.sync.lock().await.talk.revision, 77);
+        let events = host.events.lock().unwrap();
+        assert!(matches!(
+            events.as_slice(),
+            [ClientEvent::FullSyncRequired { reasons, categories }]
+                if reasons == &[FullSyncReason::ForceTriggered]
+                    && categories == &[FullSyncCategory::All]
+        ));
+        // The chain goes on from the new revision.
+        let next = drain(&mut written);
+        let msg = thrift::read_message(&next[0][9..], Protocol::Compact).unwrap();
+        let args = thrift::decode_struct(Schema::line(), Some("sync_args"), &msg.body);
+        assert_eq!(args["request"]["lastRevision"].as_i64(), Some(77));
     }
 }

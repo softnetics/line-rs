@@ -2,7 +2,7 @@
 //! talk operations and square events over the shared LEGY push connection,
 //! plus plain polling variants (`sync` / `fetchMyEvents` in a loop).
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -20,13 +20,125 @@ use crate::thrift::{Protocol, Value};
 use crate::tv;
 
 /// Sync cursors shared by push and polling (serialized like linejs'
-/// `SyncData`: `{"square": …, "talk": {"revision", "globalRev", "individualRev"}}`).
+/// `SyncData`: `{"square": …, "talk": {"revision", "globalRev", "individualRev"}}`,
+/// plus the full-sync fields below when they are set).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SyncData {
     /// Square `fetchMyEvents` sync token.
     pub square: Option<String>,
     pub talk: TalkSync,
+    /// `targetCategories` of the last `partialFullSyncResponse` (category
+    /// number → revision), sent back as `SyncRequest.lastPartialFullSyncs`
+    /// like the Android app (`qq8/f.java`).
+    #[serde(
+        rename = "lastPartialFullSyncs",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub last_partial_full_syncs: BTreeMap<i32, i64>,
+    /// A full sync the client asked for with
+    /// [`BaseClient::request_full_sync`], sent as
+    /// `SyncRequest.fullSyncRequestReason` until the server answers.
+    #[serde(
+        rename = "fullSyncRequestReason",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub full_sync_request: Option<FullSyncRequestReason>,
+}
+
+/// Why the client asks the server for a full sync
+/// (`SyncRequest.fullSyncRequestReason`, `Pb1_J4` in the IDL).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum FullSyncRequestReason {
+    Other,
+    /// First start on this device (the Android app sends it after login).
+    Initialization,
+    PeriodicSync,
+    ManualSync,
+    LocalDbCorrupted,
+}
+
+impl FullSyncRequestReason {
+    /// IDL name (`INITIALIZATION`, ...).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Other => "OTHER",
+            Self::Initialization => "INITIALIZATION",
+            Self::PeriodicSync => "PERIODIC_SYNC",
+            Self::ManualSync => "MANUAL_SYNC",
+            Self::LocalDbCorrupted => "LOCAL_DB_CORRUPTED",
+        }
+    }
+}
+
+/// Why the server sent a `fullSyncResponse` (`FullSyncResponse.reasons`;
+/// names from the Android app's `ts8/ea.java`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FullSyncReason {
+    Unknown,
+    RevisionGapTooLargeClient,
+    RevisionGapTooLargeServer,
+    OperationExpired,
+    RevisionHole,
+    ForceTriggered,
+    /// A value this version does not know.
+    Other(i32),
+}
+
+impl FullSyncReason {
+    pub fn from_i32(n: i32) -> Self {
+        match n {
+            0 => Self::Unknown,
+            1 => Self::RevisionGapTooLargeClient,
+            2 => Self::RevisionGapTooLargeServer,
+            3 => Self::OperationExpired,
+            4 => Self::RevisionHole,
+            5 => Self::ForceTriggered,
+            n => Self::Other(n),
+        }
+    }
+}
+
+/// A data category the server wants re-pulled (keys of
+/// `PartialFullSyncResponse.targetCategories`; names from the Android
+/// app's `ts8/le.java`). A full sync uses [`All`](Self::All).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum FullSyncCategory {
+    All,
+    Profile,
+    Settings,
+    Configurations,
+    Contact,
+    Group,
+    E2ee,
+    /// Chats and their messages (the Android app re-pulls the chat list,
+    /// recent messages and read counts).
+    Message,
+    MultiProfile,
+    MessageRequestBox,
+    ScheduledMessage,
+    /// A value this version does not know.
+    Other(i32),
+}
+
+impl FullSyncCategory {
+    pub fn from_i32(n: i32) -> Self {
+        match n {
+            0 => Self::All,
+            1 => Self::Profile,
+            2 => Self::Settings,
+            3 => Self::Configurations,
+            4 => Self::Contact,
+            5 => Self::Group,
+            6 => Self::E2ee,
+            7 => Self::Message,
+            8 => Self::MultiProfile,
+            9 => Self::MessageRequestBox,
+            10 => Self::ScheduledMessage,
+            n => Self::Other(n),
+        }
+    }
 }
 
 /// Talk `sync` revisions.
@@ -216,6 +328,20 @@ impl BaseClient {
         self.emit(ClientEvent::UpdateSyncData(data));
     }
 
+    /// Ask the server for a full sync: the next talk `sync` request carries
+    /// `fullSyncRequestReason = reason` (saved, so it survives a restart).
+    /// The server answers with a `fullSyncResponse`, reported as
+    /// [`ClientEvent::FullSyncRequired`].
+    pub async fn request_full_sync(&self, reason: FullSyncRequestReason) {
+        self.load_sync_data().await;
+        let snapshot = {
+            let mut sync = self.sync.lock().await;
+            sync.full_sync_request = Some(reason);
+            sync.clone()
+        };
+        self.persist_sync_data(&snapshot).await;
+    }
+
     /// Stream of talk `Operation`s delivered over the LEGY push connection.
     ///
     /// The connection is shared with [`listen_square_events`](Self::listen_square_events)
@@ -297,12 +423,15 @@ impl BaseClient {
         let opts =
             RequestOptions::new("/SYNC4", Protocol::Compact).timeout(self.config.long_timeout);
         let res = self.call_with("sync", args, opts).await?;
-        let (ops, snapshot) = {
+        let (applied, snapshot) = {
             let mut sync = self.sync.lock().await;
             (apply_sync_response(&mut sync, &res), sync.clone())
         };
         self.store_sync_data(snapshot).await;
-        Ok(ops)
+        if let Some(event) = applied.full_sync_event() {
+            self.emit(event);
+        }
+        Ok(applied.ops)
     }
 
     async fn poll_square_once(&self, continuation: &Mutex<Option<String>>) -> Result<Vec<Value>> {
@@ -373,6 +502,7 @@ mod tests {
                 global_rev: 2,
                 individual_rev: 3,
             },
+            ..Default::default()
         };
         let j = serde_json::to_value(&data).unwrap();
         assert_eq!(
@@ -382,6 +512,36 @@ mod tests {
         let back: SyncData = serde_json::from_value(json!({"talk": {"revision": 9}})).unwrap();
         assert_eq!(back.talk.revision, 9);
         assert_eq!(back.square, None);
+    }
+
+    #[test]
+    fn full_sync_fields_round_trip() {
+        let mut data = SyncData::default();
+        data.last_partial_full_syncs.insert(7, 123);
+        data.full_sync_request = Some(FullSyncRequestReason::Initialization);
+        let j = serde_json::to_value(&data).unwrap();
+        assert_eq!(j["lastPartialFullSyncs"], json!({"7": 123}));
+        assert_eq!(j["fullSyncRequestReason"], "INITIALIZATION");
+        let back: SyncData = serde_json::from_value(j).unwrap();
+        assert_eq!(back, data);
+    }
+
+    #[tokio::test]
+    async fn requested_full_sync_is_saved_and_sent() {
+        use crate::storage::MemoryStorage;
+        let storage = Arc::new(MemoryStorage::new());
+        let c = storage_client(storage.clone());
+        c.request_full_sync(FullSyncRequestReason::ManualSync).await;
+        let restored = storage_client(storage).sync_data().await;
+        assert_eq!(
+            restored.full_sync_request,
+            Some(FullSyncRequestReason::ManualSync)
+        );
+        let args = talk_sync_args(&restored);
+        assert_eq!(
+            args["request"]["fullSyncRequestReason"].as_str(),
+            Some("MANUAL_SYNC")
+        );
     }
 
     fn storage_client(storage: Arc<crate::storage::MemoryStorage>) -> BaseClient {

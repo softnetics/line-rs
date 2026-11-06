@@ -1,5 +1,5 @@
 use super::LogoutReason;
-use crate::polling::SyncData;
+use crate::polling::{FullSyncCategory, FullSyncReason, SyncData};
 use crate::thrift::Value;
 
 /// Events emitted by [`BaseClient`](super::BaseClient).
@@ -22,6 +22,21 @@ pub enum ClientEvent {
     UpdateCert(String),
     UpdateQrCert(String),
     UpdateSyncData(SyncData),
+    /// The server will not replay the operations since the saved revision
+    /// (a talk `sync` returned `fullSyncResponse` or
+    /// `partialFullSyncResponse`). Live events continue from the new
+    /// revision, but anything that changed in between is only visible by
+    /// re-pulling the listed categories: for [`FullSyncCategory::All`] or
+    /// [`FullSyncCategory::Message`], reload the chat list
+    /// (`getMessageBoxes`, `getAllChatMids`/`getChats`) and recent messages;
+    /// for `Contact`, the contacts; for `Profile`, the profile. Expect one on
+    /// the first start of a fresh storage (revision 0).
+    FullSyncRequired {
+        /// `FullSyncResponse.reasons`; empty for a partial full sync.
+        reasons: Vec<FullSyncReason>,
+        /// What to re-pull; `[All]` for a full sync.
+        categories: Vec<FullSyncCategory>,
+    },
     Log {
         kind: String,
         data: serde_json::Value,

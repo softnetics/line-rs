@@ -23,7 +23,7 @@ use futures::future::BoxFuture;
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 
-use crate::base::BaseClient;
+use crate::base::{BaseClient, ClientEvent};
 use crate::error::{Error, Result};
 use crate::polling::SyncData;
 use crate::request::RequestOptions;
@@ -231,6 +231,10 @@ impl PushHost for BaseClient {
 
     fn log(&self, kind: &str, data: serde_json::Value) {
         BaseClient::log(self, kind, data);
+    }
+
+    fn emit(&self, event: ClientEvent) {
+        BaseClient::emit(self, event);
     }
 
     fn open_conn(&self, path: &str) -> Result<Conn> {
