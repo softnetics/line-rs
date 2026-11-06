@@ -118,6 +118,110 @@ pub(crate) fn missing_key(what: impl std::fmt::Display) -> Error {
     Error::internal("E2EEKeyMissing", format!("{what} is not available"))
 }
 
+/// Why a group key could not be opened (`xn8/r.a`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GroupKeyFailure {
+    /// The key is wrapped for an own key id we do not hold.
+    MyKeyMissing,
+    /// The creator's public key could not be resolved.
+    CreatorKeyUnavailable,
+    /// Unwrapping failed.
+    SharedKeyUndecryptable,
+    /// LINE has no such generation (`NOT_FOUND`). Not remembered by the
+    /// Android app; remembered here so every message naming it does not
+    /// ask again.
+    NotFound,
+}
+
+/// How long an unresolvable key id is remembered. The Android app keeps
+/// them until its own key changes (`xn8/g0.a`, `g0.y`); line-rs also lets
+/// them expire, so a key that appears later (a peer re-registering, a
+/// member wrapping the group key for us) is found without a restart.
+pub(crate) const UNRESOLVABLE_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Negative caches of `xn8/g0`: peer key ids (`f397250f`) and group key ids
+/// (`f397249e`) that could not be resolved, so every message naming one
+/// fails at once instead of asking LINE again.
+#[derive(Default)]
+pub(crate) struct Unresolvable {
+    peers: std::sync::Mutex<std::collections::HashMap<(String, i64), std::time::Instant>>,
+    groups: std::sync::Mutex<
+        std::collections::HashMap<(String, i64), (GroupKeyFailure, std::time::Instant)>,
+    >,
+}
+
+impl Unresolvable {
+    fn fresh(at: std::time::Instant) -> bool {
+        at.elapsed() < UNRESOLVABLE_TTL
+    }
+
+    pub fn peer(&self, mid: &str, key_id: i64) -> bool {
+        let mut peers = self.peers.lock().unwrap();
+        match peers.get(&(mid.to_string(), key_id)) {
+            Some(&at) if Self::fresh(at) => true,
+            Some(_) => {
+                peers.remove(&(mid.to_string(), key_id));
+                false
+            }
+            None => false,
+        }
+    }
+
+    pub fn add_peer(&self, mid: &str, key_id: i64) {
+        self.peers
+            .lock()
+            .unwrap()
+            .insert((mid.to_string(), key_id), std::time::Instant::now());
+    }
+
+    pub fn group(&self, chat_mid: &str, key_id: i64) -> Option<GroupKeyFailure> {
+        let mut groups = self.groups.lock().unwrap();
+        match groups.get(&(chat_mid.to_string(), key_id)) {
+            Some(&(why, at)) if Self::fresh(at) => Some(why),
+            Some(_) => {
+                groups.remove(&(chat_mid.to_string(), key_id));
+                None
+            }
+            None => None,
+        }
+    }
+
+    pub fn add_group(&self, chat_mid: &str, key_id: i64, why: GroupKeyFailure) {
+        self.groups.lock().unwrap().insert(
+            (chat_mid.to_string(), key_id),
+            (why, std::time::Instant::now()),
+        );
+    }
+
+    /// Forget the group key ids only (`g0.y`, `g0.o`: a new own key may
+    /// open them).
+    pub fn clear_groups(&self) {
+        self.groups.lock().unwrap().clear();
+    }
+
+    /// Forget everything (`g0.a`).
+    pub fn clear(&self) {
+        self.peers.lock().unwrap().clear();
+        self.clear_groups();
+    }
+}
+
+/// Server codes after which the Android app remembers a peer key id as
+/// unresolvable (`xn8/n.a`).
+fn is_unresolvable_code(e: &Error) -> bool {
+    matches!(
+        e.code(),
+        Some("E2EE_INVALID_ARGUMENT" | "NOT_FOUND" | "INVALID_MID")
+    ) || matches!(
+        e.error_code(),
+        Some(
+            crate::error::ErrorCode::E2eeInvalidArgument
+                | crate::error::ErrorCode::NotFound
+                | crate::error::ErrorCode::InvalidMid
+        )
+    )
+}
+
 /// `keyVersion` of every key call; the APK always sends 1.
 const KEY_VERSION: i32 = 1;
 
@@ -374,9 +478,19 @@ impl<'a> E2ee<'a> {
         {
             return Ok(decode_base64(&cached));
         }
+        if self.state.unresolvable.peer(mid, id) {
+            return Err(missing_key(format_args!(
+                "public key {id} of {mid} (LINE could not resolve it recently)"
+            )));
+        }
         let res = match self.host.get_e2ee_public_key(mid, KEY_VERSION, id).await {
             Ok(v) => v,
-            Err(e) if e.code() == Some("NOT_FOUND") => {
+            Err(e) if is_unresolvable_code(&e) => {
+                self.state.unresolvable.add_peer(mid, id);
+                self.log(
+                    "e2eePublicKeyUnresolvable",
+                    serde_json::json!({"mid": mid, "keyId": id, "code": e.code()}),
+                );
                 return Err(missing_key(format_args!("public key {id} of {mid}")));
             }
             Err(e) => return Err(e),
@@ -432,10 +546,25 @@ impl<'a> E2ee<'a> {
     }
 
     /// `xn8/g0.e`: the cache, else `getE2EEGroupSharedKey` for exactly `id`.
+    /// A generation that cannot be opened is remembered with the reason
+    /// ([`Unresolvable`]), so the next message naming it fails at once.
     async fn group_key_by_id(&self, chat_mid: &str, id: i64) -> Result<GroupKey> {
         if let Some(cached) = self.cached_group_key(chat_mid, id).await {
             return Ok(cached);
         }
+        if let Some(why) = self.state.unresolvable.group(chat_mid, id) {
+            return Err(missing_key(format_args!(
+                "group key {id} of {chat_mid} ({why:?} recently)"
+            )));
+        }
+        let fail = |why: GroupKeyFailure, e: Error| {
+            self.state.unresolvable.add_group(chat_mid, id, why);
+            self.log(
+                "e2eeGroupKeyUnresolvable",
+                serde_json::json!({"chatMid": chat_mid, "groupKeyId": id, "reason": format!("{why:?}")}),
+            );
+            e
+        };
         let shared = match self
             .host
             .get_e2ee_group_shared_key(KEY_VERSION, chat_mid, id)
@@ -443,15 +572,22 @@ impl<'a> E2ee<'a> {
         {
             Ok(v) => v,
             Err(e) if e.code() == Some("NOT_FOUND") => {
-                self.log("getE2EEGroupSharedKeyNotFound", chat_mid.into());
-                return Err(missing_key(format_args!("group key {id} of {chat_mid}")));
+                return Err(fail(
+                    GroupKeyFailure::NotFound,
+                    missing_key(format_args!("group key {id} of {chat_mid}")),
+                ));
             }
             Err(e) => return Err(e),
         };
         if key_id_of(&shared["groupKeyId"]) != Some(id) {
             return Err(missing_key(format_args!("group key {id} of {chat_mid}")));
         }
-        self.unwrap_group_shared_key(chat_mid, &shared).await
+        self.open_group_shared_key(chat_mid, &shared)
+            .await
+            .map_err(|(why, e)| match why {
+                Some(why) => fail(why, e),
+                None => e,
+            })
     }
 
     /// `xn8/g0.l`: the group's last key, registering one when the group has
@@ -491,18 +627,41 @@ impl<'a> E2ee<'a> {
         chat_mid: &str,
         shared: &Value,
     ) -> Result<GroupKey> {
-        let group_key_id = key_id_of(&shared["groupKeyId"])
-            .ok_or_else(|| Error::internal("NoE2EEKey", format!("no group key for {chat_mid}")))?;
+        self.open_group_shared_key(chat_mid, shared)
+            .await
+            .map_err(|(_, e)| e)
+    }
+
+    /// [`Self::unwrap_group_shared_key`], with why it failed when the
+    /// failure is one `xn8/g0.e` remembers.
+    async fn open_group_shared_key(
+        &self,
+        chat_mid: &str,
+        shared: &Value,
+    ) -> std::result::Result<GroupKey, (Option<GroupKeyFailure>, Error)> {
+        use GroupKeyFailure::*;
+        let plain = |e: Error| (None, e);
+        let group_key_id = key_id_of(&shared["groupKeyId"]).ok_or_else(|| {
+            plain(Error::internal(
+                "NoE2EEKey",
+                format!("no group key for {chat_mid}"),
+            ))
+        })?;
         let creator = shared["creator"].as_str().unwrap_or_default();
         let creator_key_id = key_id_of(&shared["creatorKeyId"]);
-        let receiver_key_id = key_id_of(&shared["receiverKeyId"]).ok_or_else(|| {
+        let missing_own = || {
             missing_key(format_args!(
                 "our key for group key {group_key_id} of {chat_mid}"
             ))
-        })?;
+        };
+        let receiver_key_id = key_id_of(&shared["receiverKeyId"])
+            .ok_or_else(|| (Some(MyKeyMissing), missing_own()))?;
         let encrypted = shared["encryptedSharedKey"].as_bytes().unwrap_or_default();
 
-        let self_key = self.own_key(receiver_key_id).await?;
+        let self_key = self
+            .own_key(receiver_key_id)
+            .await
+            .map_err(|e| (Some(MyKeyMissing), e))?;
         // A key we created ourselves was wrapped with one of our own keys.
         let own_creator_key = match creator_key_id {
             Some(id) if self.host.self_mid().as_deref() == Some(creator) => {
@@ -512,23 +671,33 @@ impl<'a> E2ee<'a> {
         };
         let creator_key = match own_creator_key {
             Some(key) => key.public_key(),
-            None => self.get_user_public_key(creator, creator_key_id).await?,
+            None => self
+                .get_user_public_key(creator, creator_key_id)
+                .await
+                .map_err(|e| {
+                    let gone = matches!(&e, Error::Internal { kind, .. } if kind == "E2EEKeyMissing")
+                        || is_unresolvable_code(&e);
+                    (gone.then_some(CreatorKeyUnavailable), e)
+                })?,
         };
         let secret = crypto::generate_shared_secret(&self_key.private_key(), &creator_key);
         let (key, iv) = crypto::derive_key_iv(&secret, &[]);
-        let plain = crypto::decrypt_aes_cbc(&key, &iv, encrypted, true)?;
+        let plain_key = crypto::decrypt_aes_cbc(&key, &iv, encrypted, true)
+            .map_err(|e| (Some(SharedKeyUndecryptable), e))?;
 
         let group_key = GroupKey {
-            priv_key: B64.encode(plain),
+            priv_key: B64.encode(plain_key),
             key_id: group_key_id,
         };
         self.set_json(
             &format!("e2eeGroupKeys:{chat_mid}:{group_key_id}"),
             &group_key,
         )
-        .await?;
+        .await
+        .map_err(plain)?;
         self.set_json(&format!("e2eeGroupKeys:{chat_mid}"), &group_key)
-            .await?;
+            .await
+            .map_err(plain)?;
         Ok(group_key)
     }
 
@@ -586,6 +755,8 @@ impl<'a> E2ee<'a> {
             .unwrap_or_else(|| "undefined".into());
         self.save_self_key_by_key_id(&id, &key).await?;
         self.save_self_key(&key).await?;
+        // `g0.y`: a new own key may open group keys that failed before.
+        self.state.unresolvable.clear_groups();
         self.log(
             "registerE2EEKeyPairSuccess",
             serde_json::json!({"keyId": key_id}),
@@ -670,8 +841,10 @@ impl<'a> E2ee<'a> {
             }
             None => self.set_json(LOGIN_KEY_ID, &selected.key_id).await?,
         }
-        // Keys confirmed before this login may have been replaced.
+        // Keys confirmed before this login may have been replaced, and the
+        // key chain may open what failed before.
         self.state.confirmed_keys.lock().unwrap().clear();
+        self.state.unresolvable.clear();
         Ok(Some((key, selected.private_key, selected.public_key)))
     }
 
@@ -1183,6 +1356,104 @@ pub(crate) mod tests {
                 .await
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn unresolvable_group_key_is_not_asked_for_again() {
+        let host = group_fixture(&[7], 7).await;
+        host.storage.delete("e2eeKeys:5").await.unwrap();
+        let state = E2eeState::default();
+        let e2ee = E2ee::new(&host, &state);
+        for _ in 0..3 {
+            let err = e2ee.get_group_key(GROUP, Some(7)).await.unwrap_err();
+            assert!(err.to_string().contains("E2EEKeyMissing"), "{err}");
+        }
+        assert_eq!(host.calls(), [by_id(7)]);
+        assert_eq!(
+            state.unresolvable.group(GROUP, 7),
+            Some(GroupKeyFailure::MyKeyMissing)
+        );
+        // An unserved generation is remembered too, apart from the others.
+        assert!(e2ee.get_group_key(GROUP, Some(8)).await.is_err());
+        assert!(e2ee.get_group_key(GROUP, Some(8)).await.is_err());
+        assert_eq!(host.calls(), [by_id(7), by_id(8)]);
+
+        // A new own key (login, registration) lets it be asked again.
+        state.unresolvable.clear_groups();
+        assert!(e2ee.get_group_key(GROUP, Some(7)).await.is_err());
+        assert_eq!(host.calls().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn unresolvable_peer_key_is_not_asked_for_again() {
+        let host = FakeHost::new();
+        let state = E2eeState::default();
+        let e2ee = E2ee::new(&host, &state);
+        for _ in 0..3 {
+            let err = e2ee
+                .get_user_public_key("u-them", Some(4))
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("E2EEKeyMissing"), "{err}");
+        }
+        let asked = |h: &FakeHost| {
+            h.calls()
+                .iter()
+                .filter(|(n, _)| n == "getE2EEPublicKey")
+                .count()
+        };
+        assert_eq!(asked(&host), 1);
+        // Another key id of the same peer is its own entry.
+        assert!(e2ee.get_user_public_key("u-them", Some(5)).await.is_err());
+        assert_eq!(asked(&host), 2);
+        state.unresolvable.clear();
+        assert!(e2ee.get_user_public_key("u-them", Some(4)).await.is_err());
+        assert_eq!(asked(&host), 3);
+    }
+
+    #[tokio::test]
+    async fn network_errors_are_not_remembered() {
+        struct Offline(FakeHost);
+        #[async_trait]
+        impl E2eeHost for Offline {
+            fn storage(&self) -> &dyn Storage {
+                &self.0.storage
+            }
+            fn self_mid(&self) -> Option<String> {
+                self.0.mid.clone()
+            }
+            async fn get_e2ee_public_keys(&self) -> Result<Value> {
+                unreachable!()
+            }
+            async fn get_e2ee_public_key(&self, _: &str, _: i32, _: i64) -> Result<Value> {
+                self.0.record("getE2EEPublicKey", Value::Null);
+                Err(Error::internal("Offline", "offline"))
+            }
+            async fn negotiate_e2ee_public_key(&self, _: &str) -> Result<Value> {
+                unreachable!()
+            }
+            async fn get_e2ee_group_shared_key(&self, _: i32, _: &str, _: i64) -> Result<Value> {
+                unreachable!()
+            }
+            async fn get_last_e2ee_group_shared_key(&self, _: i32, _: &str) -> Result<Value> {
+                unreachable!()
+            }
+            async fn get_last_e2ee_public_keys(&self, _: &str) -> Result<Value> {
+                unreachable!()
+            }
+            async fn register_e2ee_group_key(&self, _: Value) -> Result<Value> {
+                unreachable!()
+            }
+            async fn register_e2ee_public_key(&self, _: Value) -> Result<Value> {
+                unreachable!()
+            }
+        }
+        let host = Offline(FakeHost::new());
+        let state = E2eeState::default();
+        let e2ee = E2ee::new(&host, &state);
+        assert!(e2ee.get_user_public_key("u-them", Some(4)).await.is_err());
+        assert!(e2ee.get_user_public_key("u-them", Some(4)).await.is_err());
+        assert_eq!(host.0.calls().len(), 2);
     }
 
     /// Our key 5, a last group key 9 wrapped for our key 4 (which we lack),

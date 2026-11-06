@@ -384,6 +384,13 @@ fn header_map(pairs: impl IntoIterator<Item = (&'static str, String)>) -> Result
     Ok(map)
 }
 
+/// `x-lsr`: the account's region from its profile, as `ul6/a.java` sends
+/// it (not a fixed "JP"). Left out while the region is unknown, as the
+/// REST client does.
+fn region_header(region: Option<String>) -> Option<(&'static str, String)> {
+    region.filter(|r| !r.is_empty()).map(|r| ("x-lsr", r))
+}
+
 fn home_prefix(home_id: &str) -> &'static str {
     if home_id.starts_with('s') { "sn" } else { "mh" }
 }
@@ -471,27 +478,30 @@ impl Timeline {
                     .ok_or_else(|| Error::internal("NotAuthorized", "try login first"))?;
                 let access = self.client.require_token()?;
                 let d = &self.client.device_details;
-                header_map([
-                    ("x-line-bdbtemplateversion", "v1".to_string()),
-                    ("x-lsr", "JP".to_string()),
-                    ("user-agent", d.user_agent()),
-                    ("x-line-channeltoken", token),
-                    ("accept-encoding", "gzip".to_string()),
-                    (
-                        "x-line-global-config",
-                        "discover.enable=true; follow.enable=true; reboot.phase=scenario"
-                            .to_string(),
-                    ),
-                    ("x-line-mid", mid),
-                    ("x-line-access", access),
-                    (
-                        "content-type",
-                        "application/json; charset=UTF-8".to_string(),
-                    ),
-                    ("x-line-application", d.application()),
-                    ("x-lal", self.client.config.language.clone()),
-                    ("x-lpv", "1".to_string()),
-                ])
+                header_map(
+                    [
+                        ("x-line-bdbtemplateversion", "v1".to_string()),
+                        ("user-agent", d.user_agent()),
+                        ("x-line-channeltoken", token),
+                        ("accept-encoding", "gzip".to_string()),
+                        (
+                            "x-line-global-config",
+                            "discover.enable=true; follow.enable=true; reboot.phase=scenario"
+                                .to_string(),
+                        ),
+                        ("x-line-mid", mid),
+                        ("x-line-access", access),
+                        (
+                            "content-type",
+                            "application/json; charset=UTF-8".to_string(),
+                        ),
+                        ("x-line-application", d.application()),
+                        ("x-lal", self.client.config.language.clone()),
+                        ("x-lpv", "1".to_string()),
+                    ]
+                    .into_iter()
+                    .chain(region_header(self.client.region_code())),
+                )
             })
             .await
     }
@@ -765,6 +775,23 @@ impl Timeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn region_header_follows_the_profile() {
+        assert_eq!(
+            region_header(Some("TH".into())),
+            Some(("x-lsr", "TH".to_string()))
+        );
+        assert_eq!(region_header(Some(String::new())), None);
+        assert_eq!(region_header(None), None);
+        let map = header_map(
+            [("x-lal", "th_TH".to_string())]
+                .into_iter()
+                .chain(region_header(Some("TH".into()))),
+        )
+        .unwrap();
+        assert_eq!(map["x-lsr"], "TH");
+    }
 
     #[test]
     fn create_post_body() {

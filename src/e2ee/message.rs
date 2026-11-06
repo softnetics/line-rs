@@ -86,17 +86,118 @@ pub fn encrypt_payload(
     ])
 }
 
-/// Spec v1: AES-256-CBC keyed by `sha256(secret ‖ salt ‖ "Key")`.
+/// Spec v1: `[salt(8), ciphertext, mac, senderKeyId, receiverKeyId]`,
+/// AES-256-CBC (PKCS#7) keyed by `sha256(secret ‖ salt ‖ "Key")` with the
+/// folded `sha256(secret ‖ salt ‖ "IV")` as IV. `mac` must be
+/// `AES-ECB(key, fold(sha256(ciphertext)))`, as `xn8/l.a` checks before
+/// decrypting.
 pub fn decrypt_message_v1(
     chunks: &[Vec<u8>],
     private_key: &[u8],
     public_key: &[u8],
 ) -> Result<serde_json::Value> {
+    if chunks.len() < 5 {
+        return Err(malformed());
+    }
     let secret = crypto::generate_shared_secret(private_key, public_key);
     let (key, iv) = crypto::derive_key_iv(&secret, &chunks[0]);
-    let plain = crypto::decrypt_aes_cbc(&key, &iv, &chunks[1], true)
-        .or_else(|_| crypto::decrypt_aes_cbc(&key, &iv, &chunks[1], false))?;
+    let expected = crypto::encrypt_aes_ecb(&key, &crypto::xor(&crypto::sha256(&chunks[1])));
+    if chunks[2] != expected {
+        return Err(Error::Crypto(format!(
+            "E2EE v1 message MAC does not match ({} byte MAC)",
+            chunks[2].len()
+        )));
+    }
+    let plain = crypto::decrypt_aes_cbc(&key, &iv, &chunks[1], true)?;
     Ok(serde_json::from_slice(&plain)?)
+}
+
+/// Encrypt a JSON payload in the spec v1 layout (tests and old peers).
+#[cfg(test)]
+pub(crate) fn encrypt_payload_v1(
+    sender_key_id: i64,
+    receiver_key_id: i64,
+    shared_secret: &[u8],
+    payload: &serde_json::Value,
+) -> Result<Vec<Vec<u8>>> {
+    let salt = crypto::random_bytes(8);
+    let (key, iv) = crypto::derive_key_iv(shared_secret, &salt);
+    let ct = crypto::encrypt_aes_cbc(&key, &iv, &serde_json::to_vec(payload)?)?;
+    let mac = crypto::encrypt_aes_ecb(&key, &crypto::xor(&crypto::sha256(&ct)));
+    Ok(vec![
+        salt,
+        ct,
+        mac,
+        crypto::int_bytes(sender_key_id).to_vec(),
+        crypto::int_bytes(receiver_key_id).to_vec(),
+    ])
+}
+
+/// The Letter Sealing spec of a message from `contentMetadata.e2eeVersion`
+/// (`xn8/l.c`): 1 or 2. Without the key the message is taken as v2, as
+/// before; any other value is an error, as the Android app leaves such a
+/// message undecrypted.
+pub fn spec_version_of(message: &Value) -> Result<i64> {
+    let v = &message["contentMetadata"]["e2eeVersion"];
+    let parsed = match v {
+        Value::Null => return Ok(2),
+        Value::String(s) if s.is_empty() => return Ok(2),
+        Value::String(s) => s.trim().parse::<i64>().ok(),
+        other => other.as_i64(),
+    };
+    match parsed {
+        Some(n @ (1 | 2)) => Ok(n),
+        _ => Err(Error::Crypto(format!(
+            "unsupported e2eeVersion {}",
+            v.to_json()
+        ))),
+    }
+}
+
+/// Whether `message` is a sealed text or location message that was not
+/// decrypted: it carries `chunks` and `e2eeVersion` but no `text` (NONE)
+/// or `location` (LOCATION). Other content types keep their chunks after
+/// [`decrypt_message`](super::BaseClient::decrypt_e2ee_message) and are
+/// opened on demand, so they never count.
+pub fn is_undecrypted(message: &Value) -> bool {
+    if message["contentMetadata"].get("e2eeVersion").is_none()
+        || message["chunks"].as_list().is_none_or(<[Value]>::is_empty)
+    {
+        return false;
+    }
+    match content_type_number(&message["contentType"]) {
+        0 => message["text"].as_str().is_none_or(str::is_empty),
+        LOCATION => message["location"].is_null(),
+        _ => false,
+    }
+}
+
+/// What a log may say about an E2EE message without its content: id, chat
+/// kind (`u`, `c` or `r`, from `to`), content type, `e2eeVersion`, the key
+/// ids in chunks 3 and 4 and every chunk's length.
+pub fn describe_e2ee_message(message: &Value) -> serde_json::Value {
+    let chunks: Vec<Vec<u8>> = message["chunks"]
+        .as_list()
+        .unwrap_or_default()
+        .iter()
+        .map(|c| c.as_bytes().map(<[u8]>::to_vec).unwrap_or_default())
+        .collect();
+    let key_id = |i: usize| {
+        chunks
+            .get(i)
+            .filter(|c| c.len() == 4)
+            .map(|c| crypto::byte2int(c) as i32)
+    };
+    let to = message["to"].as_str().unwrap_or_default();
+    serde_json::json!({
+        "id": message["id"].as_str().map(str::to_string).or_else(|| message["id"].as_i64().map(|i| i.to_string())),
+        "chatKind": to.get(..1).unwrap_or(""),
+        "contentType": content_type_number(&message["contentType"]),
+        "e2eeVersion": message["contentMetadata"]["e2eeVersion"].to_json(),
+        "senderKeyId": key_id(3),
+        "receiverKeyId": key_id(4),
+        "chunkLengths": chunks.iter().map(Vec::len).collect::<Vec<_>>(),
+    })
 }
 
 /// Spec v2: AES-256-GCM with the envelope as AAD.
@@ -344,13 +445,10 @@ impl E2ee<'_> {
 
     /// Decrypt the payload of any E2EE message to its JSON object.
     pub async fn decrypt_payload(&self, message: &Value) -> Result<serde_json::Value> {
+        let spec = spec_version_of(message)?;
         let chunks = chunks_of(message)?;
         let keys = self.message_keys(message, &chunks).await?;
-        let spec = message["contentMetadata"]["e2eeVersion"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .unwrap_or("2");
-        if spec == "2" {
+        if spec == 2 {
             decrypt_message_v2(
                 message["to"].as_str().unwrap_or_default(),
                 message["from"].as_str().unwrap_or_default(),
@@ -719,15 +817,185 @@ mod tests {
         assert_eq!(out["location"]["latitude"].as_f64(), Some(1.5));
     }
 
+    /// The secret a peer (key 2) shares with our key 1 in [`pair`].
+    async fn peer_secret(host: &FakeHost, peer_priv: &[u8]) -> Vec<u8> {
+        let self_key = host
+            .storage
+            .get_string("e2eeKeys:1")
+            .await
+            .unwrap()
+            .unwrap();
+        let self_key: serde_json::Value = serde_json::from_str(&self_key).unwrap();
+        let self_pub = crypto::decode_base64(self_key["pubKey"].as_str().unwrap());
+        crypto::generate_shared_secret(peer_priv, &self_pub)
+    }
+
+    fn from_peer(chunks: Vec<Vec<u8>>, version: &str) -> Value {
+        let mut m = message("u-them", "u-self", "NONE", 2, 1);
+        m.insert(
+            "contentMetadata",
+            Value::Map(vec![("e2eeVersion".into(), version.into())]),
+        );
+        m.insert(
+            "chunks",
+            Value::List(chunks.into_iter().map(Value::Binary).collect()),
+        );
+        m
+    }
+
     #[tokio::test]
-    async fn v1_payload_decrypts() {
-        let (a, ap) = crypto::generate_key_pair();
-        let (b, bp) = crypto::generate_key_pair();
-        let salt = vec![9u8; 16];
-        let (key, iv) = crypto::derive_key_iv(&crypto::generate_shared_secret(&a, &bp), &salt);
-        let enc = crypto::encrypt_aes_cbc(&key, &iv, br#"{"text":"v1"}"#).unwrap();
-        let chunks = vec![salt, enc, vec![0; 12], vec![0; 4], vec![0; 4]];
-        assert_eq!(decrypt_message_v1(&chunks, &b, &ap).unwrap()["text"], "v1");
+    async fn v1_message_is_read_with_its_mac() {
+        let (host, peer_priv) = pair().await;
+        let secret = peer_secret(&host, &peer_priv).await;
+        let chunks = encrypt_payload_v1(2, 1, &secret, &serde_json::json!({"text": "v1"})).unwrap();
+        assert_eq!((chunks[0].len(), chunks[2].len()), (8, 16));
+        let state = E2eeState::default();
+        let e2ee = E2ee::new(&host, &state);
+        let out = e2ee
+            .decrypt_message(from_peer(chunks.clone(), "1"))
+            .await
+            .unwrap();
+        assert_eq!(out["text"].as_str(), Some("v1"));
+
+        // A v1 message read as v2 takes the 16-byte MAC for the nonce.
+        let err = e2ee
+            .decrypt_message(from_peer(chunks.clone(), "2"))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("unable to authenticate"), "{err}");
+
+        let mut bad = chunks;
+        bad[2][0] ^= 1;
+        let err = e2ee.decrypt_message(from_peer(bad, "1")).await.unwrap_err();
+        assert!(err.to_string().contains("MAC does not match"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn v2_nonce_of_another_length_opens_like_java_gcm() {
+        use aes_gcm::aead::{Aead, KeyInit};
+        let (host, peer_priv) = pair().await;
+        let secret = peer_secret(&host, &peer_priv).await;
+        let salt = vec![5u8; 16];
+        let key = crypto::sha256_sum(&[&secret, &salt, b"Key"]);
+        let nonce = vec![6u8; 16];
+        let aad = crypto::generate_aad("u-self", "u-them", 2, 1, 2, 0);
+        let ct = aes_gcm::AesGcm::<aes::Aes256, aes_gcm::aead::consts::U16>::new_from_slice(&key)
+            .unwrap()
+            .encrypt(
+                aes_gcm::Nonce::<aes_gcm::aead::consts::U16>::from_slice(&nonce),
+                aes_gcm::aead::Payload {
+                    msg: br#"{"text":"long nonce"}"#,
+                    aad: &aad,
+                },
+            )
+            .unwrap();
+        let chunks = vec![
+            salt,
+            ct,
+            nonce,
+            crypto::int_bytes(2).to_vec(),
+            crypto::int_bytes(1).to_vec(),
+        ];
+        let state = E2eeState::default();
+        let out = E2ee::new(&host, &state)
+            .decrypt_message(from_peer(chunks, "2"))
+            .await
+            .unwrap();
+        assert_eq!(out["text"].as_str(), Some("long nonce"));
+    }
+
+    #[tokio::test]
+    async fn malformed_v2_chunks_say_what_is_wrong() {
+        let (host, _) = pair().await;
+        let state = E2eeState::default();
+        let e2ee = E2ee::new(&host, &state);
+        let ids = || vec![crypto::int_bytes(2).to_vec(), crypto::int_bytes(1).to_vec()];
+        let short = [vec![vec![0; 16], vec![0; 8], vec![0; 12]], ids()].concat();
+        let err = e2ee
+            .decrypt_message(from_peer(short, "2"))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("ciphertext is 8 bytes"), "{err}");
+        let no_nonce = [vec![vec![0; 16], vec![0; 32], vec![]], ids()].concat();
+        let err = e2ee
+            .decrypt_message(from_peer(no_nonce, "2"))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("nonce is 0 bytes"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn unknown_spec_version_is_refused_without_key_lookups() {
+        let host = FakeHost::new();
+        let state = E2eeState::default();
+        let mut m = from_peer(
+            vec![
+                vec![0; 16],
+                vec![0; 32],
+                vec![0; 12],
+                vec![0, 0, 0, 2],
+                vec![0, 0, 0, 1],
+            ],
+            "3",
+        );
+        let err = E2ee::new(&host, &state)
+            .decrypt_message(m.clone())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("unsupported e2eeVersion"), "{err}");
+        assert!(host.calls().is_empty());
+        m.insert("contentMetadata", Value::Map(vec![]));
+        assert_eq!(spec_version_of(&m).unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn undecrypted_is_told_apart_from_decrypted() {
+        let (host, peer_priv) = pair().await;
+        let secret = peer_secret(&host, &peer_priv).await;
+        let chunks = encrypt_payload(
+            2,
+            1,
+            &secret,
+            2,
+            &serde_json::json!({"text": "hi"}),
+            "u-self",
+            "u-them",
+            0,
+        )
+        .unwrap();
+        let m = from_peer(chunks, "2");
+        assert!(is_undecrypted(&m));
+        let state = E2eeState::default();
+        let out = E2ee::new(&host, &state).decrypt_message(m).await.unwrap();
+        assert!(!is_undecrypted(&out));
+        let mut image = from_peer(vec![vec![0; 4]; 5], "2");
+        image.insert("contentType", "IMAGE");
+        assert!(!is_undecrypted(&image));
+        assert!(!is_undecrypted(&tv!({"text": "", "contentType": "NONE"})));
+    }
+
+    #[test]
+    fn describe_names_ids_and_lengths_only() {
+        let mut m = from_peer(
+            vec![
+                vec![0; 16],
+                vec![0; 40],
+                vec![0; 12],
+                vec![0, 0, 0, 2],
+                vec![0, 0, 1, 1],
+            ],
+            "2",
+        );
+        m.insert("id", "123");
+        m.insert("to", "c-group");
+        let d = describe_e2ee_message(&m);
+        assert_eq!(
+            d,
+            serde_json::json!({
+                "id": "123", "chatKind": "c", "contentType": 0, "e2eeVersion": "2",
+                "senderKeyId": 2, "receiverKeyId": 257, "chunkLengths": [16, 40, 12, 4, 4]
+            })
+        );
     }
 
     #[tokio::test]
