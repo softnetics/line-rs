@@ -205,14 +205,36 @@ fn unsupported(link: &LineLink, what: &str) -> Error {
     Error::internal("UnsupportedLink", format!("cannot {what} {link}"))
 }
 
+/// The V3 answer, or the legacy lookup's when V3 failed (the V3 error if
+/// both did).
+async fn v3_or_legacy<F, Fut>(v3: Result<Value>, legacy: F) -> Result<Value>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Value>>,
+{
+    match v3 {
+        Ok(v) => Ok(v),
+        Err(e) => legacy().await.map_err(|_| e),
+    }
+}
+
 impl BaseClient {
     /// Look up what a link points to without joining:
     ///
     /// * `ti/g/` → `findChatByTicket` (`{chat}`)
     /// * `ti/g2/` → `findSquareByInvitationTicket`
     /// * `square/livetalk/` → `findLiveTalkByInvitationTicket`
-    /// * `ti/p/~id` → `findContactByUserid`; `ti/p/{ticket}` →
-    ///   `findContactByUserTicket`
+    /// * `ti/p/~id`, `ti/p/{ticket}`, `ti/p/@id` →
+    ///   `findContactBySearchIdOrTicketV3` (RelationService) with the search
+    ///   id or the ticket, as LINE for Android looks profiles up
+    ///   (`lf3/b.java:205`), answered as a `GetContactV3Response`
+    ///   (`targetUserMid`, `targetProfileDetail`, …). When that call fails,
+    ///   a LINE ID or ticket falls back to the legacy Talk lookup
+    ///   (`findContactByUserid` / `findContactByUserTicket`), answered as a
+    ///   `Contact` (`mid`, `displayName`, …); tell them apart by
+    ///   `targetUserMid`. If both fail, the V3 error is returned. An
+    ///   official account's `@id` as a search id is unverified and has no
+    ///   fallback.
     ///
     /// Other links give an `UnsupportedLink` error.
     pub async fn resolve_link(&self, link: &LineLink) -> Result<Value> {
@@ -233,13 +255,32 @@ impl BaseClient {
                     .await
             }
             LineLink::Profile(ProfileRef::UserId(id)) => {
-                self.talk()
-                    .find_contact_by_userid(tv!({"searchId": id}))
-                    .await
+                let v3 = self
+                    .relation()
+                    .find_contact_by_search_id_or_ticket_v3(id)
+                    .await;
+                v3_or_legacy(v3, || async {
+                    self.talk()
+                        .find_contact_by_userid(tv!({"searchId": id}))
+                        .await
+                })
+                .await
             }
             LineLink::Profile(ProfileRef::Ticket(t)) => {
-                self.talk()
-                    .find_contact_by_user_ticket(tv!({"ticketIdWithTag": t}))
+                let v3 = self.relation().find_contact_by_ticket_v3(t).await;
+                v3_or_legacy(v3, || async {
+                    self.talk()
+                        .find_contact_by_user_ticket(tv!({"ticketIdWithTag": t}))
+                        .await
+                })
+                .await
+            }
+            LineLink::Profile(ProfileRef::OfficialAccount(id)) => {
+                self.relation()
+                    .find_contact_by_search_id_or_ticket_v3(&format!(
+                        "@{}",
+                        id.trim_start_matches('@')
+                    ))
                     .await
             }
             _ => Err(unsupported(link, "resolve")),
@@ -444,6 +485,32 @@ mod tests {
             ),
             vec![(1, TValue::Struct(vec![(1, TValue::string("L"))]))]
         );
+    }
+
+    #[tokio::test]
+    async fn v3_answer_wins_and_legacy_is_the_fallback() {
+        let v3 = tv!({"targetUserMid": "u1"});
+        let legacy_called = std::sync::atomic::AtomicBool::new(false);
+        let got = v3_or_legacy(Ok(v3.clone()), || async {
+            legacy_called.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(tv!({"mid": "u2"}))
+        })
+        .await
+        .unwrap();
+        assert_eq!(got, v3);
+        assert!(!legacy_called.load(std::sync::atomic::Ordering::SeqCst));
+
+        let failed = || Err(Error::internal("V3", "down"));
+        let got = v3_or_legacy(failed(), || async { Ok(tv!({"mid": "u2"})) })
+            .await
+            .unwrap();
+        assert_eq!(got["mid"].as_str(), Some("u2"));
+        let err = v3_or_legacy(failed(), || async {
+            Err(Error::internal("Legacy", "down"))
+        })
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("V3"), "{err}");
     }
 
     #[tokio::test]
