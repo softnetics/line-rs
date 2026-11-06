@@ -25,6 +25,7 @@ pub mod liff;
 mod listen;
 mod login;
 pub mod message;
+mod premium;
 mod profile;
 mod square;
 mod user;
@@ -47,6 +48,7 @@ pub use message::{
     Mid, PostNotificationInfo, ReactionType, SquareMessage, SquareThreadMessage, TalkMessage,
     build_text_decorations,
 };
+pub use premium::PremiumStatus;
 pub use profile::{MyProfileUpdate, ProfileAttribute};
 pub use square::{Square, SquareChat, SquareChatEvent};
 pub use user::User;
