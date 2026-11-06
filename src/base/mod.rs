@@ -93,9 +93,18 @@ pub struct ClientBuilder {
     legy_mode: LegyMode,
     legy_endpoint: Option<String>,
     config: Config,
+    device_name: Option<String>,
 }
 
 impl ClientBuilder {
+    /// The device's name LINE shows in the phone's list of logged-in
+    /// devices, sent at login as `modelName` and `systemName`. Default:
+    /// [`default_device_name`](crate::device::default_device_name), the
+    /// computer's model.
+    pub fn device_name(mut self, name: impl Into<String>) -> Self {
+        self.device_name = Some(name.into());
+        self
+    }
     /// LINE app version to emulate.
     pub fn version(mut self, v: impl Into<String>) -> Self {
         self.version = Some(v.into());
@@ -178,8 +187,12 @@ impl ClientBuilder {
             (None, Some(_)) => Vec::new(),
         };
         let (events, _) = broadcast::channel(256);
+        let mut device_details = self.device.details(self.version.as_deref());
+        if let Some(name) = self.device_name {
+            device_details.device_name = name;
+        }
         Ok(BaseClient(Arc::new(Inner {
-            device_details: self.device.details(self.version.as_deref()),
+            device_details,
             device: self.device,
             endpoint: self.endpoint.unwrap_or_else(|| LEGY_HOST.into()),
             backup_endpoints,
@@ -266,6 +279,7 @@ impl BaseClient {
             legy_mode: LegyMode::Auto,
             legy_endpoint: None,
             config: Config::default(),
+            device_name: None,
         }
     }
 

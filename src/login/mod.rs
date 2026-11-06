@@ -171,6 +171,70 @@ pub fn is_valid_password(pw: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || "!@#$%^&*()_+-=[]{};':\"\\|,.<>/?".contains(c))
 }
 
+/// `LoginRequest` for `loginZ` / `loginV2`, with the fields LINE for
+/// Android sets (`r95/a.java` `c()`): `keepLoggedIn = true` and the device
+/// name as both `systemName` and `modelName`.
+#[allow(clippy::too_many_arguments)]
+fn login_request(
+    provider: IdentityProvider,
+    keynm: &str,
+    encrypted: &str,
+    verifier: Option<&str>,
+    secret: Option<&[u8]>,
+    cert: Option<&str>,
+    device_name: &str,
+) -> Vec<(i16, TValue)> {
+    let login_type = if verifier.is_some() {
+        1
+    } else if secret.is_some() {
+        2
+    } else {
+        0
+    };
+    let mut req = vec![
+        (1, TValue::I32(login_type)),
+        (2, TValue::I32(provider.as_i32())),
+        (3, s(keynm)),
+        (4, s(encrypted)),
+        (5, TValue::Bool(true)),
+        (6, s("")),
+        (7, s(device_name)),
+    ];
+    if let Some(c) = cert {
+        req.push((8, s(c)));
+    }
+    if let Some(v) = verifier {
+        req.push((9, s(v)));
+    }
+    if let Some(sec) = secret {
+        req.push((10, TValue::Binary(sec.to_vec())));
+    }
+    req.push((11, TValue::I32(1)));
+    req.push((12, s(device_name)));
+    req
+}
+
+/// `qrCodeLoginV2ForSecure` arguments: `{1 authSessionId, 2 systemName,
+/// 3 modelName, 4 autoLoginIsRequired, 5 nonce}`.
+fn qr_login_v2_for_secure_args(
+    sqr: &str,
+    nonce: &str,
+    model_name: &str,
+    system_name: &str,
+    auto_login: bool,
+) -> Vec<(i16, TValue)> {
+    vec![(
+        1,
+        TValue::Struct(vec![
+            (1, s(sqr)),
+            (2, s(system_name)),
+            (3, s(model_name)),
+            (4, TValue::Bool(auto_login)),
+            (5, s(nonce)),
+        ]),
+    )]
+}
+
 impl BaseClient {
     /// Log in and fetch the profile (emits `Ready`).
     pub async fn login(&self, option: LoginOption) -> Result<()> {
@@ -318,8 +382,9 @@ impl BaseClient {
             ));
         }
         self.verify_cert_or_pin(&sqr, max_count, interval).await?;
+        let name = self.device_details.device_name.clone();
         let res = self
-            .qr_code_login_v2_for_secure(&sqr, &nonce, "evex-device", "linejs-v2", true)
+            .qr_code_login_v2_for_secure(&sqr, &nonce, &name, &name, true)
             .await?;
         if let Some(pem) = res["1"].as_str() {
             self.emit(ClientEvent::UpdateQrCert(pem.to_string()));
@@ -596,33 +661,15 @@ impl BaseClient {
         cert: Option<&str>,
         method: &str,
     ) -> Result<Value> {
-        let login_type = if verifier.is_some() {
-            1
-        } else if secret.is_some() {
-            2
-        } else {
-            0
-        };
-        let mut req = vec![
-            (1, TValue::I32(login_type)),
-            (2, TValue::I32(provider.as_i32())),
-            (3, s(keynm)),
-            (4, s(encrypted)),
-            (5, TValue::Bool(false)),
-            (6, s("")),
-            (7, s(self.device.as_str())),
-        ];
-        if let Some(c) = cert {
-            req.push((8, s(c)));
-        }
-        if let Some(v) = verifier {
-            req.push((9, s(v)));
-        }
-        if let Some(sec) = secret {
-            req.push((10, TValue::Binary(sec.to_vec())));
-        }
-        req.push((11, TValue::I32(1)));
-        req.push((12, s("System Product Name")));
+        let req = login_request(
+            provider,
+            keynm,
+            encrypted,
+            verifier,
+            secret,
+            cert,
+            &self.device_details.device_name,
+        );
         let parse = if method == "loginZ" {
             Parse::Struct("LoginResult")
         } else {
@@ -785,16 +832,7 @@ impl BaseClient {
         auto_login: bool,
     ) -> Result<Value> {
         self.request(
-            vec![(
-                1,
-                TValue::Struct(vec![
-                    (1, s(sqr)),
-                    (2, s(system_name)),
-                    (3, s(model_name)),
-                    (4, TValue::Bool(auto_login)),
-                    (5, s(nonce)),
-                ]),
-            )],
+            qr_login_v2_for_secure_args(sqr, nonce, model_name, system_name, auto_login),
             "qrCodeLoginV2ForSecure",
             self.sqr_opts(SQR_PATH),
         )
@@ -885,5 +923,58 @@ mod tests {
             registration_auth_endpoint(Device::DesktopWin),
             "/api/v3p/rs"
         );
+    }
+
+    fn field(fields: &[(i16, TValue)], id: i16) -> Option<&TValue> {
+        fields.iter().find(|(f, _)| *f == id).map(|(_, v)| v)
+    }
+
+    #[test]
+    fn login_request_names_the_device_and_keeps_logged_in() {
+        let req = login_request(
+            IdentityProvider::Line,
+            "keynm",
+            "enc",
+            None,
+            Some(b"secret"),
+            None,
+            "MacBookPro18,3",
+        );
+        assert_eq!(field(&req, 1), Some(&TValue::I32(2)));
+        assert_eq!(field(&req, 5), Some(&TValue::Bool(true)));
+        assert_eq!(field(&req, 7), Some(&s("MacBookPro18,3")));
+        assert_eq!(field(&req, 12), Some(&s("MacBookPro18,3")));
+        assert_eq!(field(&req, 8), None);
+        let with_verifier = login_request(
+            IdentityProvider::LinePhone,
+            "k",
+            "e",
+            Some("v"),
+            None,
+            Some("cert"),
+            "PC",
+        );
+        assert_eq!(field(&with_verifier, 1), Some(&TValue::I32(1)));
+        assert_eq!(field(&with_verifier, 2), Some(&TValue::I32(3)));
+        assert_eq!(field(&with_verifier, 8), Some(&s("cert")));
+        assert_eq!(field(&with_verifier, 9), Some(&s("v")));
+    }
+
+    #[test]
+    fn qr_login_v2_for_secure_sends_the_device_name() {
+        let base = BaseClient::builder(Device::DesktopMac)
+            .device_name("Test Mac")
+            .build()
+            .unwrap();
+        let name = &base.device_details.device_name;
+        let args = qr_login_v2_for_secure_args("sqr", "nonce", name, name, true);
+        let Some(TValue::Struct(req)) = field(&args, 1) else {
+            panic!("no request struct");
+        };
+        assert_eq!(field(req, 1), Some(&s("sqr")));
+        assert_eq!(field(req, 2), Some(&s("Test Mac")));
+        assert_eq!(field(req, 3), Some(&s("Test Mac")));
+        assert_eq!(field(req, 4), Some(&TValue::Bool(true)));
+        assert_eq!(field(req, 5), Some(&s("nonce")));
     }
 }
