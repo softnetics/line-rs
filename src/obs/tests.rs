@@ -962,6 +962,53 @@ async fn download_object_404_is_obs_error() {
 }
 
 #[tokio::test]
+async fn download_retries_once_after_401_and_503() {
+    for first in [401, 503] {
+        let (prefix, urls) = serve(vec![canned(first, None, b""), canned(200, None, b"ok")]).await;
+        let c = client();
+        let data = c
+            .obs()
+            .with_prefix(prefix)
+            .download_object_for_service("talk/emi", "OBJ-1", vec![])
+            .await
+            .unwrap();
+        assert_eq!(&data[..], b"ok");
+        assert_eq!(urls.lock().unwrap().len(), 2, "{first}");
+    }
+}
+
+#[tokio::test]
+async fn download_gives_up_after_one_retry() {
+    let (prefix, urls) = serve(vec![canned(503, None, b""), canned(401, None, b"")]).await;
+    let c = client();
+    let err = c
+        .obs()
+        .with_prefix(prefix)
+        .download_object_for_service("talk/emi", "OBJ-1", vec![])
+        .await
+        .unwrap_err();
+    assert_eq!(err.http_status(), Some(401));
+    assert!(!err.is_media_expired());
+    assert_eq!(urls.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn gone_objects_are_expired_without_retry() {
+    for status in [403, 404, 410] {
+        let (prefix, urls) = serve(vec![canned(status, None, b"")]).await;
+        let c = client();
+        let err = c
+            .obs()
+            .with_prefix(prefix)
+            .download_message_data("1", false, false)
+            .await
+            .unwrap_err();
+        assert!(err.is_media_expired(), "{status}");
+        assert_eq!(urls.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
 async fn expired_e2ee_object_fails_before_decryptor() {
     let (prefix, _) = serve(vec![canned(404, None, b"")]).await;
     let c = client();

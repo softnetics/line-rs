@@ -380,6 +380,48 @@ impl<'a> Obs<'a> {
         ])
     }
 
+    /// GET `url` as LINE for Android's OBS accessor does (`sx3/g.i`): one
+    /// more try after HTTP 401, with the session token refreshed first, or
+    /// after HTTP 503. Any other failed status is an `ObsError` that keeps
+    /// the status ([`Error::http_status`], [`Error::is_media_expired`]).
+    /// `headers` is called for each try, so the second one carries the new
+    /// token.
+    async fn get_object(
+        &self,
+        url: &str,
+        headers: impl Fn() -> Result<HeaderMap>,
+        timeout: std::time::Duration,
+        what: &str,
+    ) -> Result<reqwest::Response> {
+        let mut retried = false;
+        loop {
+            let headers = headers()?;
+            let sent = headers
+                .get("x-line-access")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            let res = self
+                .client
+                .http
+                .get(url)
+                .headers(headers)
+                .timeout(timeout)
+                .send()
+                .await?;
+            let status = res.status();
+            if retried || !matches!(status.as_u16(), 401 | 503) {
+                ensure_ok(status, what)?;
+                return Ok(res);
+            }
+            retried = true;
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                && let Err(e) = self.client.refresh_token_after(sent.as_deref()).await
+            {
+                tracing::debug!("OBS 401: token refresh failed: {e}");
+            }
+        }
+    }
+
     /// Download a (non-E2EE) message's media; the name comes from its metadata.
     pub async fn download_message_data(
         &self,
@@ -387,16 +429,14 @@ impl<'a> Obs<'a> {
         preview: bool,
         square: bool,
     ) -> Result<ObsFile> {
-        let headers = self.read_headers()?;
         let res = self
-            .client
-            .http
-            .get(self.message_data_url(message_id, preview, square))
-            .headers(headers)
-            .timeout(self.client.config.long_timeout)
-            .send()
+            .get_object(
+                &self.message_data_url(message_id, preview, square),
+                || self.read_headers(),
+                self.client.config.long_timeout,
+                "Message data download failed",
+            )
             .await?;
-        ensure_ok(res.status(), "Message data download failed")?;
         let mime = res
             .headers()
             .get("content-type")
@@ -417,16 +457,14 @@ impl<'a> Obs<'a> {
         message_id: &str,
         square: bool,
     ) -> Result<ObsMetadata> {
-        let headers = self.read_headers()?;
         let res = self
-            .client
-            .http
-            .get(self.message_metadata_url(message_id, square))
-            .headers(headers)
-            .timeout(self.client.config.timeout)
-            .send()
+            .get_object(
+                &self.message_metadata_url(message_id, square),
+                || self.read_headers(),
+                self.client.config.timeout,
+                "Message metadata request failed",
+            )
             .await?;
-        ensure_ok(res.status(), "Message metadata request failed")?;
         Ok(res.json().await?)
     }
 
@@ -642,21 +680,21 @@ impl<'a> Obs<'a> {
         } else {
             format!("{obs_path}/{oid}")
         };
-        let headers = to_header_map(
-            self.client
-                .line_headers("GET")
-                .into_iter()
-                .chain(add_headers),
-        )?;
         let res = self
-            .client
-            .http
-            .get(format!("{}r/{path}", self.prefix))
-            .headers(headers)
-            .timeout(self.client.config.long_timeout)
-            .send()
+            .get_object(
+                &format!("{}r/{path}", self.prefix),
+                || {
+                    to_header_map(
+                        self.client
+                            .line_headers("GET")
+                            .into_iter()
+                            .chain(add_headers.iter().cloned()),
+                    )
+                },
+                self.client.config.long_timeout,
+                "Object download failed",
+            )
             .await?;
-        ensure_ok(res.status(), "Object download failed")?;
         Ok(res.bytes().await?)
     }
 }

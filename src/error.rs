@@ -12,6 +12,8 @@
 //! * [`Error::is_rate_limited`], [`Error::is_server`]: LINE refused or
 //!   failed on its side.
 //! * [`Error::http_status`]: the HTTP status of a failed HTTP call.
+//! * [`Error::is_media_expired`]: a media file was deleted or has
+//!   expired on LINE's object storage.
 //! * [`Error::full_message`]: the message with every source error, for
 //!   logs.
 
@@ -591,6 +593,15 @@ impl Error {
         }
     }
 
+    /// Whether an object storage (OBS) download failed because the file is
+    /// gone: HTTP 403, 404 or 410. LINE for Android shows a photo as
+    /// deleted or expired on 403 and 404 (`cg3/t.java`) and treats every
+    /// other status as a network failure; 410 is HTTP's own "gone".
+    pub fn is_media_expired(&self) -> bool {
+        matches!(self, Error::Internal { kind, .. } if kind == "ObsError")
+            && matches!(self.http_status(), Some(403 | 404 | 410))
+    }
+
     /// The gRPC status of a failed gRPC call (`GrpcError: gRPC status N`).
     fn grpc_status(&self) -> Option<i32> {
         match self {
@@ -780,6 +791,22 @@ mod tests {
             None
         );
         assert_eq!(talk("NOT_A_MEMBER").http_status(), None);
+    }
+
+    #[test]
+    fn expired_media() {
+        for status in [403, 404, 410] {
+            let e = Error::internal("ObsError", format!("Object download failed: HTTP {status}"));
+            assert!(e.is_media_expired(), "{status}");
+        }
+        assert!(
+            !Error::internal("ObsError", "Object download failed: HTTP 500").is_media_expired()
+        );
+        assert!(
+            !Error::internal("ObsError", "Object download failed: HTTP 401").is_media_expired()
+        );
+        assert!(!Error::internal("RequestError", "status=404").is_media_expired());
+        assert!(!talk("NOT_FOUND").is_media_expired());
     }
 
     #[derive(Debug)]
