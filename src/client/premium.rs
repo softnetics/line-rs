@@ -55,34 +55,38 @@ impl PremiumStatus {
 /// `LinePremiumStatusService` (LINE for Android `ge3/c.java`).
 const LINE_PREMIUM_STATUS_PATH: &str = "/EXT/line-premium/common/thrift/line-premium-status";
 
+/// Which status service answers for an account in `region`: the
+/// LYP Premium one (`PremiumStatusService.getPremiumStatus`) for Japan,
+/// the LINE Premium one (`LinePremiumStatusService.getLinePremiumStatus`)
+/// elsewhere, as `ie3/r.java:488-495` picks by the profile's region.
+pub(crate) fn uses_lyp_premium_service(region: Option<&str>) -> bool {
+    region.is_some_and(|r| r.eq_ignore_ascii_case("JP"))
+}
+
 impl Client {
     /// The account's LINE Premium status. Read-only.
     ///
-    /// Asks `LinePremiumStatusService.getLinePremiumStatus`
+    /// Asks the one service LINE for Android asks for the profile's region
+    /// (`ie3/r.java:488-495`): `PremiumStatusService.getPremiumStatus`
+    /// (`/EXT/line-premium/common/thrift/status`) for a Japanese account,
+    /// `LinePremiumStatusService.getLinePremiumStatus`
     /// (`/EXT/line-premium/common/thrift/line-premium-status`, `ge3/c.java`)
-    /// first and falls back to `PremiumStatusService.getPremiumStatus`
-    /// when that call fails.
+    /// for any other. The other service is not tried.
     pub async fn premium_status(&self) -> Result<PremiumStatus> {
-        let line = self
-            .base
-            .call(
-                "getLinePremiumStatus",
-                crate::tv!({"req": {}}),
-                LINE_PREMIUM_STATUS_PATH,
-                crate::thrift::Protocol::Compact,
-            )
-            .await;
-        let res = match line {
-            Ok(res) => res,
-            Err(first) => match self
-                .base
+        let res = if uses_lyp_premium_service(self.base.region_code().as_deref()) {
+            self.base
                 .premium_status()
                 .get_premium_status(crate::tv!({"req": {}}))
-                .await
-            {
-                Ok(res) => res,
-                Err(_) => return Err(first),
-            },
+                .await?
+        } else {
+            self.base
+                .call(
+                    "getLinePremiumStatus",
+                    crate::tv!({"req": {}}),
+                    LINE_PREMIUM_STATUS_PATH,
+                    crate::thrift::Protocol::Compact,
+                )
+                .await?
         };
         Ok(PremiumStatus::from_value(&res))
     }
@@ -114,6 +118,14 @@ mod tests {
         let s = PremiumStatus::from_value(&crate::tv!({}));
         assert_eq!(s, PremiumStatus::default());
         assert!(!s.active);
+    }
+
+    #[test]
+    fn service_is_picked_by_region() {
+        assert!(uses_lyp_premium_service(Some("JP")));
+        assert!(uses_lyp_premium_service(Some("jp")));
+        assert!(!uses_lyp_premium_service(Some("TH")));
+        assert!(!uses_lyp_premium_service(None));
     }
 
     #[test]
