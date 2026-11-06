@@ -505,13 +505,24 @@ impl BaseClient {
         Ok(())
     }
 
-    /// Persist `refreshToken` and `expire` from a raw `TokenV3IssueResult`.
+    /// Persist `refreshToken`, `expire` and the refresh retry policy from a
+    /// raw `TokenV3IssueResult`.
+    ///
+    /// The Android app keeps `refreshApiRetryPolicy` (field 4) with the
+    /// tokens (`r95/f.java:139-158`) and backs off by it when the first
+    /// refresh fails; it is stored where later refreshes keep theirs
+    /// ([`REFRESH_RETRY_POLICY_KEY`](crate::request::REFRESH_RETRY_POLICY_KEY)).
     async fn store_v3_token(&self, token_info: &Value) -> Result<()> {
         if let Some(rt) = token_info["2"].as_str() {
             self.storage.set("refreshToken", rt.into()).await?;
         }
         if let (Some(a), Some(b)) = (token_info["3"].as_i64(), token_info["6"].as_i64()) {
             self.set_token_expire(a + b).await?;
+        }
+        if let Some(policy) = retry_policy_json(&token_info["4"]) {
+            self.storage
+                .set(crate::request::REFRESH_RETRY_POLICY_KEY, policy)
+                .await?;
         }
         Ok(())
     }
@@ -969,9 +980,64 @@ impl BaseClient {
     }
 }
 
+/// A raw `RefreshApiRetryPolicy` (`1 initialDelayInMillis, 2
+/// maxDelayInMillis, 3 multiplier, 4 jitterRate`; named fields are read
+/// too) as the JSON a refresh's `retryPolicy` is stored as. `None` when the
+/// login carried none.
+fn retry_policy_json(v: &Value) -> Option<serde_json::Value> {
+    let get = |name: &str, id: &str| match v.get(name) {
+        Some(x) if !x.is_null() => Some(x.to_json()),
+        _ => v.get(id).filter(|x| !x.is_null()).map(Value::to_json),
+    };
+    let fields = [
+        ("initialDelayInMillis", "1"),
+        ("maxDelayInMillis", "2"),
+        ("multiplier", "3"),
+        ("jitterRate", "4"),
+    ];
+    let mut out = serde_json::Map::new();
+    for (name, id) in fields {
+        if let Some(x) = get(name, id) {
+            out.insert(name.into(), x);
+        }
+    }
+    (!out.is_empty()).then_some(serde_json::Value::Object(out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn login_keeps_the_refresh_retry_policy() {
+        let c = BaseClient::new(crate::device::Device::Android).unwrap();
+        let mut policy = crate::tv!({"1": 2000, "2": 30000});
+        policy.insert("3", Value::Double(2.0));
+        policy.insert("4", Value::Double(0.2));
+        let mut token = crate::tv!({"1": "A", "2": "R", "3": 3600, "6": 100});
+        token.insert("4", policy);
+        c.store_v3_token(&token).await.unwrap();
+        let stored = c
+            .storage
+            .get(crate::request::REFRESH_RETRY_POLICY_KEY)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored,
+            serde_json::json!({"initialDelayInMillis": 2000, "maxDelayInMillis": 30000, "multiplier": 2.0, "jitterRate": 0.2})
+        );
+        // Without one, nothing is stored (the defaults apply).
+        let c = BaseClient::new(crate::device::Device::Android).unwrap();
+        c.store_v3_token(&crate::tv!({"2": "R"})).await.unwrap();
+        assert!(
+            c.storage
+                .get(crate::request::REFRESH_RETRY_POLICY_KEY)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[test]
     fn validators() {
