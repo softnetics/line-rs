@@ -10,7 +10,7 @@ pub use session::{LEGY_BACKUP_HOST, LEGY_HOST, LogoutReason, ProxyConfig};
 
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
@@ -41,17 +41,24 @@ pub struct Config {
     pub timeout: Duration,
     /// Long-poll timeout (default 180s).
     pub long_timeout: Duration,
-    /// Refresh a v3 access token before sending a request once the stored
-    /// `expire` (issue time + `durationUntilRefreshInSec`) is within
-    /// `refresh_margin` (default on).
+    /// Refresh a v3 access token in the background once the stored
+    /// `expire` (issue time + `durationUntilRefreshInSec`, minus
+    /// `refresh_margin`) has passed, like the Android app
+    /// (`fa0/f0.java`): the request that notices goes out with the current
+    /// token, later requests use the new one. Default on. With it off the
+    /// token is only refreshed after the server answers
+    /// `MUST_REFRESH_V3_TOKEN`.
     pub proactive_refresh: bool,
-    /// How long before `expire` to refresh (default 60s).
+    /// How long before `expire` to refresh (default 0: `expire` already
+    /// lies before the token's real expiry).
     pub refresh_margin: Duration,
-    /// Call `reportRefreshedAccessToken` after a refresh (best effort,
-    /// default on).
+    /// Call `reportRefreshedAccessToken` after a refresh, in the background
+    /// and with retries (best effort, default on, as the Android app does).
     pub report_refreshed_token: bool,
     /// Adopt the token in an `X-Line-Next-Access` response header (default
-    /// on).
+    /// off: the Android app does not read this header). Off, the header is
+    /// ignored; on, the new token is used and reported as
+    /// [`ClientEvent::UpdateAuthToken`].
     pub apply_next_access: bool,
     /// Recover from E2EE `sendMessage` errors the way the macOS client does
     /// (re-encrypt, recreate group key, plain fallback; see
@@ -69,11 +76,9 @@ impl Default for Config {
         Self {
             timeout: Duration::from_secs(30),
             long_timeout: Duration::from_secs(180),
-            // Off by default to match linejs, which only refreshes after
-            // MUST_REFRESH_V3_TOKEN and never adopts X-Line-Next-Access.
-            proactive_refresh: false,
-            refresh_margin: Duration::from_secs(60),
-            report_refreshed_token: false,
+            proactive_refresh: true,
+            refresh_margin: Duration::ZERO,
+            report_refreshed_token: true,
             apply_next_access: false,
             e2ee_send_recovery: false,
             language: "th_TH".to_string(),
@@ -202,6 +207,8 @@ impl ClientBuilder {
             kicked_out: RwLock::new(None),
             token_expire: RwLock::new(None),
             refresh_lock: Mutex::new(()),
+            refresh_running: AtomicBool::new(false),
+            refresh_not_before: AtomicI64::new(0),
             e2ee: E2eeState::default(),
             sync: Mutex::new(SyncData::default()),
             sync_loaded: AtomicBool::new(false),
@@ -243,6 +250,10 @@ pub struct Inner {
     /// Cached `expire` (`None` = not loaded from storage yet).
     token_expire: RwLock<Option<Option<i64>>>,
     pub(crate) refresh_lock: Mutex<()>,
+    /// A background (proactive) refresh is running.
+    pub(crate) refresh_running: AtomicBool,
+    /// No proactive refresh before this Unix time (after a failed one).
+    pub(crate) refresh_not_before: AtomicI64,
     pub(crate) e2ee: E2eeState,
     pub(crate) sync: Mutex<SyncData>,
     /// Whether `sync` was restored from storage or set by the caller.

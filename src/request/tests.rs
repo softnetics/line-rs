@@ -15,6 +15,8 @@ use crate::storage::{MemoryStorage, Storage};
 struct Seen {
     path: String,
     access: Option<String>,
+    /// Thrift method name of the request body.
+    method: String,
 }
 
 struct Reply {
@@ -31,13 +33,23 @@ fn reply(method: &str, fields: Vec<(i16, TValue)>) -> Reply {
 
 /// Serve `replies` in order (one connection each) and record requests.
 async fn serve(replies: Vec<Reply>) -> (String, Arc<Mutex<Vec<Seen>>>) {
+    let replies = Mutex::new(replies.into_iter());
+    serve_with(move |_| replies.lock().unwrap().next().expect("no reply left")).await
+}
+
+/// Answer every request (one connection each) with `answer` and record it.
+async fn serve_with(
+    answer: impl Fn(&Seen) -> Reply + Send + 'static,
+) -> (String, Arc<Mutex<Vec<Seen>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let seen = Arc::new(Mutex::new(Vec::new()));
     let log = seen.clone();
     tokio::spawn(async move {
-        for r in replies {
-            let (mut sock, _) = listener.accept().await.unwrap();
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
             let mut buf = Vec::new();
             let mut chunk = [0u8; 4096];
             let head_end = loop {
@@ -77,10 +89,16 @@ async fn serve(replies: Vec<Reply>) -> (String, Arc<Mutex<Vec<Seen>>>) {
                 .nth(1)
                 .unwrap_or_default()
                 .to_string();
-            log.lock().unwrap().push(Seen {
+            let method = thrift::read_message(&buf[head_end..], Protocol::Compact)
+                .map(|m| m.name)
+                .unwrap_or_default();
+            let request = Seen {
                 path,
                 access: header("x-line-access"),
-            });
+                method,
+            };
+            log.lock().unwrap().push(request.clone());
+            let r = answer(&request);
             let mut out = format!(
                 "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: {}\r\n",
                 r.body.len()
@@ -101,11 +119,9 @@ fn client(endpoint: &str, storage: Arc<MemoryStorage>) -> BaseClient {
     client_with(endpoint, storage, crate::base::Config::default())
 }
 
-/// Opt-in session extras (off by default to match linejs).
+/// Adopt `X-Line-Next-Access` (off by default).
 fn extras() -> crate::base::Config {
     crate::base::Config {
-        proactive_refresh: true,
-        report_refreshed_token: true,
         apply_next_access: true,
         ..Default::default()
     }
@@ -157,7 +173,7 @@ fn endpoint_url_keeps_explicit_scheme() {
 }
 
 #[tokio::test]
-async fn next_access_header_only_reported_by_default() {
+async fn next_access_header_ignored_by_default() {
     let mut first = profile_reply();
     first.headers.push(("x-line-next-access", "NEW".into()));
     let (endpoint, seen) = serve(vec![first, profile_reply()]).await;
@@ -165,7 +181,8 @@ async fn next_access_header_only_reported_by_default() {
     let mut events = c.subscribe();
     get_profile(&c).await.unwrap();
     assert_eq!(c.auth_token().as_deref(), Some("OLD"));
-    assert!(matches!(events.try_recv(), Ok(ClientEvent::UpdateAuthToken(t)) if t == "NEW"));
+    // A token that is not adopted is not reported either.
+    assert!(events.try_recv().is_err());
     get_profile(&c).await.unwrap();
     assert_eq!(seen.lock().unwrap()[1].access.as_deref(), Some("OLD"));
 }
@@ -186,54 +203,223 @@ async fn next_access_header_rotates_token() {
     assert_eq!(seen[1].access.as_deref(), Some("NEW"));
 }
 
-#[tokio::test]
-async fn proactive_refresh_when_expire_reached() {
-    let storage = Arc::new(MemoryStorage::new());
-    let (endpoint, seen) = serve(vec![
-        reply(
-            "refresh",
-            vec![(
-                0,
-                TValue::Struct(vec![
-                    (1, TValue::string("FRESH")),
-                    (2, TValue::I64(3600)),
-                    (4, TValue::I64(crate::base::session_now())),
-                    (5, TValue::string("R2")),
-                ]),
-            )],
-        ),
-        reply(
+fn refresh_ok(token: &str) -> Reply {
+    reply(
+        "refresh",
+        vec![(
+            0,
+            TValue::Struct(vec![
+                (1, TValue::string(token)),
+                (2, TValue::I64(3600)),
+                (
+                    3,
+                    TValue::Struct(vec![
+                        (1, TValue::I64(5)),
+                        (2, TValue::I64(20)),
+                        (3, TValue::Double(2.0)),
+                        (4, TValue::Double(0.0)),
+                    ]),
+                ),
+                (4, TValue::I64(crate::base::session_now())),
+                (5, TValue::string("R2")),
+            ]),
+        )],
+    )
+}
+
+/// `refresh_result { e: AccessTokenRefreshException { errorCode } }`.
+fn refresh_error(code: i32) -> Reply {
+    reply(
+        "refresh",
+        vec![(1, TValue::Struct(vec![(1, TValue::I32(code))]))],
+    )
+}
+
+fn by_method(seen: &Seen) -> Reply {
+    match seen.method.as_str() {
+        "refresh" => refresh_ok("FRESH"),
+        "reportRefreshedAccessToken" => reply(
             "reportRefreshedAccessToken",
             vec![(0, TValue::Struct(vec![]))],
         ),
-        profile_reply(),
-        profile_reply(),
-    ])
-    .await;
-    let c = client_with(&endpoint, storage.clone(), extras());
+        _ => profile_reply(),
+    }
+}
+
+async fn wait_for(cond: impl Fn() -> bool) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !cond() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("condition not reached");
+}
+
+#[tokio::test]
+async fn proactive_refresh_runs_in_the_background_when_expire_passed() {
+    let storage = Arc::new(MemoryStorage::new());
+    let (endpoint, seen) = serve_with(by_method).await;
+    let c = client(&endpoint, storage.clone());
     storage.set("refreshToken", "R1".into()).await.unwrap();
     c.set_token_expire(crate::base::session_now() - 10)
         .await
         .unwrap();
+    let mut events = c.subscribe();
 
+    // The request that notices goes out with the current token.
     get_profile(&c).await.unwrap();
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), events.recv()).await,
+        Ok(Ok(ClientEvent::UpdateAuthToken(t))) if t == "FRESH"
+    ));
     assert_eq!(c.auth_token().as_deref(), Some("FRESH"));
     assert_eq!(
         storage.get_string("refreshToken").await.unwrap().as_deref(),
         Some("R2")
     );
     assert!(c.token_expire().await.unwrap().unwrap() > crate::base::session_now() + 3000);
+    // The server's retry policy is kept for the next refresh.
+    assert_eq!(
+        storage
+            .get(REFRESH_RETRY_POLICY_KEY)
+            .await
+            .unwrap()
+            .unwrap()["initialDelayInMillis"],
+        5
+    );
+    // The new token is reported (in the background too).
+    wait_for(|| {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .any(|s| s.method == "reportRefreshedAccessToken")
+    })
+    .await;
     // Not due any more: the next request goes straight out.
     get_profile(&c).await.unwrap();
 
     let seen = seen.lock().unwrap();
-    let paths: Vec<&str> = seen.iter().map(|s| s.path.as_str()).collect();
+    let profiles: Vec<_> = seen.iter().filter(|s| s.method == "getProfile").collect();
+    assert_eq!(profiles[0].access.as_deref(), Some("OLD"));
+    assert_eq!(profiles[1].access.as_deref(), Some("FRESH"));
+    assert_eq!(seen.iter().filter(|s| s.method == "refresh").count(), 1);
+    let report = seen
+        .iter()
+        .find(|s| s.method == "reportRefreshedAccessToken")
+        .unwrap();
+    assert_eq!(report.path, TOKEN_REFRESH_PATH);
+    assert_eq!(report.access.as_deref(), Some("FRESH"));
+}
+
+#[tokio::test]
+async fn proactive_refresh_can_be_turned_off() {
+    let storage = Arc::new(MemoryStorage::new());
+    let (endpoint, seen) = serve_with(by_method).await;
+    let config = crate::base::Config {
+        proactive_refresh: false,
+        ..Default::default()
+    };
+    let c = client_with(&endpoint, storage.clone(), config);
+    storage.set("refreshToken", "R1".into()).await.unwrap();
+    c.set_token_expire(crate::base::session_now() - 10)
+        .await
+        .unwrap();
+    get_profile(&c).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    assert_eq!(c.auth_token().as_deref(), Some("OLD"));
+}
+
+#[tokio::test]
+async fn refresh_retries_on_retry_required_with_the_saved_policy() {
+    let storage = Arc::new(MemoryStorage::new());
+    // 1001 = RETRY_REQUIRED
+    let (endpoint, seen) = serve(vec![
+        refresh_error(1001),
+        refresh_error(1001),
+        refresh_ok("FRESH"),
+    ])
+    .await;
+    let config = crate::base::Config {
+        report_refreshed_token: false,
+        ..Default::default()
+    };
+    let c = client_with(&endpoint, storage.clone(), config);
+    storage.set("refreshToken", "R1".into()).await.unwrap();
+    storage
+        .set(
+            REFRESH_RETRY_POLICY_KEY,
+            serde_json::json!({"initialDelayInMillis": 1, "maxDelayInMillis": 5,
+                "multiplier": 1.5, "jitterRate": 0.1}),
+        )
+        .await
+        .unwrap();
+    c.try_refresh_token().await.unwrap();
+    assert_eq!(c.auth_token().as_deref(), Some("FRESH"));
+    assert_eq!(seen.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn refresh_gives_up_on_invalid_request() {
+    let storage = Arc::new(MemoryStorage::new());
+    // 1000 = INVALID_REQUEST
+    let (endpoint, seen) = serve(vec![refresh_error(1000)]).await;
+    let c = client(&endpoint, storage.clone());
+    storage.set("refreshToken", "R1".into()).await.unwrap();
+    let err = c.try_refresh_token().await.unwrap_err();
+    assert!(err.to_string().contains("INVALID_REQUEST"), "{err}");
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    assert_eq!(c.auth_token().as_deref(), Some("OLD"));
+}
+
+#[test]
+fn refresh_retry_policy_defaults_and_parsing() {
+    let d = DEFAULT_REFRESH_RETRY;
+    let ms: Vec<u128> = (0..12).map(|a| d.delay(a, 0.0).as_millis()).collect();
     assert_eq!(
-        paths,
-        [TOKEN_REFRESH_PATH, TOKEN_REFRESH_PATH, "/S4", "/S4"]
+        ms,
+        [
+            1000, 1500, 2250, 3375, 5062, 7593, 11390, 17085, 25628, 38443, 57665, 60000
+        ]
     );
-    assert_eq!(seen[1].access.as_deref(), Some("FRESH"));
-    assert_eq!(seen[2].access.as_deref(), Some("FRESH"));
+    assert_eq!(d.delay(0, 1.0).as_millis(), 1100);
+    let p = retry_policy_from_json(&serde_json::json!({
+        "initialDelayInMillis": 200, "maxDelayInMillis": 800, "multiplier": 2.0, "jitterRate": 0.0
+    }));
+    assert_eq!(
+        (
+            p.initial.as_millis(),
+            p.max.as_millis(),
+            p.multiplier,
+            p.jitter
+        ),
+        (200, 800, 2.0, 0.0)
+    );
+    // Missing or bad fields fall back to the defaults.
+    assert_eq!(
+        retry_policy_from_json(&serde_json::json!({"multiplier": 0.5, "jitterRate": 7})),
+        d
+    );
+}
+
+#[test]
+fn retryable_refresh_errors() {
+    let exc = |code: &str| Error::Request {
+        method: "refresh".into(),
+        path: TOKEN_REFRESH_PATH.into(),
+        data: crate::tv!({"errorCode": code}),
+    };
+    assert!(is_retryable_refresh_error(&exc("RETRY_REQUIRED")));
+    assert!(!is_retryable_refresh_error(&exc("INVALID_REQUEST")));
+    assert!(is_retryable_refresh_error(&Error::internal(
+        "TimeoutError",
+        "x"
+    )));
+    assert!(!is_retryable_refresh_error(&Error::internal(
+        "RefreshError",
+        "x"
+    )));
 }
 
 #[tokio::test]
