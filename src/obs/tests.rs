@@ -478,6 +478,44 @@ async fn message_data_2xx_yields_file() {
 }
 
 #[tokio::test]
+async fn rejected_upload_is_obs_error() {
+    let (prefix, urls) = serve(vec![canned(413, None, b"")]).await;
+    let c = client();
+    let err = c
+        .obs()
+        .with_prefix(prefix)
+        .upload_object_for_service(ObjectUpload {
+            data: Bytes::from_static(b"data"),
+            obs_path: Some("talk/emf/reqid-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.to_string(), "ObsError: Object upload failed: HTTP 413");
+    assert_eq!(*urls.lock().unwrap(), ["/r/talk/emf/reqid-1"]);
+}
+
+#[tokio::test]
+async fn upload_without_object_id_is_obs_error() {
+    let (prefix, _) = serve(vec![canned(200, None, b"")]).await;
+    let c = client();
+    let err = c
+        .obs()
+        .with_prefix(prefix)
+        .upload(
+            Bytes::from_static(b"data"),
+            "talk/emf/reqid-1".into(),
+            vec![],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "ObsError: Object upload failed: no object id"
+    );
+}
+
+#[tokio::test]
 async fn empty_2xx_body_is_returned() {
     let (prefix, _) = serve(vec![canned(204, None, b"")]).await;
     let c = client();

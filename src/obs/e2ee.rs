@@ -130,6 +130,14 @@ impl E2eeMediaBackend for Obs<'_> {
                 ..Default::default()
             })
             .await?;
+        // The message refers to the object by this id, so it can't be sent
+        // without one.
+        if up.obj_id.is_empty() {
+            return Err(Error::internal(
+                "ObsError",
+                "Object upload failed: no object id",
+            ));
+        }
         Ok(up.obj_id)
     }
 

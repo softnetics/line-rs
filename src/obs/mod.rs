@@ -508,6 +508,9 @@ impl<'a> Obs<'a> {
             "Obs.uploadObjectForServiceResponse",
             serde_json::json!({"objId": obj_id, "objHash": obj_hash, "status": res.status().as_u16()}),
         );
+        // Without this a rejected upload came back with an empty object id,
+        // and the message sent with it failed with an unrelated error.
+        ensure_ok(res.status(), "Object upload failed")?;
         Ok(ObsUpload {
             obj_id,
             obj_hash,
