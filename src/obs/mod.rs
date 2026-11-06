@@ -12,6 +12,7 @@
 //! # let _ = (up, file); Ok(()) }
 //! ```
 
+mod copy;
 pub mod crypto;
 mod e2ee;
 mod flow;
@@ -20,6 +21,7 @@ mod meta;
 pub mod mime;
 mod token;
 
+pub use copy::ForwardMedia;
 pub use e2ee::{
     E2eeMediaUpload, MAX_FILE_SIZE, MAX_MEDIA_SEND_ATTEMPTS, MAX_VIDEO_SIZE, MediaOptions,
     SentMedia, check_media_size, e2ee_content_metadata, e2ee_duration,

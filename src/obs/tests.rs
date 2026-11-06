@@ -45,6 +45,9 @@ struct Fake {
     /// `x-line-message-gid` (or `Err` for a failure) of each V1 upload,
     /// in order; none left means success without a group id.
     plain_answers: Mutex<VecDeque<std::result::Result<&'static str, u16>>>,
+    /// `(o_type, src_oid, src_message_id)` per copy.
+    copies: Mutex<Vec<(ObjType, String, String)>>,
+    copy_fails: bool,
 }
 
 impl Default for Fake {
@@ -67,6 +70,8 @@ impl Fake {
             sent: Mutex::default(),
             headers: Mutex::default(),
             plain_answers: Mutex::default(),
+            copies: Mutex::default(),
+            copy_fails: false,
         }
     }
     fn failing_sends(codes: &[&'static str]) -> Self {
@@ -172,6 +177,16 @@ impl MediaBackend for Fake {
             obj_hash: "HASH".into(),
             headers: answer,
         })
+    }
+    async fn copy(&self, o_type: ObjType, src_oid: &str, src_message_id: &str) -> Result<String> {
+        self.copies
+            .lock()
+            .unwrap()
+            .push((o_type, src_oid.to_string(), src_message_id.to_string()));
+        if self.copy_fails {
+            return Err(Error::internal("ObsError", "Object copy failed: HTTP 403"));
+        }
+        Ok("COPY-1".into())
     }
     async fn encrypt_message(
         &self,

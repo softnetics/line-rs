@@ -303,6 +303,9 @@ pub(crate) trait MediaBackend: Sync {
         reqseq: i64,
         headers: Vec<(String, String)>,
     ) -> Result<ObsUpload>;
+    /// Server-side copy of the V2 object `src_oid` of message
+    /// `src_message_id` (`copy.obs`); returns the new object id.
+    async fn copy(&self, o_type: ObjType, src_oid: &str, src_message_id: &str) -> Result<String>;
     async fn encrypt_message(
         &self,
         to: &str,
@@ -394,6 +397,10 @@ impl MediaBackend for Obs<'_> {
             self.client,
         )
         .await
+    }
+
+    async fn copy(&self, o_type: ObjType, src_oid: &str, src_message_id: &str) -> Result<String> {
+        self.copy_e2ee_object(o_type, src_oid, src_message_id).await
     }
 
     async fn encrypt_message(

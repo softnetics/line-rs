@@ -1,5 +1,5 @@
-//! `X-Talk-Meta` the way the Android app writes it on uploads
-//! (`hp8/c.a`): base64 of `{"message": base64(Message)}`, the
+//! `X-Talk-Meta` the way the Android app writes it on uploads and copies
+//! (`hp8/c.a`, `n31/a.a`): base64 of `{"message": base64(Message)}`, the
 //! `Message` serialized with TBinaryProtocol.
 
 use crate::error::Result;
@@ -105,6 +105,12 @@ pub(crate) fn upload_meta(
     Ok(Some((name.to_string(), encode(&message(None, &metadata)?))))
 }
 
+/// `X-Talk-Meta` naming the message an object belongs to (`n31/a.a`), so
+/// OBS lets a copy read it.
+pub(crate) fn message_meta(message_id: &str) -> Result<String> {
+    Ok(encode(&message(Some(message_id), &[])?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,5 +167,13 @@ mod tests {
         };
         let (name, _) = upload_meta("m1", Some(&group), false).unwrap().unwrap();
         assert_eq!(name, "X-Square-Meta");
+    }
+
+    #[test]
+    fn message_meta_names_the_message() {
+        let bytes = decode(&message_meta("123").unwrap());
+        assert_eq!(&bytes[..7], &[11, 0, 4, 0, 0, 0, 3]);
+        assert_eq!(&bytes[7..10], b"123");
+        assert!(!bytes.windows(3).any(|w| w == [13, 0, 18]));
     }
 }
