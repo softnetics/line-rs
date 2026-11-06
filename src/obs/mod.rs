@@ -284,7 +284,7 @@ impl BaseClient {
 }
 
 /// A failed download carries only the status: obs error pages embed signed urls.
-fn ensure_ok(status: reqwest::StatusCode, what: &str) -> Result<()> {
+pub(crate) fn ensure_ok(status: reqwest::StatusCode, what: &str) -> Result<()> {
     if status.is_success() {
         Ok(())
     } else {
