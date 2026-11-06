@@ -122,13 +122,16 @@ impl E2eeMediaBackend for Obs<'_> {
         params: Vec<(String, String)>,
     ) -> Result<String> {
         let up = self
-            .upload_object_for_service(ObjectUpload {
-                data,
-                o_type: ObjType::File,
-                obs_path: Some(obs_path),
-                params,
-                ..Default::default()
-            })
+            .upload_with_obs_token(
+                ObjectUpload {
+                    data,
+                    o_type: ObjType::File,
+                    obs_path: Some(obs_path),
+                    params,
+                    ..Default::default()
+                },
+                self.client,
+            )
             .await?;
         // The message refers to the object by this id, so it can't be sent
         // without one.

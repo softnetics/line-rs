@@ -1,6 +1,8 @@
 //! Ports of linejs `obs/upload_e2ee.test.ts` and `obs/download_status.test.ts`.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -9,6 +11,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use super::e2ee::{E2eeMediaBackend, upload_media_by_e2ee};
+use super::token::{ObsTokenCache, ObsTokenSource};
 use super::*;
 use crate::device::Device;
 use crate::thrift::Value;
@@ -282,6 +285,91 @@ async fn invalid_mid_is_rejected() {
     assert_eq!(err.to_string(), "ObsError: Invalid mid");
 }
 
+// --- OBS token -------------------------------------------------------------
+
+#[test]
+fn obs_token_parse_and_refresh_margin() {
+    let (token, keep) = parse_obs_token("3600\u{1e}tok").unwrap();
+    assert_eq!(token, "tok");
+    assert_eq!(keep, Duration::from_secs(3600 - 180));
+    // Margin at least 30 s, at most 600 s.
+    assert_eq!(
+        parse_obs_token("100\u{1e}t").unwrap().1,
+        Duration::from_secs(70)
+    );
+    assert_eq!(
+        parse_obs_token("86400\u{1e}t").unwrap().1,
+        Duration::from_secs(86400 - 600)
+    );
+    assert_eq!(parse_obs_token("10\u{1e}t").unwrap().1, Duration::ZERO);
+    for bad in ["tok", "x\u{1e}tok", "60\u{1e}", ""] {
+        assert!(parse_obs_token(bad).is_err(), "{bad:?}");
+    }
+}
+
+/// Answers with `answers` in order (an error once they run out).
+struct Tokens(Mutex<VecDeque<Result<String>>>, Mutex<u32>);
+
+impl Tokens {
+    fn new(answers: Vec<Result<String>>) -> Self {
+        Self(Mutex::new(answers.into()), Mutex::default())
+    }
+    fn calls(&self) -> u32 {
+        *self.1.lock().unwrap()
+    }
+}
+
+#[async_trait]
+impl ObsTokenSource for Tokens {
+    async fn acquire(&self) -> Result<String> {
+        *self.1.lock().unwrap() += 1;
+        self.0
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Err(Error::internal("x", "no token")))
+    }
+}
+
+#[tokio::test]
+async fn obs_token_is_cached_until_its_margin() {
+    let cache = ObsTokenCache::default();
+    let tokens = Tokens::new(vec![
+        Ok("3600\u{1e}first".into()),
+        Ok("3600\u{1e}second".into()),
+    ]);
+    assert_eq!(cache.get(&tokens).await.as_deref(), Some("first"));
+    assert_eq!(cache.get(&tokens).await.as_deref(), Some("first"));
+    assert_eq!(tokens.calls(), 1);
+    cache.clear().await;
+    assert_eq!(cache.get(&tokens).await.as_deref(), Some("second"));
+    assert_eq!(tokens.calls(), 2);
+}
+
+#[tokio::test]
+async fn obs_token_retries_then_keeps_the_stale_one() {
+    let cache = ObsTokenCache::default();
+    let tokens = Tokens::new(vec![
+        Err(Error::internal("x", "1")),
+        Ok("garbage".into()),
+        Ok("3600\u{1e}third".into()),
+    ]);
+    let started = Instant::now();
+    assert_eq!(cache.get(&tokens).await.as_deref(), Some("third"));
+    assert_eq!(tokens.calls(), 3);
+    assert!(started.elapsed() >= Duration::from_millis(600));
+
+    // Expired and every try fails: the stale token is still used.
+    cache.set("stale", Duration::ZERO).await;
+    let failing = Tokens::new(vec![]);
+    assert_eq!(cache.get(&failing).await.as_deref(), Some("stale"));
+    assert_eq!(failing.calls(), OBS_TOKEN_ATTEMPTS);
+
+    // Never had one: None, so the session token is used.
+    cache.clear().await;
+    assert_eq!(cache.get(&Tokens::new(vec![])).await, None);
+}
+
 #[test]
 fn talk_meta_header() {
     use base64::Engine;
@@ -312,12 +400,13 @@ fn obs_params_are_base64_json() {
     );
 }
 
-// --- download status -------------------------------------------------------
+// --- HTTP ------------------------------------------------------------------
 
 struct Canned {
     status: u16,
     content_type: Option<&'static str>,
     body: &'static [u8],
+    headers: Vec<(&'static str, &'static str)>,
 }
 
 fn canned(status: u16, content_type: Option<&'static str>, body: &'static [u8]) -> Canned {
@@ -325,21 +414,52 @@ fn canned(status: u16, content_type: Option<&'static str>, body: &'static [u8]) 
         status,
         content_type,
         body,
+        headers: Vec::new(),
     }
+}
+
+/// A 200 upload answer carrying `x-obs-oid`.
+fn uploaded(oid: &'static str) -> Canned {
+    let mut c = canned(200, None, b"");
+    c.headers.push(("x-obs-oid", oid));
+    c
 }
 
 /// Serves `responses` in order over plain HTTP and records request paths.
 async fn serve(responses: Vec<Canned>) -> (String, Arc<Mutex<Vec<String>>>) {
+    let (prefix, urls, _) = serve_heads(responses).await;
+    (prefix, urls)
+}
+
+/// [`serve`], also recording each request head.
+async fn serve_heads(
+    responses: Vec<Canned>,
+) -> (String, Arc<Mutex<Vec<String>>>, Arc<Mutex<Vec<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let urls = Arc::new(Mutex::new(Vec::new()));
-    let seen = urls.clone();
+    let heads = Arc::new(Mutex::new(Vec::new()));
+    let (seen, seen_heads) = (urls.clone(), heads.clone());
     tokio::spawn(async move {
         for r in responses {
             let (mut sock, _) = listener.accept().await.unwrap();
             let mut buf = Vec::new();
             let mut chunk = [0u8; 1024];
-            while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            let head_end = loop {
+                if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break i + 4;
+                }
+                let n = sock.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    break buf.len();
+                }
+                buf.extend_from_slice(&chunk[..n]);
+            };
+            let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+            let body_len: usize = header(&head, "content-length")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            while buf.len() < head_end + body_len {
                 let n = sock.read(&mut chunk).await.unwrap();
                 if n == 0 {
                     break;
@@ -354,21 +474,32 @@ async fn serve(responses: Vec<Canned>) -> (String, Arc<Mutex<Vec<String>>>) {
             seen.lock()
                 .unwrap()
                 .push(line.split(' ').nth(1).unwrap_or_default().to_string());
-            let mut head = format!(
+            seen_heads.lock().unwrap().push(head);
+            let mut out = format!(
                 "HTTP/1.1 {} X\r\nconnection: close\r\ncontent-length: {}\r\n",
                 r.status,
                 r.body.len()
             );
             if let Some(ct) = r.content_type {
-                head.push_str(&format!("content-type: {ct}\r\n"));
+                out.push_str(&format!("content-type: {ct}\r\n"));
             }
-            head.push_str("\r\n");
-            sock.write_all(head.as_bytes()).await.unwrap();
+            for (k, v) in &r.headers {
+                out.push_str(&format!("{k}: {v}\r\n"));
+            }
+            out.push_str("\r\n");
+            sock.write_all(out.as_bytes()).await.unwrap();
             sock.write_all(r.body).await.unwrap();
             sock.shutdown().await.ok();
         }
     });
-    (format!("http://{addr}/"), urls)
+    (format!("http://{addr}/"), urls, heads)
+}
+
+fn header<'h>(head: &'h str, name: &str) -> Option<&'h str> {
+    head.lines().find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.eq_ignore_ascii_case(name).then(|| v.trim())
+    })
 }
 
 fn client() -> BaseClient {
@@ -499,6 +630,7 @@ async fn rejected_upload_is_obs_error() {
 async fn upload_without_object_id_is_obs_error() {
     let (prefix, _) = serve(vec![canned(200, None, b"")]).await;
     let c = client();
+    c.obs_state.token.set("obs", Duration::from_secs(60)).await;
     let err = c
         .obs()
         .with_prefix(prefix)
@@ -512,6 +644,79 @@ async fn upload_without_object_id_is_obs_error() {
     assert_eq!(
         err.to_string(),
         "ObsError: Object upload failed: no object id"
+    );
+}
+
+#[tokio::test]
+async fn upload_401_gets_a_new_token_and_uploads_once_more() {
+    let (prefix, urls, heads) = serve_heads(vec![canned(401, None, b""), uploaded("OID-2")]).await;
+    let c = client();
+    c.obs_state.token.set("old", Duration::from_secs(60)).await;
+    let tokens = Tokens::new(vec![Ok("3600\u{1e}new".into())]);
+    let up = c
+        .obs()
+        .with_prefix(prefix)
+        .upload_with_obs_token(
+            ObjectUpload {
+                data: Bytes::from_static(b"data"),
+                obs_path: Some("talk/emf/reqid-1".into()),
+                ..Default::default()
+            },
+            &tokens,
+        )
+        .await
+        .unwrap();
+    assert_eq!(up.obj_id, "OID-2");
+    assert_eq!(tokens.calls(), 1);
+    assert_eq!(urls.lock().unwrap().len(), 2);
+    let heads = heads.lock().unwrap();
+    assert_eq!(header(&heads[0], "x-line-access"), Some("old"));
+    assert_eq!(header(&heads[1], "x-line-access"), Some("new"));
+}
+
+#[tokio::test]
+async fn second_401_is_an_error() {
+    let (prefix, urls) = serve(vec![canned(401, None, b""), canned(401, None, b"")]).await;
+    let c = client();
+    let tokens = Tokens::new(vec![Ok("3600\u{1e}a".into()), Ok("3600\u{1e}b".into())]);
+    let err = c
+        .obs()
+        .with_prefix(prefix)
+        .upload_with_obs_token(
+            ObjectUpload {
+                data: Bytes::from_static(b"data"),
+                obs_path: Some("talk/emf/reqid-1".into()),
+                ..Default::default()
+            },
+            &tokens,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.to_string(), "ObsError: Object upload failed: HTTP 401");
+    assert_eq!(urls.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn without_obs_token_the_session_token_is_used() {
+    let (prefix, _, heads) = serve_heads(vec![uploaded("OID-3")]).await;
+    let c = client();
+    let tokens = Tokens::new(vec![]);
+    c.obs()
+        .with_prefix(prefix)
+        .upload_with_obs_token(
+            ObjectUpload {
+                data: Bytes::from_static(b"data"),
+                obs_path: Some("talk/emf/reqid-1".into()),
+                ..Default::default()
+            },
+            &tokens,
+        )
+        .await
+        .unwrap();
+    assert_eq!(tokens.calls(), OBS_TOKEN_ATTEMPTS);
+    assert_eq!(
+        header(&heads.lock().unwrap()[0], "x-line-access"),
+        Some("token")
     );
 }
 
