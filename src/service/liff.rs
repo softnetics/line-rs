@@ -70,7 +70,7 @@ pub(crate) fn issue_liff_view_args(
 /// The JSON the consent page keeps in its `app-data` attribute: the form's
 /// hidden fields (`slots.serverside_field`), the permissions it asks for
 /// (`props.authz-allow-newly`) and where the form posts (`props.post-url`).
-fn consent_app_data(html: &str) -> Option<serde_json::Value> {
+pub(crate) fn consent_app_data(html: &str) -> Option<serde_json::Value> {
     const MARK: &str = "app-data=\"";
     let start = html.find(MARK)? + MARK.len();
     let len = html[start..].find('"')?;

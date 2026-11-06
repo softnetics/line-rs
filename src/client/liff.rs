@@ -131,6 +131,117 @@ pub(crate) fn issue_liff_view_args(
     )]
 }
 
+/// LINE's `CONSENT_REQUIRED` answer to `issueLiffView`: the LIFF app needs
+/// the user's consent first, on LINE's consent page (`consentRequired`
+/// payload, `lf0/v.java`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiffConsent {
+    pub channel_id: String,
+    /// LINE's consent page for this app. LINE for Android opens it for the
+    /// user when it is a valid URL (`we0/m.java`).
+    pub consent_url: String,
+}
+
+/// The consent `issueLiffView` failed for, if that is why it failed.
+pub fn consent_required(e: &Error) -> Option<LiffConsent> {
+    let Error::Request { data, .. } = e else {
+        return None;
+    };
+    let exc = if data.get("liffException").is_some() {
+        &data["liffException"]
+    } else {
+        data
+    };
+    let code = &exc["code"];
+    if code.as_str() != Some("CONSENT_REQUIRED") && code.as_i64() != Some(3) {
+        return None;
+    }
+    let consent = &exc["payload"]["consentRequired"];
+    Some(LiffConsent {
+        channel_id: consent["channelId"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        consent_url: consent["consentUrl"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
+/// One permission the consent page asks for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ConsentPermission {
+    /// LINE's code, e.g. `P` (profile), `OC` (send messages to chats).
+    pub code: String,
+    /// The page's own wording, in the account's language.
+    pub label: String,
+}
+
+/// LINE's consent page as fetched for the logged-in user: what it asks for,
+/// and the form that its "Allow" button posts.
+#[derive(Debug, Clone)]
+pub struct ConsentPage {
+    pub consent: LiffConsent,
+    /// Permissions the user hasn't granted yet.
+    pub permissions: Vec<ConsentPermission>,
+    html: String,
+    cookies: String,
+}
+
+/// How a share-target picker ended, for `storeShareTargetPickerResult`
+/// (`ShareTargetPickerResultRequest.resultCode`, `lf0/d2.java`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickerResult {
+    Success,
+    Failure,
+    Cancel,
+}
+
+/// `storeShareTargetPickerResult` args:
+/// `ShareTargetPickerResultRequest { ott = 1, liffId = 2, resultCode = 3,
+/// resultDescription = 4 }`.
+pub(crate) fn picker_result_args(
+    ott: &str,
+    liff_id: &str,
+    result: PickerResult,
+    description: Option<&str>,
+) -> Vec<(i16, TValue)> {
+    let code = match result {
+        PickerResult::Success => 0,
+        PickerResult::Failure => 1,
+        PickerResult::Cancel => 2,
+    };
+    let mut req = vec![
+        (1, TValue::string(ott)),
+        (2, TValue::string(liff_id)),
+        (3, TValue::I32(code)),
+    ];
+    if let Some(d) = description {
+        req.push((4, TValue::string(d)));
+    }
+    vec![(1, TValue::Struct(req))]
+}
+
+/// The permissions a consent page asks for, from its `app-data` JSON.
+fn consent_permissions(html: &str) -> Vec<ConsentPermission> {
+    crate::service::liff::consent_app_data(html)
+        .map(|data| {
+            data["props"]["authz-allow-newly"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|p| {
+                    Some(ConsentPermission {
+                        code: p["code"].as_str()?.to_string(),
+                        label: p["label"].as_str().unwrap_or_default().to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// LIFF operations bound to a [`Client`] (see [`Client::liff`]).
 #[derive(Clone, Copy)]
 pub struct Liff<'a> {
@@ -306,6 +417,99 @@ impl Liff<'_> {
         Ok(req.body(body).send().await?.status().is_success())
     }
 
+    /// Fetch LINE's consent page for `consent` as the logged-in user, to
+    /// show the user what the app asks for before [`Liff::approve`].
+    pub async fn consent_page(&self, consent: &LiffConsent) -> Result<ConsentPage> {
+        let base = &self.client.base;
+        if !consent.consent_url.starts_with("https://") {
+            return Err(Error::internal(ERROR_NAME, "consent URL is not https"));
+        }
+        let mut req = base.http.get(&consent.consent_url);
+        for (k, v) in self.consent_headers() {
+            req = req.header(k, v);
+        }
+        let res = req.send().await?;
+        if !res.status().is_success() {
+            return Err(Error::internal(
+                ERROR_NAME,
+                format!("consent page answered {}", res.status()),
+            ));
+        }
+        let cookies: Vec<String> = res
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .map(|v| v.split(';').next().unwrap_or("").to_string())
+            .collect();
+        let html = res.text().await?;
+        Ok(ConsentPage {
+            consent: consent.clone(),
+            permissions: consent_permissions(&html),
+            html,
+            cookies: cookies.join("; "),
+        })
+    }
+
+    /// Post the consent page's "Allow", as the user tapping it there. Only
+    /// call this once the user has agreed to `page.permissions`.
+    pub async fn approve(&self, page: &ConsentPage) -> Result<()> {
+        let Some((post_url, body)) =
+            crate::service::liff::consent_form(&page.html, &page.consent.channel_id)
+        else {
+            return Err(Error::internal(ERROR_NAME, "consent page has no form"));
+        };
+        let mut req = self
+            .client
+            .base
+            .http
+            .post(post_url)
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .header("cookie", &page.cookies)
+            .header("referer", &page.consent.consent_url);
+        for (k, v) in self.consent_headers() {
+            req = req.header(k, v);
+        }
+        let status = req.body(body).send().await?.status();
+        if !status.is_success() {
+            return Err(Error::internal(
+                ERROR_NAME,
+                format!("consent answered {status}"),
+            ));
+        }
+        Ok(())
+    }
+
+    fn consent_headers(&self) -> [(&'static str, String); 3] {
+        let base = &self.client.base;
+        [
+            ("X-Line-Access", base.auth_token().unwrap_or_default()),
+            ("User-Agent", base.device_details.user_agent()),
+            ("X-Line-Application", base.device_details.application()),
+        ]
+    }
+
+    /// `storeShareTargetPickerResult`: tell LINE how the share-target picker
+    /// opened with `ott` ended, which the LIFF SDK waits for (the app's
+    /// `LiffRemoteDataSourceImpl.storeShareTargetPickerResult`).
+    pub async fn store_share_target_picker_result(
+        &self,
+        liff_id: &str,
+        ott: &str,
+        result: PickerResult,
+        description: Option<&str>,
+    ) -> Result<()> {
+        self.client
+            .base
+            .request(
+                picker_result_args(ott, liff_id, result, description),
+                "storeShareTargetPickerResult",
+                RequestOptions::new("/LIFF1", Protocol::Compact),
+            )
+            .await?;
+        Ok(())
+    }
+
     /// Share messages into chat `to` via the LIFF share API (tokens are cached
     /// per chat; `force_issue` mints a new one). linejs issues a token for
     /// every share, so a cached token that the API rejects (4xx) is dropped
@@ -436,6 +640,55 @@ mod tests {
         assert_eq!(
             j(&LiffMessage::Raw(json!({"type": "x"}))),
             json!({"type": "x"})
+        );
+    }
+
+    #[test]
+    fn reads_a_consent_answer_and_page() {
+        let e = Error::Request {
+            method: "issueLiffView".into(),
+            path: "/LIFF1".into(),
+            data: crate::tv!({"liffException": {"code": "CONSENT_REQUIRED", "payload":
+                {"consentRequired": {"channelId": "123", "consentUrl": "https://access.line.me/x"}}}}),
+        };
+        assert_eq!(
+            consent_required(&e),
+            Some(LiffConsent {
+                channel_id: "123".into(),
+                consent_url: "https://access.line.me/x".into()
+            })
+        );
+        let other = Error::Request {
+            method: "issueLiffView".into(),
+            path: "/LIFF1".into(),
+            data: crate::tv!({"code": "INVALID_REQUEST"}),
+        };
+        assert_eq!(consent_required(&other), None);
+
+        let html = concat!(
+            r#"<div app-data="{&quot;props&quot;:{&quot;authz-allow-newly&quot;:["#,
+            r#"{&quot;code&quot;:&quot;P&quot;,&quot;label&quot;:&quot;Profile&quot;},"#,
+            r#"{&quot;code&quot;:&quot;OC&quot;,&quot;label&quot;:&quot;Send &amp; share&quot;}]}}"></div>"#,
+        );
+        let p = consent_permissions(html);
+        assert_eq!(p.len(), 2);
+        assert_eq!(
+            (p[1].code.as_str(), p[1].label.as_str()),
+            ("OC", "Send & share")
+        );
+        assert!(consent_permissions("<html></html>").is_empty());
+    }
+
+    #[test]
+    fn picker_result_request() {
+        let args = picker_result_args("ott-1", "123-abc", PickerResult::Cancel, None);
+        assert_eq!(
+            args[0].1,
+            TValue::Struct(vec![
+                (1, TValue::string("ott-1")),
+                (2, TValue::string("123-abc")),
+                (3, TValue::I32(2)),
+            ])
         );
     }
 
