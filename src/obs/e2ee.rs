@@ -27,7 +27,11 @@ use super::{
 };
 use crate::base::BaseClient;
 use crate::e2ee::crypto::decode_base64;
-use crate::e2ee::media::{MEDIA_HMAC_LEN, MediaDecryptor, MediaHmacVersion, encrypt_media};
+use crate::e2ee::crypto::derive_key_material;
+use crate::e2ee::media::{
+    ChunkHashes, MEDIA_HMAC_LEN, MediaDecryptor, MediaHmacVersion, VerifiedMediaDecryptor,
+    encrypt_media,
+};
 use crate::e2ee::{E2eeContent, E2eeSendRecovery, send_recovery};
 use crate::error::{Error, Result};
 use crate::thrift::{self, Protocol, TType, TValue, Value};
@@ -877,12 +881,149 @@ impl Obs<'_> {
         let res = self
             .get_chat_object(&format!("talk/{sid}"), &oid, &meta)
             .await?;
-        let mime = res
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_string);
-        let mut decryptor = MediaDecryptor::new(&decode_base64(key_material));
+        self.decrypt_body(res, &decode_base64(key_material), out)
+            .await
+            .map(Some)
+    }
+
+    /// [`stream_media_by_e2ee_to`](Self::stream_media_by_e2ee_to), reading
+    /// `keyMaterial` from the message's decrypted payload.
+    pub async fn stream_e2ee_message_media_to(
+        &self,
+        message: &Value,
+        out: DownloadSink<'_>,
+        on_len: &mut (dyn FnMut(u64) + Send),
+    ) -> Result<Option<ObsDownload>> {
+        let payload = self.client.decrypt_e2ee_data_message(message).await?;
+        let key_material = payload["keyMaterial"].as_str().ok_or_else(|| {
+            Error::internal("E2EEMediaError", "decrypted payload has no keyMaterial")
+        })?;
+        self.stream_media_by_e2ee_to(message, key_material, out, on_len)
+            .await
+    }
+
+    /// Stream the media of an E2EE `message` into `out` so it can be played
+    /// while it downloads, as LINE for Android plays a video (`kc8/d`):
+    /// beside the object it fetches the chunk digests (`{oid}/ud-hash`, on
+    /// HTTP 404 the upload name `{oid}__ud-hash`) and the file's last 32
+    /// bytes with a Range request (`kc8/j`), checks the digests against
+    /// that HMAC, and then writes each 128 KiB chunk only once its digest
+    /// matched. Everything written is checked: on an error what was
+    /// written so far is still good, but the file is incomplete.
+    ///
+    /// `on_len` hears the plaintext length before the first byte, when the
+    /// server says how long the object is. A file without chunk digests
+    /// (an image, or a video sent with the whole-file HMAC) streams as
+    /// [`download_media_by_e2ee_to`](Self::download_media_by_e2ee_to)
+    /// does, checked only at the end. Returns `None` when the message has
+    /// no chunks.
+    pub async fn stream_media_by_e2ee_to(
+        &self,
+        message: &Value,
+        key_material: &str,
+        out: DownloadSink<'_>,
+        on_len: &mut (dyn FnMut(u64) + Send),
+    ) -> Result<Option<ObsDownload>> {
+        let to = message["to"].as_str().unwrap_or_default();
+        if !(to.starts_with('u') || to.starts_with('c')) {
+            return Err(Error::internal("ObsError", "Invalid mid"));
+        }
+        if message["chunks"].as_list().is_none_or(|c| c.is_empty()) {
+            return Ok(None);
+        }
+        let (sid, oid, meta) = e2ee_object(message)?;
+        let path = format!("talk/{sid}");
+        let key = decode_base64(key_material);
+        let res = self.get_chat_object(&path, &oid, &meta).await?;
+        let enc_len = res.content_length();
+        let hashes = match self.chunk_hashes(&path, &oid, &meta, &key, enc_len).await {
+            Ok(h) => Some(h),
+            Err(e) => {
+                tracing::debug!(error = %e, "no chunk hashes; checking the whole file");
+                None
+            }
+        };
+        if let Some(n) = enc_len.and_then(|n| n.checked_sub(MEDIA_HMAC_LEN as u64)) {
+            on_len(n);
+        }
+        let Some(hashes) = hashes else {
+            return self.decrypt_body(res, &key, out).await.map(Some);
+        };
+        let mime = super::content_type(&res);
+        let mut decryptor = VerifiedMediaDecryptor::new(&key, hashes);
+        let mut len = 0u64;
+        stream_body(res, self.client.config.download_idle_timeout, |c| {
+            decryptor.push(c);
+            while let Some(plain) = decryptor.next_chunk() {
+                let plain = plain?;
+                len += plain.len() as u64;
+                out.write_all(&plain)?;
+            }
+            Ok(())
+        })
+        .await?;
+        let last = decryptor.finish()?;
+        len += last.len() as u64;
+        out.write_all(&last)?;
+        out.flush()?;
+        Ok(Some(ObsDownload { len, mime }))
+    }
+
+    /// The checked chunk digests of an E2EE object whose ciphertext is
+    /// `enc_len` bytes, fetched together with its trailing HMAC.
+    async fn chunk_hashes(
+        &self,
+        path: &str,
+        oid: &str,
+        meta: &[(String, String)],
+        key_material: &[u8],
+        enc_len: Option<u64>,
+    ) -> Result<ChunkHashes> {
+        let digests = async {
+            match self
+                .download_chat_object(path, &format!("{oid}/ud-hash"), meta)
+                .await
+            {
+                Err(e) if e.http_status() == Some(404) => {
+                    self.download_chat_object(path, &format!("{oid}__ud-hash"), meta)
+                        .await
+                }
+                other => other,
+            }
+        };
+        let tail = async {
+            let start = enc_len?.checked_sub(MEDIA_HMAC_LEN as u64)?;
+            let mut headers = meta.to_vec();
+            headers.push(("range".into(), format!("bytes={start}-")));
+            let res = self
+                .get_chat_object(path, oid, &headers)
+                .await
+                .inspect_err(|e| tracing::debug!(error = %e, "media HMAC range request"))
+                .ok()?;
+            // A server that ignores Range would send the whole file again.
+            if res.status() != reqwest::StatusCode::PARTIAL_CONTENT
+                && res.content_length() != Some(MEDIA_HMAC_LEN as u64)
+            {
+                return None;
+            }
+            let tail = res.bytes().await.ok()?;
+            (tail.len() == MEDIA_HMAC_LEN).then_some(tail)
+        };
+        let (digests, tail) = tokio::join!(digests, tail);
+        let mac_key = derive_key_material(key_material).mac_key;
+        ChunkHashes::parse(&digests?, &mac_key, tail.as_deref())
+    }
+
+    /// Decrypt `res` into `out` as it arrives, checking the HMAC (v1 or v2)
+    /// at the end.
+    async fn decrypt_body(
+        &self,
+        res: reqwest::Response,
+        key_material: &[u8],
+        out: DownloadSink<'_>,
+    ) -> Result<ObsDownload> {
+        let mime = super::content_type(&res);
+        let mut decryptor = MediaDecryptor::new(key_material);
         let mut len = 0u64;
         stream_body(res, self.client.config.download_idle_timeout, |c| {
             let plain = decryptor.update(c);
@@ -892,7 +1033,7 @@ impl Obs<'_> {
         .await?;
         decryptor.finish()?;
         out.flush()?;
-        Ok(Some(ObsDownload { len, mime }))
+        Ok(ObsDownload { len, mime })
     }
 
     /// Download and decrypt the thumbnail of an E2EE image or video,

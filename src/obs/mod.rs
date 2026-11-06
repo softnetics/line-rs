@@ -576,6 +576,21 @@ impl<'a> Obs<'a> {
         square: bool,
         out: DownloadSink<'_>,
     ) -> Result<ObsDownload> {
+        self.stream_message_data_to(message_id, preview, square, out, &mut |_| {})
+            .await
+    }
+
+    /// [`download_message_data_to`](Self::download_message_data_to);
+    /// `on_len` hears the length before the first byte, when the server
+    /// says it.
+    pub async fn stream_message_data_to(
+        &self,
+        message_id: &str,
+        preview: bool,
+        square: bool,
+        out: DownloadSink<'_>,
+        on_len: &mut (dyn FnMut(u64) + Send),
+    ) -> Result<ObsDownload> {
         let res = self
             .get_object(
                 &self.message_data_url(message_id, preview, square),
@@ -585,6 +600,9 @@ impl<'a> Obs<'a> {
                 ObjectAuth::chat(square),
             )
             .await?;
+        if let Some(len) = res.content_length() {
+            on_len(len);
+        }
         self.write_body(res, out).await
     }
 

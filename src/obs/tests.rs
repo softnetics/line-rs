@@ -1607,3 +1607,157 @@ fn metadata_tolerates_nulls_and_numeric_strings() {
 }
 
 mod send_extras;
+
+/// Answers every request with `route(head)`, recording the heads.
+async fn serve_routes(
+    route: impl Fn(&str) -> Canned + Send + Sync + 'static,
+) -> (String, Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let heads = Arc::new(Mutex::new(Vec::new()));
+    let seen = heads.clone();
+    let route = Arc::new(route);
+    tokio::spawn(async move {
+        loop {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let (seen, route) = (seen.clone(), route.clone());
+            tokio::spawn(async move {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 1024];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let n = sock.read(&mut chunk).await.unwrap();
+                    if n == 0 {
+                        return;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+                let head = String::from_utf8_lossy(&buf).to_string();
+                seen.lock().unwrap().push(head.clone());
+                let r = route(&head);
+                let out = format!(
+                    "HTTP/1.1 {} X\r\nconnection: close\r\ncontent-length: {}\r\n\r\n",
+                    r.status,
+                    r.body.len()
+                );
+                sock.write_all(out.as_bytes()).await.unwrap();
+                sock.write_all(&r.body).await.unwrap();
+                sock.shutdown().await.ok();
+            });
+        }
+    });
+    (format!("http://{addr}/"), heads)
+}
+
+fn request_path(head: &str) -> &str {
+    head.split(' ').nth(1).unwrap_or_default()
+}
+
+/// An E2EE video served with its digests at `hash_path` (`None`: no
+/// digests) in the layout LINE for Android reads, and Range support.
+async fn serve_video(
+    data: Vec<u8>,
+    digests: Vec<u8>,
+    hash_path: Option<&'static str>,
+) -> (String, Arc<Mutex<Vec<String>>>) {
+    serve_routes(move |head| match request_path(head) {
+        "/r/talk/emv/OBJ-1" => match header(head, "range") {
+            Some(range) => {
+                let start: usize = range
+                    .trim_start_matches("bytes=")
+                    .trim_end_matches('-')
+                    .parse()
+                    .unwrap();
+                canned_bytes(206, None, data[start..].to_vec())
+            }
+            None => canned_bytes(200, None, data.clone()),
+        },
+        p if Some(p) == hash_path => canned_bytes(200, None, digests.clone()),
+        _ => canned(404, None, b""),
+    })
+    .await
+}
+
+#[tokio::test]
+async fn e2ee_video_streams_checked_chunks() {
+    use crate::e2ee::media::MEDIA_CHUNK_SIZE as CHUNK;
+    let raw: Vec<u8> = (0..CHUNK * 3 + 11).map(|i| (i * 13) as u8).collect();
+    let enc = crate::e2ee::media::encrypt_media(&raw, None, MediaHmacVersion::V2);
+    let object = enc.hash_object.clone().unwrap();
+    let digests = object[..object.len() - 32].to_vec();
+    for (hash_path, body) in [
+        // The app's path and layout: digests only, HMAC from the Range.
+        ("/r/talk/emv/OBJ-1/ud-hash", digests.clone()),
+        // The upload name, with the HMAC after the digests.
+        ("/r/talk/emv/OBJ-1__ud-hash", object.clone()),
+    ] {
+        let (prefix, heads) = serve_video(enc.data.clone(), body, Some(hash_path)).await;
+        let c = chat_client().await;
+        let mut out = Vec::new();
+        let mut told = None;
+        let dl = c
+            .obs()
+            .with_prefix(prefix)
+            .stream_media_by_e2ee_to(&e2ee_message(), &enc.key_material, &mut out, &mut |n| {
+                told = Some(n)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(out, raw);
+        assert_eq!(dl.len, raw.len() as u64);
+        assert_eq!(told, Some(raw.len() as u64));
+        let heads = heads.lock().unwrap();
+        let tail = heads.iter().find(|h| header(h, "range").is_some()).unwrap();
+        assert_eq!(
+            header(tail, "range").unwrap(),
+            format!("bytes={}-", raw.len())
+        );
+        assert!(
+            heads
+                .iter()
+                .all(|h| header(h, "x-line-access") == Some("obs"))
+        );
+        assert!(heads.iter().all(|h| header(h, "x-talk-meta").is_some()));
+    }
+}
+
+#[tokio::test]
+async fn e2ee_video_without_digests_is_checked_at_the_end() {
+    let raw: Vec<u8> = (0..300_000u32).map(|i| (i * 3) as u8).collect();
+    for version in [MediaHmacVersion::V1, MediaHmacVersion::V2] {
+        let enc = crate::e2ee::media::encrypt_media(&raw, None, version);
+        let (prefix, _) = serve_video(enc.data.clone(), Vec::new(), None).await;
+        let c = chat_client().await;
+        let mut out = Vec::new();
+        c.obs()
+            .with_prefix(prefix)
+            .stream_media_by_e2ee_to(&e2ee_message(), &enc.key_material, &mut out, &mut |_| {})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(out, raw);
+    }
+}
+
+#[tokio::test]
+async fn e2ee_video_stops_before_a_bad_chunk() {
+    use crate::e2ee::media::MEDIA_CHUNK_SIZE as CHUNK;
+    let raw: Vec<u8> = (0..CHUNK * 3 + 11).map(|i| (i * 5) as u8).collect();
+    let enc = crate::e2ee::media::encrypt_media(&raw, None, MediaHmacVersion::V2);
+    let object = enc.hash_object.clone().unwrap();
+    let mut bad = enc.data.clone();
+    bad[2 * CHUNK + 1] ^= 1;
+    let (prefix, _) = serve_video(bad, object, Some("/r/talk/emv/OBJ-1/ud-hash")).await;
+    let c = chat_client().await;
+    let mut out = Vec::new();
+    let err = c
+        .obs()
+        .with_prefix(prefix)
+        .stream_media_by_e2ee_to(&e2ee_message(), &enc.key_material, &mut out, &mut |_| {})
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("chunk 2"), "{err}");
+    // Only the chunks before the bad one were written.
+    assert_eq!(out.len(), 2 * CHUNK);
+    assert!(out == raw[..2 * CHUNK]);
+}
