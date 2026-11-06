@@ -53,10 +53,13 @@ pub struct Config {
     /// Adopt the token in an `X-Line-Next-Access` response header (default
     /// on).
     pub apply_next_access: bool,
-    /// Recover from E2EE `sendMessage` errors the way the macOS client does
-    /// (re-encrypt, recreate group key, plain fallback; see
-    /// [`crate::e2ee::send_recovery`]). Off by default: linejs only retries
-    /// once with encryption when `e2ee` was unset.
+    /// Recover from `E2EE_*` `sendMessage` errors the way LINE for Android
+    /// does: look the chat's key up again and re-encrypt, recreate the group
+    /// key, reload our key, or send plain (see
+    /// [`crate::e2ee::send_recovery`] and
+    /// [`BaseClient::send_with_e2ee_recovery`]). Default on. Off, the only
+    /// retry is the linejs one: a plain message refused with an `E2EE*`
+    /// code is sent once more encrypted.
     pub e2ee_send_recovery: bool,
     /// `x-lal` on every request, e.g. `th_TH`. LINE writes the text it
     /// generates (event cards, system messages, errors) in this language.
@@ -75,7 +78,7 @@ impl Default for Config {
             refresh_margin: Duration::from_secs(60),
             report_refreshed_token: false,
             apply_next_access: false,
-            e2ee_send_recovery: false,
+            e2ee_send_recovery: true,
             language: "th_TH".to_string(),
         }
     }

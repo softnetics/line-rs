@@ -1,38 +1,47 @@
 //! Recovery from E2EE `sendMessage` failures.
 //!
-//! The desktop client's `ChatSecurityServiceImpl::handleE2EEErrorCodeInternal`
-//! switches on the `ErrorCode` of a failed send:
+//! LINE for Android hands every `E2EE_*` error of a send to
+//! `xn8/k.java#c(code, message, depth, …)`, which switches on the code
+//! (classifiers in `xn8/c.java`) and then resends the same operation, with
+//! the same `reqSeq`:
 //!
 //! | code | action |
 //! |---|---|
-//! | `E2EE_RETRY_ENCRYPT` (82), `E2EE_UPDATE_RECEIVER_KEY` (84), `E2EE_INVALID_VERSION` (86) | re-negotiate the receiver key, re-encrypt, resend |
-//! | `E2EE_RECREATE_GROUP_KEY` (99) | queue the message, `recreateGroupKey` (`getLastE2EEPublicKeys` → `registerE2EEGroupKey`), re-encrypt |
-//! | `E2EE_RETRY_PLAIN` (98), `E2EE_RECEIVER_DISABLED` (88), `E2EE_RECEIVER_NOT_ALLOWED` (90), `E2EE_GROUP_TOO_MANY_MEMBERS` (100) | turn E2EE off for the chat, resend plain |
+//! | `E2EE_RETRY_ENCRYPT` (82), `E2EE_UPDATE_RECEIVER_KEY` (84), `E2EE_INVALID_VERSION` (86), `E2EE_RECEIVER_DISABLED` (88), `E2EE_RECEIVER_NOT_ALLOWED` (90) | look the chat's key up again (`negotiateE2EEPublicKey` / `getLastE2EEGroupSharedKey`) and resend as the new state says |
+//! | `E2EE_UPDATE_SENDER_KEY` (83) | drop the cached own key, load (or register) the current one, resend |
+//! | `E2EE_SENDER_DISABLED` (87), `E2EE_SENDER_NOT_ALLOWED` (89) | turn E2EE off for the sender, resend plain |
+//! | `E2EE_RETRY_PLAIN` (98), `E2EE_GROUP_TOO_MANY_MEMBERS` (100) | mark the chat plain, resend plain |
+//! | `E2EE_RECREATE_GROUP_KEY` (99) | register a new group shared key, resend |
 //!
-//! and gives up on a request once it has been handled five times. Other
-//! codes (e.g. `E2EE_UPDATE_SENDER_KEY`, `E2EE_SENDER_DISABLED`) are not
-//! retried here: their client-side handling could not be pinned down.
-//!
-//! Derived from static RE of LINE macOS 26.5.0; unverified against live
-//! server.
+//! `E2EE_INVALID_PROTOCOL` (81), `E2EE_INVALID_ARGUMENT` (85) and
+//! `E2EE_RESEND_FAIL` (91) are not recovered. The send loop itself is
+//! [`BaseClient::send_with_e2ee_recovery`].
 
 use crate::base::BaseClient;
 use crate::error::Result;
 
-/// Upper bound on `sendMessage` attempts for one message (the client stops
-/// after handling the same request five times).
-pub const MAX_E2EE_SEND_ATTEMPTS: u32 = 5;
+/// Upper bound on `sendMessage` attempts for one message: the first send and
+/// two resends. LINE for Android counts recoveries per message
+/// (`xn8/k.java#c`, `g0.f397253i`) and its edit sender stops after three
+/// attempts (`i31/c.java`).
+pub const MAX_E2EE_SEND_ATTEMPTS: u32 = 3;
 
 /// What to do before resending after an E2EE send error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum E2eeSendRecovery {
-    /// Fetch the receiver's current key (or the group's last key) and
-    /// encrypt again.
+    /// Look up the receiver's current key (or the group's last key) again
+    /// and send as the refreshed chat state says.
     Reencrypt,
     /// Register a new group shared key, then encrypt again.
     RecreateGroupKey,
-    /// Send without E2EE.
+    /// Mark the chat plain and send without E2EE.
     RetryPlain,
+    /// Our own key is outdated: reload it, then encrypt again.
+    RefreshSenderKey,
+    /// The server does not take E2EE from this account (sender disabled or
+    /// not allowed): send this message plain. The chat is not marked.
+    SendPlain,
 }
 
 /// The recovery for an `ErrorCode` given by name (as decoded from a
@@ -45,16 +54,15 @@ pub fn send_recovery(code: &str) -> Option<E2eeSendRecovery> {
         | "E2EE_UPDATE_RECEIVER_KEY"
         | "84"
         | "E2EE_INVALID_VERSION"
-        | "86" => Reencrypt,
-        "E2EE_RECREATE_GROUP_KEY" | "99" => RecreateGroupKey,
-        "E2EE_RETRY_PLAIN"
-        | "98"
+        | "86"
         | "E2EE_RECEIVER_DISABLED"
         | "88"
         | "E2EE_RECEIVER_NOT_ALLOWED"
-        | "90"
-        | "E2EE_GROUP_TOO_MANY_MEMBERS"
-        | "100" => RetryPlain,
+        | "90" => Reencrypt,
+        "E2EE_UPDATE_SENDER_KEY" | "83" => RefreshSenderKey,
+        "E2EE_SENDER_DISABLED" | "87" | "E2EE_SENDER_NOT_ALLOWED" | "89" => SendPlain,
+        "E2EE_RECREATE_GROUP_KEY" | "99" => RecreateGroupKey,
+        "E2EE_RETRY_PLAIN" | "98" | "E2EE_GROUP_TOO_MANY_MEMBERS" | "100" => RetryPlain,
         _ => return None,
     })
 }
@@ -62,13 +70,22 @@ pub fn send_recovery(code: &str) -> Option<E2eeSendRecovery> {
 impl BaseClient {
     /// Side effects needed before resending to `to` after `recovery`: a new
     /// group key for [`E2eeSendRecovery::RecreateGroupKey`] on a group or
-    /// room. Re-encryption itself always negotiates the receiver's current
-    /// key, so nothing is cached that would need dropping.
+    /// room, the plain mark for [`E2eeSendRecovery::RetryPlain`], a reloaded
+    /// own key for [`E2eeSendRecovery::RefreshSenderKey`], and a fresh chat
+    /// state for [`E2eeSendRecovery::Reencrypt`].
+    /// [`Self::send_with_e2ee_recovery`] does this itself.
     pub async fn prepare_e2ee_resend(&self, to: &str, recovery: E2eeSendRecovery) -> Result<()> {
-        if recovery == E2eeSendRecovery::RecreateGroupKey
-            && matches!(Self::get_to_type(to), Some(1 | 2))
-        {
-            self.try_register_e2ee_group_key(to).await?;
+        let e2ee = self.e2ee();
+        match recovery {
+            E2eeSendRecovery::RecreateGroupKey if matches!(Self::get_to_type(to), Some(1 | 2)) => {
+                e2ee.recreate_group_state(to).await?;
+            }
+            E2eeSendRecovery::RecreateGroupKey | E2eeSendRecovery::Reencrypt => {
+                e2ee.refresh_chat_state(to).await?;
+            }
+            E2eeSendRecovery::RetryPlain => e2ee.mark_chat_plain(to).await?,
+            E2eeSendRecovery::RefreshSenderKey => e2ee.refresh_self_key().await?,
+            E2eeSendRecovery::SendPlain => {}
         }
         Ok(())
     }
@@ -80,26 +97,24 @@ mod tests {
 
     #[test]
     fn classifies_codes_by_name_and_number() {
-        assert_eq!(
-            send_recovery("E2EE_RETRY_ENCRYPT"),
-            Some(E2eeSendRecovery::Reencrypt)
-        );
-        assert_eq!(send_recovery("84"), Some(E2eeSendRecovery::Reencrypt));
-        assert_eq!(
-            send_recovery("E2EE_INVALID_VERSION"),
-            Some(E2eeSendRecovery::Reencrypt)
-        );
-        assert_eq!(
-            send_recovery("E2EE_RECREATE_GROUP_KEY"),
-            Some(E2eeSendRecovery::RecreateGroupKey)
-        );
-        assert_eq!(
-            send_recovery("E2EE_RETRY_PLAIN"),
-            Some(E2eeSendRecovery::RetryPlain)
-        );
-        assert_eq!(send_recovery("100"), Some(E2eeSendRecovery::RetryPlain));
-        assert_eq!(send_recovery("E2EE_UPDATE_SENDER_KEY"), None);
-        assert_eq!(send_recovery("E2EE_SENDER_DISABLED"), None);
-        assert_eq!(send_recovery("NOT_FOUND"), None);
+        use E2eeSendRecovery::*;
+        for (code, want) in [
+            ("E2EE_RETRY_ENCRYPT", Some(Reencrypt)),
+            ("84", Some(Reencrypt)),
+            ("E2EE_INVALID_VERSION", Some(Reencrypt)),
+            ("E2EE_RECEIVER_DISABLED", Some(Reencrypt)),
+            ("90", Some(Reencrypt)),
+            ("E2EE_UPDATE_SENDER_KEY", Some(RefreshSenderKey)),
+            ("E2EE_SENDER_DISABLED", Some(SendPlain)),
+            ("89", Some(SendPlain)),
+            ("E2EE_RECREATE_GROUP_KEY", Some(RecreateGroupKey)),
+            ("E2EE_RETRY_PLAIN", Some(RetryPlain)),
+            ("100", Some(RetryPlain)),
+            ("E2EE_INVALID_PROTOCOL", None),
+            ("E2EE_RESEND_FAIL", None),
+            ("NOT_FOUND", None),
+        ] {
+            assert_eq!(send_recovery(code), want, "{code}");
+        }
     }
 }

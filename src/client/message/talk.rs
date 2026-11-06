@@ -36,6 +36,7 @@ impl TalkMessage {
     /// Wrap a `Message`, decrypting it first when it carries `e2eeVersion`.
     pub async fn from_raw(client: Client, raw: Value) -> Result<Self> {
         let raw = if raw["contentMetadata"].get("e2eeVersion").is_some() {
+            client.base.observe_e2ee_message(&raw).await;
             client.base.decrypt_e2ee_message(raw).await?
         } else {
             raw

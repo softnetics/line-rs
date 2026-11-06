@@ -111,8 +111,10 @@ pub fn sticker_metadata(
 #[derive(Debug, Clone, Default)]
 pub struct MessageInput {
     pub text: Option<String>,
-    /// `None` = plain first, retrying with E2EE if the server demands it
-    /// (talk only; ignored for square).
+    /// `None` (default): encrypt text and location when the chat uses
+    /// Letter Sealing for them (see
+    /// [`E2eeChatState`](crate::e2ee::E2eeChatState)). `Some(true)`: always
+    /// encrypt; `Some(false)`: always plain. Talk only; ignored for square.
     pub e2ee: Option<bool>,
     /// `ContentType` variant name (default `NONE`).
     pub content_type: Option<String>,
@@ -122,6 +124,10 @@ pub struct MessageInput {
     pub location: Option<Value>,
     /// Pre-encrypted E2EE chunks.
     pub chunks: Option<Vec<Vec<u8>>>,
+    /// `reqSeq` for the send (talk only). Every retry of one send reuses
+    /// it; pass the same value again to retry a send whose answer was lost.
+    /// Default: allocated once per send.
+    pub req_seq: Option<i64>,
 }
 
 impl MessageInput {
@@ -181,6 +187,11 @@ impl MessageInput {
     }
     pub fn reply_to(mut self, message_id: impl Into<String>) -> Self {
         self.related_message_id = Some(message_id.into());
+        self
+    }
+    /// Send with this `reqSeq` (see [`MessageInput::req_seq`]).
+    pub fn req_seq(mut self, req_seq: i64) -> Self {
+        self.req_seq = Some(req_seq);
         self
     }
 }

@@ -129,10 +129,13 @@ Messaging:
   Sealing when the chat uses it. In LINEJS's client only OpenChat has these.
 - `ClientEvent::Talk` turns raw operations into typed events: read receipts,
   reactions, unsends, calls, group membership and contacts.
-- An encrypted send that the server rejects is retried up to 5 times, with
-  the fix the error asks for: re-encrypt with fresh keys, register a new
-  group key, or send in plain text when encryption wasn't forced. LINEJS
-  retries once with encryption on.
+- Text and locations are encrypted first when the chat uses Letter Sealing
+  for them, as LINE for Android does; the chat's state is looked up once
+  and stored. A send the server rejects with an `E2EE_*` code is tried up
+  to 3 times with the same `reqSeq`, with the fix the error asks for:
+  re-encrypt with fresh keys, register a new group key, reload our key, or
+  send in plain text when encryption wasn't forced. LINEJS sends plain
+  first and retries once with encryption on.
 - E2EE media v2 integrity checks (HMAC over 128 KiB chunks) and the E2EE key
   exchange calls.
 

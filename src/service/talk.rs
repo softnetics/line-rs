@@ -13,7 +13,6 @@ use self::compact::{
 };
 use super::{TalkService, rename_raw};
 use crate::base::ClientEvent;
-use crate::e2ee::E2eeContent;
 use crate::error::{Error, Result};
 use crate::request::{Parse, RequestOptions};
 use crate::thrift::{Schema, TType, TValue, TypeRef, Value};
@@ -42,10 +41,18 @@ pub struct SendMessageOptions {
     pub related_message_id: Option<String>,
     /// A `Location` struct value.
     pub location: Option<Value>,
-    /// Pre-encrypted E2EE chunks.
+    /// Pre-encrypted E2EE chunks, sent once as they are (no E2EE
+    /// recovery).
     pub chunks: Option<Vec<Vec<u8>>>,
-    /// `Some(true)` encrypts; `None` retries with E2EE when the server asks.
+    /// `None` (default): encrypt when the chat's
+    /// [`E2eeChatState`](crate::e2ee::E2eeChatState) allows the content
+    /// type. `Some(true)`: always encrypt, never fall back to plain.
+    /// `Some(false)`: always plain.
     pub e2ee: Option<bool>,
+    /// `reqSeq` for every attempt of this send. Pass the same value again to
+    /// retry a send whose answer was lost, so the server can tell it is the
+    /// same message. Default: the next `talk` sequence, taken once.
+    pub req_seq: Option<i64>,
 }
 
 impl SendMessageOptions {
@@ -118,7 +125,8 @@ pub(crate) fn sync_args(o: &SyncOptions) -> Value {
     }})
 }
 
-pub(crate) fn send_message_args(seq: i64, o: &SendMessageOptions) -> Value {
+/// The `Message` struct of a send (`text`/`location`/`chunks` as given).
+pub(crate) fn talk_message_value(o: &SendMessageOptions) -> Value {
     let mut message = crate::tv!({
         "to": o.to,
         "createdTime": 0,
@@ -152,8 +160,12 @@ pub(crate) fn send_message_args(seq: i64, o: &SendMessageOptions) -> Value {
         message.insert("messageRelationType", "REPLY");
         message.insert("relatedMessageServiceCode", "TALK");
     }
+    message
+}
+
+pub(crate) fn send_message_args(seq: i64, o: &SendMessageOptions) -> Value {
     let mut args = crate::tv!({"seq": seq});
-    args.insert("message", message);
+    args.insert("message", talk_message_value(o));
     args
 }
 
@@ -223,83 +235,51 @@ impl TalkService<'_> {
         .await
     }
 
-    /// Send a message. With `e2ee: Some(true)` the text/location is
-    /// encrypted first; with `e2ee: None` an `E2EE*` error code triggers one
-    /// retry with encryption (as linejs). With `Config::e2ee_send_recovery`,
-    /// messages are also recovered from E2EE send errors as the official
-    /// client does (see [`crate::e2ee::send_recovery`]): re-encrypt with fresh
-    /// keys, recreate the group key, or (only when `e2ee` was unset) fall back
-    /// to plain, for at most [`crate::e2ee::MAX_E2EE_SEND_ATTEMPTS`] attempts.
+    /// Send a message as LINE for Android does (see
+    /// [`BaseClient::send_with_e2ee_recovery`](crate::base::BaseClient::send_with_e2ee_recovery)):
+    /// text and location are encrypted first when the chat's
+    /// [`E2eeChatState`](crate::e2ee::E2eeChatState) allows the content type,
+    /// and `E2EE_*` errors are recovered (re-encrypt with fresh keys,
+    /// recreate the group key, reload our key, or, unless `e2ee` is
+    /// `Some(true)`, fall back to plain), for at most
+    /// [`crate::e2ee::MAX_E2EE_SEND_ATTEMPTS`] attempts with one `reqSeq`.
+    /// A location without a content type is sent as `LOCATION`. Messages
+    /// with nothing to encrypt (stickers, contacts, ...) and pre-encrypted
+    /// `chunks` are sent as they are.
     pub async fn send_message(&self, options: SendMessageOptions) -> Result<Value> {
-        use crate::e2ee::{E2eeSendRecovery, MAX_E2EE_SEND_ATTEMPTS, send_recovery};
-        let requested = options.e2ee;
-        // Only plaintext we hold can be re-encrypted or resent in the clear.
-        let reencryptable =
-            options.chunks.is_none() && (options.text.is_some() || options.location.is_some());
         let mut options = options;
-        let mut attempts = 0;
-        loop {
-            attempts += 1;
-            let mut send = options.clone();
-            if send.e2ee == Some(true)
-                && send.chunks.is_none()
-                && (send.text.as_deref().is_some_and(|t| !t.is_empty()) || send.location.is_some())
-            {
-                let content_type =
-                    content_type_number(send.content_type.as_ref().unwrap_or(&Value::Int(0)));
-                let content = match (send.text.take(), send.location.take()) {
-                    (Some(text), _) if !text.is_empty() => E2eeContent::Text(text),
-                    (_, Some(location)) => E2eeContent::Location(location),
-                    _ => E2eeContent::Text("invalid".into()),
-                };
-                send.chunks = Some(
-                    self.client
-                        .encrypt_e2ee_message(&send.to, content, content_type, 2)
-                        .await?,
-                );
-                send.content_metadata
-                    .insert("e2eeVersion".into(), "2".into());
-                send.content_metadata
-                    .insert("contentType".into(), content_type.to_string());
-                send.content_metadata.insert("e2eeMark".into(), "2".into());
-            }
-            let seq = self.client.get_reqseq("talk").await?;
-            let err = match self
-                .call("sendMessage", send_message_args(seq, &send))
-                .await
-            {
-                Err(e) if attempts < MAX_E2EE_SEND_ATTEMPTS => e,
-                res => return res,
-            };
-            let code = err.code().unwrap_or_default();
-            if !self.client.config.e2ee_send_recovery {
-                // linejs: retry once with encryption when `e2ee` was unset.
-                if attempts == 1 && options.e2ee.is_none() && code.contains("E2EE") {
-                    options.e2ee = Some(true);
-                    continue;
-                }
-                return Err(err);
-            }
-            match send_recovery(code) {
-                Some(E2eeSendRecovery::RetryPlain)
-                    if requested.is_none() && reencryptable && options.e2ee == Some(true) =>
-                {
-                    options.e2ee = Some(false);
-                }
-                Some(r @ (E2eeSendRecovery::Reencrypt | E2eeSendRecovery::RecreateGroupKey))
-                    if requested != Some(false)
-                        && options.e2ee != Some(false)
-                        && (reencryptable || options.e2ee.is_none()) =>
-                {
-                    self.client.prepare_e2ee_resend(&options.to, r).await?;
-                    options.e2ee = Some(true);
-                }
-                None if options.e2ee.is_none() && code.contains("E2EE") => {
-                    options.e2ee = Some(true)
-                }
-                _ => return Err(err),
-            }
+        if options.location.is_some() && options.content_type.is_none() {
+            options.content_type = Some("LOCATION".into());
         }
+        if options.chunks.is_some() {
+            let seq = match options.req_seq {
+                Some(seq) => seq,
+                None => self.client.get_reqseq("talk").await?,
+            };
+            return self
+                .call("sendMessage", send_message_args(seq, &options))
+                .await;
+        }
+        let encryptable =
+            options.text.as_deref().is_some_and(|t| !t.is_empty()) || options.location.is_some();
+        let send_options = crate::e2ee::E2eeSendOptions {
+            content_type: content_type_number(
+                options.content_type.as_ref().unwrap_or(&Value::Int(0)),
+            ),
+            e2ee: if encryptable {
+                options.e2ee
+            } else {
+                Some(false)
+            },
+            req_seq: options.req_seq,
+        };
+        let client = self.client;
+        let options = &options;
+        client
+            .send_with_e2ee_recovery(&options.to, send_options, |attempt| {
+                client.talk_message_for_attempt(options, attempt)
+            })
+            .await
     }
 
     /// Send a text via the compact protocol (`/CA5`), falling back to
@@ -350,7 +330,7 @@ impl TalkService<'_> {
             (Some(c), _) => c,
             (None, Some(text)) => {
                 self.client
-                    .encrypt_e2ee_message(to, E2eeContent::Text(text.into()), 0, 2)
+                    .encrypt_e2ee_message(to, crate::e2ee::E2eeContent::Text(text.into()), 0, 2)
                     .await?
             }
             (None, None) => {

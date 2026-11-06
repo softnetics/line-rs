@@ -10,6 +10,8 @@
 //! * [`media`] — media integrity: v1 whole-file HMAC and v2 chunked HMAC
 //!   with `__ud-hash` chunk digests.
 //! * `recovery` — what to do when `sendMessage` fails with an `E2EE_*` code.
+//! * `send` — the per-chat [`E2eeChatState`] and the encrypt-first send
+//!   loop ([`BaseClient::send_with_e2ee_recovery`]).
 //! * `exchange` — `requestE2EEKeyExchange` / `respondE2EEKeyExchange` /
 //!   `removeE2EEPublicKey` and E2EE operation classification.
 //!
@@ -21,6 +23,7 @@ mod keys;
 pub mod media;
 mod message;
 mod recovery;
+mod send;
 
 use std::sync::Mutex;
 
@@ -42,6 +45,7 @@ pub use media::{
 };
 pub use message::{content_type_number, decrypt_message_v1, decrypt_message_v2, encrypt_payload};
 pub use recovery::{E2eeSendRecovery, MAX_E2EE_SEND_ATTEMPTS, send_recovery};
+pub use send::{E2eeChatState, E2eeSendAttempt, E2eeSendOptions};
 
 use crate::base::BaseClient;
 use crate::error::Result;
@@ -201,9 +205,10 @@ impl BaseClient {
         self.e2ee().try_register_group_key(chat_mid).await
     }
 
-    /// Encrypt a message for `to` (user, group or room). Returns the
-    /// `chunks` to put in the `Message`. For users the negotiated spec
-    /// version overrides `spec_version`.
+    /// Encrypt a message for `to` (user, group or room) after looking its
+    /// key up again (stored as the chat's [`E2eeChatState`]). Returns the
+    /// `chunks` to put in the `Message`. The server's spec version
+    /// overrides `spec_version`.
     pub async fn encrypt_e2ee_message(
         &self,
         to: &str,

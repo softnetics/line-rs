@@ -10,7 +10,8 @@
 
 use super::E2eeContent;
 use super::crypto;
-use super::keys::{E2ee, key_data_of, no_e2ee_key};
+use super::keys::{E2ee, no_e2ee_key};
+use super::send::E2eeChatState;
 use crate::error::{Error, Result};
 use crate::thrift::{Schema, Value};
 
@@ -129,6 +130,9 @@ pub(crate) struct MessageKeys {
 }
 
 impl E2ee<'_> {
+    /// Encrypt for `to` after looking its key up again (negotiate or the
+    /// group's last key); the lookup is stored as the chat's
+    /// [`E2eeChatState`]. `spec_version` is used when the server names none.
     pub async fn encrypt_message(
         &self,
         to: &str,
@@ -136,36 +140,50 @@ impl E2ee<'_> {
         content_type: i32,
         spec_version: i32,
     ) -> Result<Vec<Vec<u8>>> {
+        if !matches!(crate::base::BaseClient::get_to_type(to), Some(0..=2)) {
+            return Err(Error::internal("Invalid mid", to));
+        }
+        let mut state = self.refresh_chat_state(to).await?;
+        if state.spec_version <= 0 && state.usable {
+            state.spec_version = spec_version;
+        }
+        self.encrypt_for_state(to, content, content_type, &state)
+            .await
+    }
+
+    /// Encrypt for `to` with the key named by `state` (the peer's key id for
+    /// a user, the group key id for a group or room) and its spec version.
+    pub async fn encrypt_for_state(
+        &self,
+        to: &str,
+        content: E2eeContent,
+        content_type: i32,
+        state: &E2eeChatState,
+    ) -> Result<Vec<Vec<u8>>> {
         let from = self
             .host
             .self_mid()
             .ok_or_else(|| Error::internal("NotAuthorized", "profile is not loaded"))?;
-        let self_key = self.get_self_key(&from).await?;
         let to_type = crate::base::BaseClient::get_to_type(to);
         if !matches!(to_type, Some(0..=2)) {
             return Err(Error::internal("Invalid mid", to));
         }
-        let sender_key_id = self_key.key_id.ok_or_else(no_e2ee_key)?;
-        let mut spec_version = spec_version as i64;
-        let (receiver_key_id, secret) = if to_type == Some(0) {
-            let res = self.host.negotiate_e2ee_public_key(to).await?;
-            spec_version = res["specVersion"].as_i64().unwrap_or(spec_version);
-            if spec_version == -1 {
-                return Err(Error::internal("Not support E2EE", to));
-            }
-            let pk = &res["publicKey"];
-            let secret =
-                crypto::generate_shared_secret(&self_key.private_key(), key_data_of(pk, to)?);
-            (
-                super::keys::key_id_of(&pk["keyId"]).unwrap_or_default(),
-                secret,
-            )
+        let (true, Some(receiver_key_id)) = (state.usable, state.key_id) else {
+            return Err(Error::internal("Not support E2EE", to));
+        };
+        let spec_version = if state.spec_version > 0 {
+            state.spec_version as i64
         } else {
-            let group = self.get_group_key(to, None).await?;
-            (
-                group.key_id,
-                crypto::generate_shared_secret(&group.private_key(), &self_key.public_key()),
-            )
+            2
+        };
+        let self_key = self.get_self_key(&from).await?;
+        let sender_key_id = self_key.key_id.ok_or_else(no_e2ee_key)?;
+        let secret = if to_type == Some(0) {
+            let peer = self.get_user_public_key(to, Some(receiver_key_id)).await?;
+            crypto::generate_shared_secret(&self_key.private_key(), &peer)
+        } else {
+            let group = self.get_group_key(to, Some(receiver_key_id)).await?;
+            crypto::generate_shared_secret(&group.private_key(), &self_key.public_key())
         };
         let content_type = content_type as i64;
         let (payload, aad_type) = match content {
