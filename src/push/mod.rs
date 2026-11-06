@@ -10,6 +10,7 @@
 //! * [`conn`] — packet reassembly and the full-duplex transport (`conn.ts`).
 //! * [`tmc`] — the TMoreCompact reader used by talk sign-on responses.
 
+pub(crate) mod backoff;
 pub mod conn;
 pub mod frame;
 pub(crate) mod manager;
@@ -237,6 +238,12 @@ impl PushHost for BaseClient {
         BaseClient::emit(self, event);
     }
 
+    fn fail_over(&self) {
+        if self.endpoint_count() > 1 {
+            self.fail_over_from(self.active_endpoint_index());
+        }
+    }
+
     fn open_conn(&self, path: &str) -> Result<Conn> {
         let mut headers = self.line_headers("POST");
         headers.retain(|(k, _)| k != "content-type" && k != "accept");
@@ -244,7 +251,7 @@ impl PushHost for BaseClient {
         headers.push(("accept".into(), "application/octet-stream".into()));
         Ok(Conn::open(
             &self.push_http,
-            &format!("https://{}{}", self.endpoint, path),
+            &crate::request::endpoint_url(self.current_endpoint(), path),
             headers,
         ))
     }

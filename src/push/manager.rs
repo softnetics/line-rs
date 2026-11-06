@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
 use futures::future::BoxFuture;
@@ -20,8 +20,15 @@ use crate::polling::{FullSyncCategory, FullSyncReason, SyncData};
 use crate::thrift::{self, Protocol, Schema, TValue, Value};
 use crate::tv;
 
-/// Ping interval announced in the status frame (seconds).
+/// Ping interval announced in the status frame (seconds); the Android
+/// app's `ping_cycle` default (`com/linecorp/legy/streaming/h.java`).
 const PING_INTERVAL: u8 = 30;
+
+/// A connection that delivers nothing (no ping, no response) for two ping
+/// cycles is dead: close it and reconnect (`ta0/t.java`
+/// `launchServerPingTimeoutCoroutine`). Also bounds the wait for the
+/// response headers.
+pub(crate) const PING_TIMEOUT: Duration = Duration::from_secs(2 * PING_INTERVAL as u64);
 
 /// What the push machinery needs from the client. Implemented by
 /// [`BaseClient`](crate::BaseClient); tests use fakes.
@@ -34,6 +41,8 @@ pub(crate) trait PushHost: Clone + Send + Sync + 'static {
     fn restore_sync(&self) -> BoxFuture<'static, ()>;
     fn log(&self, kind: &str, data: serde_json::Value);
     fn emit(&self, event: ClientEvent);
+    /// Move to the next LEGY host after repeated connection failures.
+    fn fail_over(&self);
     /// Start the `/PUSH` request at `path`.
     fn open_conn(&self, path: &str) -> Result<Conn>;
     /// `SquareService.fetchMyEvents(args)` over the normal RPC path.
@@ -52,6 +61,8 @@ struct State {
     curr_ping_id: u16,
     event_synced: bool,
     auth_token: Option<String>,
+    /// The current connection delivered at least one packet.
+    alive: bool,
 }
 
 pub(crate) struct ConnManager<H> {
@@ -127,12 +138,19 @@ impl<H: PushHost> ConnManager<H> {
         self.state.lock().unwrap().subscription_id
     }
 
+    /// Whether the last connection delivered any packet (a connection that
+    /// never did counts as a failed attempt).
+    pub fn was_alive(&self) -> bool {
+        self.state.lock().unwrap().alive
+    }
+
     /// Open a new connection subscribed to `services`.
     pub fn initialize_conn(&self, services: &[u8]) -> Result<Conn> {
         {
             let mut st = self.state.lock().unwrap();
             st.sign_on_requests.clear();
             st.auth_token = self.host.auth_token();
+            st.alive = false;
         }
         let m = services_mask(services);
         self.log(&format!("Using `m={m}` on `/PUSH`"), json!(""));
@@ -464,9 +482,18 @@ impl<H: PushHost> ConnManager<H> {
         w: &ConnWriter,
         response: BoxFuture<'static, Result<ByteStream>>,
     ) -> Result<()> {
+        let silent = || {
+            Error::internal(
+                "TimeoutError",
+                format!(
+                    "no data from the push server for {}s",
+                    PING_TIMEOUT.as_secs()
+                ),
+            )
+        };
         let mut body = tokio::select! {
             _ = w.closed() => return Ok(()),
-            r = response => r?,
+            r = tokio::time::timeout(PING_TIMEOUT, response) => r.map_err(|_| silent())??,
         };
         let mut decoder = FrameDecoder::new();
         // Handlers that call back into the network run concurrently so pings
@@ -475,10 +502,14 @@ impl<H: PushHost> ConnManager<H> {
         loop {
             let chunk = tokio::select! {
                 _ = w.closed() => return Ok(()),
-                c = body.next() => c,
+                c = tokio::time::timeout(PING_TIMEOUT, body.next()) => c.map_err(|_| silent())?,
             };
             let Some(chunk) = chunk else { return Ok(()) };
-            for packet in decoder.feed(&chunk?)? {
+            let packets = decoder.feed(&chunk?)?;
+            if !packets.is_empty() {
+                self.state.lock().unwrap().alive = true;
+            }
+            for packet in packets {
                 match packet {
                     Packet::Ping(f) => {
                         w.write(f.ack_packet())?;
@@ -606,6 +637,7 @@ pub(crate) mod tests {
         pub fetch: Responder,
         pub noop_ok: bool,
         pub opens: Arc<AtomicUsize>,
+        pub failovers: Arc<AtomicUsize>,
         /// Connections handed out by `open_conn`; `None` → fail to open.
         pub conns: Arc<Mutex<Vec<Conn>>>,
     }
@@ -621,6 +653,7 @@ pub(crate) mod tests {
                 fetch: Arc::new(|| Err(Error::internal("TestError", "unexpected fetchMyEvents"))),
                 noop_ok: true,
                 opens: Arc::default(),
+                failovers: Arc::default(),
                 conns: Arc::default(),
             }
         }
@@ -653,6 +686,9 @@ pub(crate) mod tests {
         }
         fn emit(&self, event: ClientEvent) {
             self.events.lock().unwrap().push(event);
+        }
+        fn fail_over(&self) {
+            self.failovers.fetch_add(1, Ordering::SeqCst);
         }
         fn open_conn(&self, _path: &str) -> Result<Conn> {
             self.opens.fetch_add(1, Ordering::SeqCst);
@@ -930,6 +966,42 @@ pub(crate) mod tests {
             async { Err(Error::internal("LegyPusherError", "fetch failed")) }.boxed(),
         );
         assert!(m.init_and_read(conn, &[3, 8]).await.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn silent_connection_times_out() {
+        let host = FakeHost::new();
+        let (m, hub) = manager(&host);
+        let _rx = hub.subscribe_raw(Kind::Talk);
+        let (conn, _written, body) = fake_conn();
+        let task = tokio::spawn({
+            let m = m.clone();
+            async move { m.init_and_read(conn, &[]).await }
+        });
+        // A ping keeps the connection alive past one timeout window.
+        tokio::time::sleep(PING_TIMEOUT - Duration::from_secs(1)).await;
+        body.send(Ok(Bytes::from(request_packet(FRAME_PING, &[2, 0, 1]))))
+            .unwrap();
+        tokio::time::sleep(PING_TIMEOUT - Duration::from_secs(1)).await;
+        assert!(!task.is_finished());
+        // Then silence for a whole window ends it with a timeout.
+        let start = tokio::time::Instant::now();
+        let err = task.await.unwrap().unwrap_err();
+        assert!(err.is_timeout(), "{err}");
+        assert!(start.elapsed() <= Duration::from_secs(2));
+        assert!(m.was_alive());
+        drop(body);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn missing_response_headers_time_out() {
+        let host = FakeHost::new();
+        let (m, _) = manager(&host);
+        let (w, _written) = ConnWriter::channel();
+        let conn = Conn::from_parts(w, futures::future::pending().boxed());
+        let err = m.init_and_read(conn, &[]).await.unwrap_err();
+        assert!(err.is_timeout(), "{err}");
+        assert!(!m.was_alive());
     }
 
     #[tokio::test]

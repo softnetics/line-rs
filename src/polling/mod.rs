@@ -13,6 +13,7 @@ use serde_json::json;
 
 use crate::base::{BaseClient, ClientEvent};
 use crate::error::{Error, Result};
+use crate::push::backoff::{Backoff, BackoffPolicy};
 use crate::push::manager::{ConnManager, PushHost, apply_sync_response, talk_sync_args};
 use crate::push::{Hub, Kind};
 use crate::request::RequestOptions;
@@ -157,21 +158,29 @@ pub const DEFAULT_SQUARE_POLL_INTERVAL: Duration = Duration::from_millis(1000);
 
 /// Push services the listener signs on to (square events, talk sync).
 const LISTEN_TARGET: &[u8] = &[3, 8];
-/// Delay before reconnecting a dropped push connection.
-const RECONNECT_DELAY: Duration = Duration::from_secs(4);
+/// Consecutive failed connections before switching to the next LEGY host
+/// (`failover_threshold`, default 3, in `com/linecorp/legy/streaming/i.java`).
+const FAILOVER_THRESHOLD: u32 = 3;
 
 /// The pusher loop (`initLegyPusher`): reconnect while logged in and while
 /// anybody listens. A connection that cannot even be set up ends every
 /// stream with that error; a later subscription retries.
+///
+/// Reconnects wait with exponential backoff (`policy`, 1.5 s doubling up to
+/// a minute by default), reset once a connection delivers data. After
+/// [`FAILOVER_THRESHOLD`] connections in a row that delivered nothing, the
+/// next one goes to the backup host.
 pub(crate) async fn run_pusher<H: PushHost>(
     host: H,
     hub: Arc<Hub>,
     generation: u64,
     targets: &'static [u8],
-    reconnect_delay: Duration,
+    policy: BackoffPolicy,
 ) {
     let manager = ConnManager::new(host.clone(), hub.clone());
     host.restore_sync().await;
+    let mut backoff = Backoff::new(policy);
+    let mut failures = 0;
     while host.auth_token().is_some() {
         let conn = match manager.initialize_conn(targets) {
             Ok(c) => c,
@@ -188,10 +197,20 @@ pub(crate) async fn run_pusher<H: PushHost>(
         if let Err(e) = manager.init_and_read(conn, targets).await {
             host.log("LegyPusherError", json!({"error": e.to_string()}));
         }
+        if manager.was_alive() {
+            backoff.reset();
+            failures = 0;
+        } else {
+            failures += 1;
+            if failures >= FAILOVER_THRESHOLD {
+                failures = 0;
+                host.fail_over();
+            }
+        }
         if hub.exit_if_idle(generation) {
             return;
         }
-        tokio::time::sleep(reconnect_delay).await;
+        tokio::time::sleep(backoff.next_delay()).await;
         if hub.exit_if_idle(generation) {
             return;
         }
@@ -212,33 +231,52 @@ fn receiver_stream(
 }
 
 /// Call `fetch` repeatedly, yielding every value it returns and sleeping
-/// `interval` between calls. Errors are yielded and polling continues.
+/// `interval` between calls. Errors are yielded and polling continues,
+/// after a delay from `error_backoff` that grows with each failure in a row
+/// (so an offline client does not retry every `interval`).
 fn poll_stream<F, Fut>(
     interval: Duration,
+    error_backoff: BackoffPolicy,
     fetch: F,
 ) -> impl Stream<Item = Result<Value>> + Send + 'static
 where
     F: FnMut() -> Fut + Send + 'static,
     Fut: Future<Output = Result<Vec<Value>>> + Send + 'static,
 {
-    futures::stream::unfold(
-        (fetch, VecDeque::new(), true),
-        move |(mut fetch, mut buf, mut first)| async move {
-            loop {
-                if let Some(v) = buf.pop_front() {
-                    return Some((Ok(v), (fetch, buf, first)));
+    struct PollState<F> {
+        fetch: F,
+        buf: VecDeque<Value>,
+        /// Sleep before the next fetch (`None` on the first one).
+        wait: Option<Duration>,
+        backoff: Backoff,
+    }
+    let state = PollState {
+        fetch,
+        buf: VecDeque::new(),
+        wait: None,
+        backoff: Backoff::new(error_backoff),
+    };
+    futures::stream::unfold(state, move |mut st| async move {
+        loop {
+            if let Some(v) = st.buf.pop_front() {
+                return Some((Ok(v), st));
+            }
+            if let Some(wait) = st.wait {
+                tokio::time::sleep(wait).await;
+            }
+            match (st.fetch)().await {
+                Ok(items) => {
+                    st.backoff.reset();
+                    st.wait = Some(interval);
+                    st.buf.extend(items);
                 }
-                if !first {
-                    tokio::time::sleep(interval).await;
-                }
-                first = false;
-                match fetch().await {
-                    Ok(items) => buf.extend(items),
-                    Err(e) => return Some((Err(e), (fetch, buf, first))),
+                Err(e) => {
+                    st.wait = Some(interval.max(st.backoff.next_delay()));
+                    return Some((Err(e), st));
                 }
             }
-        },
-    )
+        }
+    })
 }
 
 /// Storage key under which the client keeps its [`SyncData`] (JSON, the
@@ -372,7 +410,7 @@ impl BaseClient {
                 task_hub,
                 generation,
                 LISTEN_TARGET,
-                RECONNECT_DELAY,
+                BackoffPolicy::RECONNECT,
             ))
             .abort_handle()
         });
@@ -391,13 +429,14 @@ impl BaseClient {
 
     /// Poll talk `sync` every `interval` (linejs `_listenTalkEvents`,
     /// default [`DEFAULT_TALK_POLL_INTERVAL`]). Errors are yielded and polling
-    /// continues; drop the stream to stop.
+    /// continues after a backoff (1.5 s, doubling up to a minute while the
+    /// errors last); drop the stream to stop.
     pub fn poll_talk_events(
         &self,
         interval: Duration,
     ) -> impl Stream<Item = Result<Value>> + Send + 'static {
         let client = self.clone();
-        poll_stream(interval, move || {
+        poll_stream(interval, BackoffPolicy::RECONNECT, move || {
             let client = client.clone();
             async move { client.poll_talk_once().await }
         })
@@ -411,7 +450,7 @@ impl BaseClient {
     ) -> impl Stream<Item = Result<Value>> + Send + 'static {
         let client = self.clone();
         let continuation: Arc<Mutex<Option<String>>> = Arc::default();
-        poll_stream(interval, move || {
+        poll_stream(interval, BackoffPolicy::RECONNECT, move || {
             let (client, continuation) = (client.clone(), continuation.clone());
             async move { client.poll_square_once(&continuation).await }
         })
@@ -467,13 +506,23 @@ mod tests {
     use crate::push::conn::{Conn, ConnWriter};
     use crate::push::manager::tests::FakeHost;
 
+    /// A fixed delay (no growth, no jitter) for tests.
+    fn fixed(delay: Duration) -> BackoffPolicy {
+        BackoffPolicy {
+            initial: delay,
+            max: delay,
+            multiplier: 1.0,
+            jitter: 0.0,
+        }
+    }
+
     fn spawn_with(
         host: &FakeHost,
         hub: &Arc<Hub>,
         delay: Duration,
     ) -> impl FnOnce(u64) -> tokio::task::AbortHandle {
         let (host, hub) = (host.clone(), hub.clone());
-        move |g| tokio::spawn(run_pusher(host, hub, g, LISTEN_TARGET, delay)).abort_handle()
+        move |g| tokio::spawn(run_pusher(host, hub, g, LISTEN_TARGET, fixed(delay))).abort_handle()
     }
 
     async fn next_err(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Result<Value>>) -> Error {
@@ -637,7 +686,7 @@ mod tests {
                 hub.clone(),
                 g,
                 LISTEN_TARGET,
-                RECONNECT_DELAY,
+                BackoffPolicy::RECONNECT,
             ))
             .abort_handle()
         });
@@ -656,10 +705,14 @@ mod tests {
     async fn poll_stream_sleeps_between_polls() {
         let calls = Arc::new(AtomicUsize::new(0));
         let c = calls.clone();
-        let stream = poll_stream(Duration::from_millis(50), move || {
-            c.fetch_add(1, Ordering::SeqCst);
-            async { Ok(Vec::new()) }
-        });
+        let stream = poll_stream(
+            Duration::from_millis(50),
+            fixed(Duration::ZERO),
+            move || {
+                c.fetch_add(1, Ordering::SeqCst);
+                async { Ok(Vec::new()) }
+            },
+        );
         let start = Instant::now();
         let r = tokio::time::timeout(Duration::from_millis(150), stream.boxed().next()).await;
         assert!(r.is_err());
@@ -675,7 +728,7 @@ mod tests {
     async fn poll_stream_yields_values_and_errors() {
         let calls = Arc::new(AtomicUsize::new(0));
         let c = calls.clone();
-        let stream = poll_stream(Duration::from_millis(1), move || {
+        let stream = poll_stream(Duration::from_millis(1), fixed(Duration::ZERO), move || {
             let n = c.fetch_add(1, Ordering::SeqCst);
             async move {
                 match n {
@@ -690,6 +743,75 @@ mod tests {
         assert_eq!(items[1].as_ref().unwrap().as_i64(), Some(2));
         assert!(items[2].is_err());
         assert_eq!(items[3].as_ref().unwrap().as_i64(), Some(3));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn poll_errors_back_off_and_success_resets() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let c = calls.clone();
+        let policy = BackoffPolicy {
+            jitter: 0.0,
+            ..BackoffPolicy::RECONNECT
+        };
+        let start = tokio::time::Instant::now();
+        let stream = poll_stream(Duration::from_millis(100), policy, move || {
+            let mut c = c.lock().unwrap();
+            c.push(start.elapsed());
+            let n = c.len();
+            async move {
+                if (2..=4).contains(&n) {
+                    Err(Error::internal("TestError", "offline"))
+                } else {
+                    Ok(vec![tv!(n as i64)])
+                }
+            }
+        });
+        let items: Vec<_> = stream.take(6).collect().await;
+        assert_eq!(items.iter().filter(|r| r.is_err()).count(), 3);
+        let at: Vec<u64> = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|d| d.as_millis() as u64)
+            .collect();
+        // 1st ok; 2nd after 100 ms fails; then 1.5 s, 3 s, 6 s; a success
+        // resets to the 100 ms interval.
+        assert_eq!(at, [0, 100, 1600, 4600, 10600, 10700]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconnects_back_off_and_fail_over_after_three_dead_connections() {
+        let host = FakeHost::new();
+        for _ in 0..4 {
+            let (w, _rx) = ConnWriter::channel();
+            host.conns.lock().unwrap().push(Conn::from_parts(
+                w,
+                async { Err(Error::internal("LegyPusherError", "fetch failed")) }.boxed(),
+            ));
+        }
+        let hub = Arc::new(Hub::default());
+        let policy = BackoffPolicy {
+            jitter: 0.0,
+            ..BackoffPolicy::RECONNECT
+        };
+        let (h, hb) = (host.clone(), hub.clone());
+        let _rx = hub.subscribe(Kind::Talk, move |g| {
+            tokio::spawn(run_pusher(h, hb, g, LISTEN_TARGET, policy)).abort_handle()
+        });
+        let opens = |n| {
+            let host = host.clone();
+            async move {
+                while host.opens.load(Ordering::SeqCst) < n {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+        };
+        let start = tokio::time::Instant::now();
+        opens(4).await;
+        // Dead connections wait 1.5 s, 3 s, 6 s before the next try.
+        let waited = start.elapsed().as_millis();
+        assert!((10_500..10_600).contains(&waited), "{waited}");
+        assert_eq!(host.failovers.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

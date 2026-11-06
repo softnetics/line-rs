@@ -46,6 +46,7 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 [dev-dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+tokio = { version = "1.53.2", features = ["full", "test-util"] }
 
 [[example]]
 name = "test_ui"
