@@ -52,14 +52,38 @@ impl PremiumStatus {
     }
 }
 
+/// `LinePremiumStatusService` (LINE for Android `ge3/c.java`).
+const LINE_PREMIUM_STATUS_PATH: &str = "/EXT/line-premium/common/thrift/line-premium-status";
+
 impl Client {
     /// The account's LINE Premium status. Read-only.
+    ///
+    /// Asks `LinePremiumStatusService.getLinePremiumStatus`
+    /// (`/EXT/line-premium/common/thrift/line-premium-status`, `ge3/c.java`)
+    /// first and falls back to `PremiumStatusService.getPremiumStatus`
+    /// when that call fails.
     pub async fn premium_status(&self) -> Result<PremiumStatus> {
-        let res = self
+        let line = self
             .base
-            .premium_status()
-            .get_premium_status(crate::tv!({"req": {}}))
-            .await?;
+            .call(
+                "getLinePremiumStatus",
+                crate::tv!({"req": {}}),
+                LINE_PREMIUM_STATUS_PATH,
+                crate::thrift::Protocol::Compact,
+            )
+            .await;
+        let res = match line {
+            Ok(res) => res,
+            Err(first) => match self
+                .base
+                .premium_status()
+                .get_premium_status(crate::tv!({"req": {}}))
+                .await
+            {
+                Ok(res) => res,
+                Err(_) => return Err(first),
+            },
+        };
         Ok(PremiumStatus::from_value(&res))
     }
 }
