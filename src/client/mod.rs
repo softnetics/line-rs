@@ -547,6 +547,26 @@ fn object_sum(base: &mut Value, add: Value) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn send_options_carry_req_seq_and_sticker_metadata() {
+        let input = MessageInput::sticker("1", "2", "100")
+            .sticker_options("AS")
+            .sticker_text("hi")
+            .req_seq(77);
+        let o = send_options("u-them", input);
+        assert_eq!(o.req_seq, Some(77));
+        assert_eq!(o.content_type, Some(Value::from("STICKER")));
+        for (k, v) in [
+            ("STKPKGID", "1"),
+            ("STKID", "2"),
+            ("STKVER", "100"),
+            ("STKOPT", "AS"),
+            ("STKTXT", "hi"),
+        ] {
+            assert_eq!(o.content_metadata[k], v);
+        }
+    }
+
     fn not_capable() -> Error {
         Error::internal("RequestError", "API method not capable: 'getContactsV3'")
     }

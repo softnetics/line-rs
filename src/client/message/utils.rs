@@ -194,6 +194,19 @@ impl MessageInput {
         self.req_seq = Some(req_seq);
         self
     }
+    /// Sticker type (`STKOPT`) as LINE for Android sends it
+    /// (`zu5/s.java`): `""` static, `A` animated, `S` sound, `AS`
+    /// animated with sound, `P` popup or effect, `PS` popup or effect with
+    /// sound, `T` custom name text, `CT` message sticker. Recipients use it
+    /// to play the animation or sound.
+    pub fn sticker_options(self, options: impl Into<String>) -> Self {
+        self.metadata("STKOPT", options)
+    }
+    /// Text shown with the sticker (`STKTXT`), such as its name for
+    /// notifications.
+    pub fn sticker_text(self, text: impl Into<String>) -> Self {
+        self.metadata("STKTXT", text)
+    }
 }
 
 impl From<&str> for MessageInput {
