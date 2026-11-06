@@ -25,7 +25,7 @@ pub use e2ee::{
 pub use flow::{MediaFlow, MediaFlows};
 pub use token::{OBS_TOKEN_ATTEMPTS, parse_obs_token};
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -119,6 +119,19 @@ pub struct ObsUpload {
     pub obj_hash: String,
     pub headers: HeaderMap,
 }
+
+/// What a streamed download (`*_to`) wrote.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ObsDownload {
+    /// Bytes written to the sink.
+    pub len: u64,
+    /// The response's `content-type`, if any.
+    pub mime: Option<String>,
+}
+
+/// Where a streamed download writes. A failed download may have written
+/// part of the file: write to a temporary file and keep it only on `Ok`.
+pub type DownloadSink<'w> = &'w mut (dyn std::io::Write + Send);
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -282,6 +295,54 @@ fn ensure_ok(status: reqwest::StatusCode, what: &str) -> Result<()> {
     }
 }
 
+fn content_type(res: &reqwest::Response) -> Option<String> {
+    res.headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+}
+
+fn stalled(idle: Duration) -> Error {
+    Error::internal(
+        "TimeoutError",
+        format!("download stalled for {}s", idle.as_secs()),
+    )
+}
+
+/// Send `req`, waiting at most `idle` for the response head.
+pub(crate) async fn send_idle(
+    req: reqwest::RequestBuilder,
+    idle: Duration,
+) -> Result<reqwest::Response> {
+    tokio::time::timeout(idle, req.send())
+        .await
+        .map_err(|_| stalled(idle))?
+        .map_err(Error::from)
+}
+
+/// Hand the body of `res` to `write` part by part as it arrives, so a big
+/// file never sits in memory whole. Fails when nothing arrives for `idle`;
+/// there is no limit on the total time. Returns the bytes read.
+pub(crate) async fn stream_body(
+    mut res: reqwest::Response,
+    idle: Duration,
+    mut write: impl FnMut(&[u8]) -> Result<()>,
+) -> Result<u64> {
+    let mut len = 0u64;
+    loop {
+        let chunk = tokio::time::timeout(idle, res.chunk())
+            .await
+            .map_err(|_| stalled(idle))??;
+        match chunk {
+            Some(c) => {
+                len += c.len() as u64;
+                write(&c)?;
+            }
+            None => return Ok(len),
+        }
+    }
+}
+
 fn to_header_map(headers: impl IntoIterator<Item = (String, String)>) -> Result<HeaderMap> {
     let mut map = HeaderMap::new();
     for (k, v) in headers {
@@ -385,12 +446,13 @@ impl<'a> Obs<'a> {
     /// after HTTP 503. Any other failed status is an `ObsError` that keeps
     /// the status ([`Error::http_status`], [`Error::is_media_expired`]).
     /// `headers` is called for each try, so the second one carries the new
-    /// token.
+    /// token. Without `timeout` (a download) only the wait for the response
+    /// head is limited, by `download_idle_timeout`.
     async fn get_object(
         &self,
         url: &str,
         headers: impl Fn() -> Result<HeaderMap>,
-        timeout: std::time::Duration,
+        timeout: Option<Duration>,
         what: &str,
     ) -> Result<reqwest::Response> {
         let mut retried = false;
@@ -400,14 +462,11 @@ impl<'a> Obs<'a> {
                 .get("x-line-access")
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_string);
-            let res = self
-                .client
-                .http
-                .get(url)
-                .headers(headers)
-                .timeout(timeout)
-                .send()
-                .await?;
+            let req = self.client.http.get(url).headers(headers);
+            let res = match timeout {
+                Some(t) => req.timeout(t).send().await?,
+                None => send_idle(req, self.client.config.download_idle_timeout).await?,
+            };
             let status = res.status();
             if retried || !matches!(status.as_u16(), 401 | 503) {
                 ensure_ok(status, what)?;
@@ -422,33 +481,80 @@ impl<'a> Obs<'a> {
         }
     }
 
-    /// Download a (non-E2EE) message's media; the name comes from its metadata.
+    /// Download a (non-E2EE) message's media into memory. The name comes
+    /// from its `object_info.obs`, asked for after the download and only for
+    /// the full file; when that request fails the file comes back without
+    /// a name. Use [`download_message_data_to`](Self::download_message_data_to)
+    /// for big files.
     pub async fn download_message_data(
         &self,
         message_id: &str,
         preview: bool,
         square: bool,
     ) -> Result<ObsFile> {
+        let mut data = Vec::new();
+        let dl = self
+            .download_message_data_to(message_id, preview, square, &mut data)
+            .await?;
+        let name = if preview {
+            None
+        } else {
+            match self.message_obs_metadata(message_id, square).await {
+                Ok(info) => Some(info.name).filter(|n| !n.is_empty()),
+                Err(e) => {
+                    tracing::debug!("object_info.obs: {e}");
+                    None
+                }
+            }
+        };
+        Ok(ObsFile {
+            data: data.into(),
+            name,
+            mime: dl.mime,
+        })
+    }
+
+    /// Stream a (non-E2EE) message's media (`preview`: its thumbnail) into
+    /// `out`, part by part, waiting at most `download_idle_timeout` for each.
+    pub async fn download_message_data_to(
+        &self,
+        message_id: &str,
+        preview: bool,
+        square: bool,
+        out: DownloadSink<'_>,
+    ) -> Result<ObsDownload> {
         let res = self
             .get_object(
                 &self.message_data_url(message_id, preview, square),
                 || self.read_headers(),
-                self.client.config.long_timeout,
+                None,
                 "Message data download failed",
             )
             .await?;
-        let mime = res
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_string);
-        let data = res.bytes().await?;
-        let info = self.message_obs_metadata(message_id, square).await?;
-        Ok(ObsFile {
-            data,
-            name: Some(info.name),
-            mime,
+        self.write_body(res, out).await
+    }
+
+    /// Stream `url` (a message's `DOWNLOAD_URL` / `PREVIEW_URL`) into `out`
+    /// with a plain GET: no LINE headers go to another host.
+    pub async fn download_url_to(&self, url: &str, out: DownloadSink<'_>) -> Result<ObsDownload> {
+        let req = self.client.http.get(url);
+        let res = send_idle(req, self.client.config.download_idle_timeout).await?;
+        ensure_ok(res.status(), "Media URL download failed")?;
+        self.write_body(res, out).await
+    }
+
+    async fn write_body(
+        &self,
+        res: reqwest::Response,
+        out: DownloadSink<'_>,
+    ) -> Result<ObsDownload> {
+        let mime = content_type(&res);
+        let len = stream_body(res, self.client.config.download_idle_timeout, |c| {
+            Ok(out.write_all(c)?)
         })
+        .await?;
+        out.flush()?;
+        Ok(ObsDownload { len, mime })
     }
 
     /// `object_info.obs` of a message's media.
@@ -461,7 +567,7 @@ impl<'a> Obs<'a> {
             .get_object(
                 &self.message_metadata_url(message_id, square),
                 || self.read_headers(),
-                self.client.config.timeout,
+                Some(self.client.config.timeout),
                 "Message metadata request failed",
             )
             .await?;
@@ -668,34 +774,58 @@ impl<'a> Obs<'a> {
     }
 
     /// Raw download from `/r/{obs_path}/{oid}` (or `{oid}` substituted in
-    /// `obs_path`).
+    /// `obs_path`) into memory. See [`download_object_to`](Self::download_object_to).
     pub async fn download_object_for_service(
         &self,
         obs_path: &str,
         oid: &str,
         add_headers: Vec<(String, String)>,
     ) -> Result<Bytes> {
+        let mut data = Vec::new();
+        self.download_object_to(obs_path, oid, add_headers, &mut data)
+            .await?;
+        Ok(data.into())
+    }
+
+    /// Stream `/r/{obs_path}/{oid}` into `out`, part by part, waiting at
+    /// most `download_idle_timeout` for each.
+    pub async fn download_object_to(
+        &self,
+        obs_path: &str,
+        oid: &str,
+        add_headers: Vec<(String, String)>,
+        out: DownloadSink<'_>,
+    ) -> Result<ObsDownload> {
+        let res = self.get_raw_object(obs_path, oid, &add_headers).await?;
+        self.write_body(res, out).await
+    }
+
+    /// GET `/r/{obs_path}/{oid}` with the session headers and `add_headers`.
+    pub(crate) async fn get_raw_object(
+        &self,
+        obs_path: &str,
+        oid: &str,
+        add_headers: &[(String, String)],
+    ) -> Result<reqwest::Response> {
         let path = if obs_path.contains("{oid}") {
             obs_path.replacen("{oid}", oid, 1)
         } else {
             format!("{obs_path}/{oid}")
         };
-        let res = self
-            .get_object(
-                &format!("{}r/{path}", self.prefix),
-                || {
-                    to_header_map(
-                        self.client
-                            .line_headers("GET")
-                            .into_iter()
-                            .chain(add_headers.iter().cloned()),
-                    )
-                },
-                self.client.config.long_timeout,
-                "Object download failed",
-            )
-            .await?;
-        Ok(res.bytes().await?)
+        self.get_object(
+            &format!("{}r/{path}", self.prefix),
+            || {
+                to_header_map(
+                    self.client
+                        .line_headers("GET")
+                        .into_iter()
+                        .chain(add_headers.iter().cloned()),
+                )
+            },
+            None,
+            "Object download failed",
+        )
+        .await
     }
 }
 

@@ -1145,6 +1145,115 @@ async fn message_data_2xx_yields_file() {
 }
 
 #[tokio::test]
+async fn message_data_survives_a_failed_object_info() {
+    let (prefix, urls) = serve(vec![
+        canned(200, Some("image/jpeg"), &[1, 2, 3]),
+        canned(500, None, b""),
+    ])
+    .await;
+    let c = client();
+    let file = c
+        .obs()
+        .with_prefix(prefix)
+        .download_message_data("1", false, false)
+        .await
+        .unwrap();
+    assert_eq!(file.len(), 3);
+    assert_eq!(file.name, None);
+    assert_eq!(urls.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn preview_skips_object_info() {
+    let (prefix, urls) = serve(vec![canned(200, Some("image/jpeg"), &[1])]).await;
+    let c = client();
+    c.obs()
+        .with_prefix(prefix)
+        .download_message_data("1", true, false)
+        .await
+        .unwrap();
+    assert_eq!(*urls.lock().unwrap(), ["/r/talk/m/1/preview"]);
+}
+
+#[tokio::test]
+async fn streams_into_a_sink() {
+    let body: Vec<u8> = (0..300_000u32).map(|i| i as u8).collect();
+    let (prefix, _) = serve(vec![canned_bytes(200, Some("video/mp4"), body.clone())]).await;
+    let c = client();
+    let mut out = Vec::new();
+    let dl = c
+        .obs()
+        .with_prefix(prefix)
+        .download_message_data_to("1", false, false, &mut out)
+        .await
+        .unwrap();
+    assert_eq!(dl.len, body.len() as u64);
+    assert_eq!(dl.mime.as_deref(), Some("video/mp4"));
+    assert_eq!(out, body);
+}
+
+#[tokio::test]
+async fn a_stalled_download_times_out() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 1024];
+        let _ = sock.read(&mut buf).await;
+        sock.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 10\r\n\r\nabc")
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    });
+    let c = BaseClient::builder(Device::DesktopWin)
+        .config(crate::base::Config {
+            download_idle_timeout: Duration::from_millis(200),
+            ..Default::default()
+        })
+        .build()
+        .unwrap();
+    c.set_auth_token(Some("token".into()));
+    let err = c
+        .obs()
+        .with_prefix(format!("http://{addr}/"))
+        .download_object_for_service("talk/emi", "OBJ-1", vec![])
+        .await
+        .unwrap_err();
+    assert!(err.is_timeout(), "{err}");
+}
+
+#[tokio::test]
+async fn e2ee_media_streams_and_checks_the_hmac() {
+    use crate::e2ee::media::MEDIA_CHUNK_SIZE as CHUNK;
+    let raw: Vec<u8> = (0..CHUNK * 2 + 5).map(|i| (i * 7) as u8).collect();
+    for version in [MediaHmacVersion::V1, MediaHmacVersion::V2] {
+        let enc = crate::e2ee::media::encrypt_media(&raw, None, version);
+        let mut bad = enc.data.clone();
+        bad[CHUNK + 1] ^= 1;
+        let (prefix, _) = serve(vec![
+            canned_bytes(200, None, enc.data.clone()),
+            canned_bytes(200, None, bad),
+        ])
+        .await;
+        let c = client();
+        let obs = c.obs().with_prefix(prefix);
+        let mut out = Vec::new();
+        let dl = obs
+            .download_media_by_e2ee_to(&e2ee_message(), &enc.key_material, &mut out)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(out, raw);
+        assert_eq!(dl.len, raw.len() as u64);
+        let err = obs
+            .download_media_by_e2ee_to(&e2ee_message(), &enc.key_material, &mut Vec::new())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("HMAC"), "{err}");
+    }
+}
+
+#[tokio::test]
 async fn rejected_upload_is_obs_error() {
     let (prefix, urls) = serve(vec![canned(413, None, b"")]).await;
     let c = client();

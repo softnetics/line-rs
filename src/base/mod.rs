@@ -41,6 +41,10 @@ pub struct Config {
     pub timeout: Duration,
     /// Long-poll timeout (default 180s).
     pub long_timeout: Duration,
+    /// How long a media download may wait for its response or for the
+    /// next part of the body (default 30s). Downloads have no total limit,
+    /// so a large video on a slow line still finishes.
+    pub download_idle_timeout: Duration,
     /// Refresh a v3 access token in the background once the stored
     /// `expire` (issue time + `durationUntilRefreshInSec`, minus
     /// `refresh_margin`) has passed, like the Android app
@@ -79,6 +83,7 @@ impl Default for Config {
         Self {
             timeout: Duration::from_secs(30),
             long_timeout: Duration::from_secs(180),
+            download_idle_timeout: Duration::from_secs(30),
             proactive_refresh: true,
             refresh_margin: Duration::ZERO,
             report_refreshed_token: true,

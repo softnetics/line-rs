@@ -21,9 +21,12 @@ use indexmap::IndexMap;
 
 use super::crypto::{self, encrypt_by_key_material};
 use super::flow::{MediaFlow, MediaFlows};
-use super::{ObjType, ObjectUpload, Obs, ObsFile, ObsUpload};
+use super::{
+    DownloadSink, ObjType, ObjectUpload, Obs, ObsDownload, ObsFile, ObsUpload, stream_body,
+};
 use crate::base::BaseClient;
-use crate::e2ee::media::{MEDIA_HMAC_LEN, MediaHmacVersion, encrypt_media};
+use crate::e2ee::crypto::decode_base64;
+use crate::e2ee::media::{MEDIA_HMAC_LEN, MediaDecryptor, MediaHmacVersion, encrypt_media};
 use crate::e2ee::{E2eeContent, E2eeSendRecovery, send_recovery};
 use crate::error::{Error, Result};
 use crate::thrift::{self, Protocol, TType, TValue, Value};
@@ -712,17 +715,51 @@ impl Obs<'_> {
             .await
     }
 
-    /// Download and decrypt the media of an E2EE `message`.
+    /// Download and decrypt the media of an E2EE `message` into memory.
     ///
     /// `key_material` (base64) and `file_name` are the fields of the
     /// message's decrypted E2EE payload (linejs `decryptE2EEDataMessage`).
-    /// Returns `None` when the message has no chunks.
+    /// Returns `None` when the message has no chunks. Use
+    /// [`download_media_by_e2ee_to`](Self::download_media_by_e2ee_to) for
+    /// big files.
     pub async fn download_media_by_e2ee(
         &self,
         message: &Value,
         key_material: &str,
         file_name: &str,
     ) -> Result<Option<ObsFile>> {
+        let mut data = Vec::new();
+        Ok(self
+            .download_media_by_e2ee_to(message, key_material, &mut data)
+            .await?
+            .map(|_| ObsFile::new(data).name(file_name)))
+    }
+
+    /// [`download_e2ee_message_media`](Self::download_e2ee_message_media)
+    /// streamed into `out`.
+    pub async fn download_e2ee_message_media_to(
+        &self,
+        message: &Value,
+        out: DownloadSink<'_>,
+    ) -> Result<Option<ObsDownload>> {
+        let payload = self.client.decrypt_e2ee_data_message(message).await?;
+        let key_material = payload["keyMaterial"].as_str().ok_or_else(|| {
+            Error::internal("E2EEMediaError", "decrypted payload has no keyMaterial")
+        })?;
+        self.download_media_by_e2ee_to(message, key_material, out)
+            .await
+    }
+
+    /// Stream the media of an E2EE `message` into `out`, decrypting as it
+    /// arrives; memory stays at one 128 KiB chunk whatever the file size.
+    /// The HMAC (v1 or v2) is checked at the end: on an error, discard what
+    /// was written. Returns `None` when the message has no chunks.
+    pub async fn download_media_by_e2ee_to(
+        &self,
+        message: &Value,
+        key_material: &str,
+        out: DownloadSink<'_>,
+    ) -> Result<Option<ObsDownload>> {
         let to = message["to"].as_str().unwrap_or_default();
         if !(to.starts_with('u') || to.starts_with('c')) {
             return Err(Error::internal("ObsError", "Invalid mid"));
@@ -731,11 +768,25 @@ impl Obs<'_> {
             return Ok(None);
         }
         let (sid, oid, meta) = e2ee_object(message)?;
-        let data = self
-            .download_object_for_service(&format!("talk/{sid}"), &oid, meta)
+        let res = self
+            .get_raw_object(&format!("talk/{sid}"), &oid, &meta)
             .await?;
-        let plain = crypto::decrypt_by_key_material_b64(&data, key_material)?;
-        Ok(Some(ObsFile::new(plain).name(file_name)))
+        let mime = res
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let mut decryptor = MediaDecryptor::new(&decode_base64(key_material));
+        let mut len = 0u64;
+        stream_body(res, self.client.config.download_idle_timeout, |c| {
+            let plain = decryptor.update(c);
+            len += plain.len() as u64;
+            Ok(out.write_all(&plain)?)
+        })
+        .await?;
+        decryptor.finish()?;
+        out.flush()?;
+        Ok(Some(ObsDownload { len, mime }))
     }
 
     /// Download and decrypt the thumbnail of an E2EE image or video,

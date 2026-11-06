@@ -19,7 +19,7 @@ use crate::thrift::{Protocol, TValue, read_struct};
 type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
 type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 /// WebCrypto `AES-CTR` with `length: 32` increments only the low 32 bits.
-type Aes256Ctr32 = ctr::Ctr32BE<aes::Aes256>;
+pub(crate) type Aes256Ctr32 = ctr::Ctr32BE<aes::Aes256>;
 
 fn no_e2ee_key(message: &str) -> Error {
     Error::internal("NoE2EEKey", message)
