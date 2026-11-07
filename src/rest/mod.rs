@@ -106,6 +106,8 @@ pub mod channels {
     pub const PRIVATE_NOTE: &str = "1655599932";
     /// Square note (`opennote`).
     pub const OPEN_NOTE: &str = "1657618623";
+    /// Translation, as LINE for Android uses it (`ds3/b.java`).
+    pub const TRANSLATE: &str = "1627632136";
 }
 
 /// How a request authenticates (on top of `X-Line-Access`).
@@ -200,6 +202,8 @@ pub struct RestClient {
     client: BaseClient,
     base_url: Option<String>,
     tokens: Mutex<HashMap<String, String>>,
+    /// The translate channel failed once; translate with the timeline token.
+    translate_fallback: std::sync::atomic::AtomicBool,
 }
 
 impl BaseClient {
@@ -215,6 +219,7 @@ impl RestClient {
             client,
             base_url: None,
             tokens: Mutex::new(HashMap::new()),
+            translate_fallback: Default::default(),
         }
     }
 
@@ -274,6 +279,18 @@ impl RestClient {
     /// Send a request and return the JSON body (`Null` when empty). Non-2xx
     /// statuses are errors.
     pub async fn send(&self, req: RestRequest) -> Result<Json> {
+        let reply = self.send_raw(&req).await?;
+        if !reply.status.is_success() {
+            return Err(reply.error(&req));
+        }
+        if reply.body.is_empty() {
+            return Ok(Json::Null);
+        }
+        Ok(serde_json::from_slice(&reply.body)?)
+    }
+
+    /// Send a request and return the answer whatever its status.
+    pub(crate) async fn send_raw(&self, req: &RestRequest) -> Result<RawReply> {
         let mid = self
             .client
             .mid()
@@ -331,29 +348,45 @@ impl RestClient {
             .map(|(k, v)| format!("{k}={}", v.to_str().unwrap_or("?")))
             .collect();
         let version = res.version();
-        let bytes = res.bytes().await?;
-        if !status.is_success() {
-            let snippet: String = String::from_utf8_lossy(&bytes).chars().take(200).collect();
-            let snippet = snippet.split_whitespace().collect::<Vec<_>>().join(" ");
-            let tail = if snippet.is_empty() {
-                String::new()
-            } else {
-                format!(": {snippet}")
-            };
-            return Err(Error::internal(
-                ERROR_KIND,
-                format!(
-                    "{}{} HTTP {}{tail} [{version:?}; {}]",
-                    req.prefix.as_str(),
-                    req.path,
-                    status.as_u16(),
-                    diag.join(", ")
-                ),
-            ));
-        }
-        if bytes.is_empty() {
-            return Ok(Json::Null);
-        }
-        Ok(serde_json::from_slice(&bytes)?)
+        let body = res.bytes().await?;
+        Ok(RawReply {
+            status,
+            diag: format!("{version:?}; {}", diag.join(", ")),
+            body,
+        })
+    }
+}
+
+/// A REST answer of any status.
+pub(crate) struct RawReply {
+    pub status: reqwest::StatusCode,
+    /// HTTP version and routing headers, for error messages.
+    diag: String,
+    pub body: bytes::Bytes,
+}
+
+impl RawReply {
+    /// The error for a failed `req`: path, status, the start of the body.
+    pub fn error(&self, req: &RestRequest) -> Error {
+        let snippet: String = String::from_utf8_lossy(&self.body)
+            .chars()
+            .take(200)
+            .collect();
+        let snippet = snippet.split_whitespace().collect::<Vec<_>>().join(" ");
+        let tail = if snippet.is_empty() {
+            String::new()
+        } else {
+            format!(": {snippet}")
+        };
+        Error::internal(
+            ERROR_KIND,
+            format!(
+                "{}{} HTTP {}{tail} [{}]",
+                req.prefix.as_str(),
+                req.path,
+                self.status.as_u16(),
+                self.diag
+            ),
+        )
     }
 }

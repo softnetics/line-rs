@@ -3,12 +3,14 @@
 pub mod auth_token;
 pub mod legy;
 
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use futures::future::BoxFuture;
 
-use crate::base::{BaseClient, ClientEvent, LegyMode, LogoutReason};
+use crate::base::{BaseClient, ClientEvent, LegyMode};
 use crate::error::{Error, Result};
+use crate::push::backoff::{Backoff, BackoffPolicy};
 use crate::thrift::{self, Protocol, Schema, TValue, Value};
 
 const SQUARE_PATHS: [&str; 2] = ["/SQ1", "/SQLV1"];
@@ -201,7 +203,7 @@ impl BaseClient {
                     // session (login flows send other credentials).
                     if sent_token.is_some()
                         && !is_refresh_call
-                        && let Some(reason) = LogoutReason::from_error(&e)
+                        && let Some(reason) = self.logout_reason(&e)
                     {
                         self.kick_out(reason);
                     }
@@ -228,35 +230,60 @@ impl BaseClient {
         })
     }
 
-    /// Refresh the v3 token first when the stored `expire` is (nearly)
-    /// reached. Failures are logged; the request then goes out with the old
-    /// token and the reactive `MUST_REFRESH_V3_TOKEN` path still applies.
+    /// Start a background refresh when the stored `expire` has passed
+    /// (`fa0/f0.java` `r()`): this request still goes out with the current
+    /// token. Failures are logged as `RefreshError`; the reactive
+    /// `MUST_REFRESH_V3_TOKEN` path still applies, and the next proactive
+    /// try waits [`PROACTIVE_RETRY_AFTER`].
     async fn refresh_token_if_due(&self) {
         if !self.config.proactive_refresh || self.auth_token().is_none() {
             return;
         }
+        if crate::base::session_now() < self.refresh_not_before.load(Ordering::Relaxed)
+            || !self.refresh_due().await
+            || self.refresh_running.swap(true, Ordering::SeqCst)
+        {
+            return;
+        }
+        struct Running(BaseClient);
+        impl Drop for Running {
+            fn drop(&mut self) {
+                self.0.refresh_running.store(false, Ordering::SeqCst);
+            }
+        }
+        let running = Running(self.clone());
+        tokio::spawn(async move {
+            let c = &running.0;
+            let _guard = c.refresh_lock.lock().await;
+            // Another refresh may have finished while we waited.
+            if !c.refresh_due().await
+                || !matches!(c.storage.get_string("refreshToken").await, Ok(Some(_)))
+            {
+                return;
+            }
+            if let Err(e) = c.try_refresh_token_unlocked().await {
+                c.refresh_not_before.store(
+                    crate::base::session_now() + PROACTIVE_RETRY_AFTER.as_secs() as i64,
+                    Ordering::Relaxed,
+                );
+                c.log("RefreshError", serde_json::json!({"error": e.to_string()}));
+            }
+        });
+    }
+
+    /// Whether the stored `expire` (minus `refresh_margin`) has passed.
+    async fn refresh_due(&self) -> bool {
         let margin = self.config.refresh_margin.as_secs() as i64;
-        let due =
-            |exp: Option<i64>| exp.is_some_and(|exp| crate::base::session_now() + margin >= exp);
-        if !due(self.token_expire().await.ok().flatten()) {
-            return;
-        }
-        let _guard = self.refresh_lock.lock().await;
-        // Another request may have refreshed while we waited.
-        if !due(self.token_expire().await.ok().flatten()) {
-            return;
-        }
-        if !matches!(self.storage.get_string("refreshToken").await, Ok(Some(_))) {
-            return;
-        }
-        if let Err(e) = self.try_refresh_token_unlocked().await {
-            self.log("RefreshError", serde_json::json!({"error": e.to_string()}));
-        }
+        self.token_expire()
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|exp| crate::base::session_now() + margin >= exp)
     }
 
     /// Reactive refresh after `MUST_REFRESH_V3_TOKEN`; skipped when another
     /// task already replaced the token the failed request used.
-    async fn refresh_token_after(&self, failed_token: Option<&str>) -> Result<()> {
+    pub(crate) async fn refresh_token_after(&self, failed_token: Option<&str>) -> Result<()> {
         let _guard = self.refresh_lock.lock().await;
         if self.auth_token().as_deref() != failed_token {
             return Ok(());
@@ -505,17 +532,22 @@ impl BaseClient {
 
     /// [`try_refresh_token`](Self::try_refresh_token) without taking
     /// `refresh_lock` (callers hold it).
+    ///
+    /// `refresh` is retried on `RETRY_REQUIRED` and network errors with the
+    /// server's `retryPolicy` (saved from the last refresh; defaults 1 s,
+    /// ×1.5, at most 60 s, ±10% jitter as in `fa0/o.java`), up to
+    /// [`REFRESH_MAX_ATTEMPTS`] tries.
     fn try_refresh_token_unlocked(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
             let Some(refresh_token) = self.storage.get_string("refreshToken").await? else {
                 return Err(Error::internal("RefreshError", "refreshToken not found"));
             };
+            let policy = self.refresh_retry_policy().await;
             let res = self
-                .call(
+                .call_refresh_api(
                     "refresh",
                     crate::tv!({"request": {"refreshToken": refresh_token}}),
-                    TOKEN_REFRESH_PATH,
-                    Protocol::Compact,
+                    policy,
                 )
                 .await?;
             let token = res["accessToken"]
@@ -533,28 +565,81 @@ impl BaseClient {
             ) {
                 self.set_token_expire(a + b).await?;
             }
+            if !res["retryPolicy"].is_null() {
+                self.storage
+                    .set(REFRESH_RETRY_POLICY_KEY, res["retryPolicy"].to_json())
+                    .await?;
+            }
+            self.refresh_not_before.store(0, Ordering::Relaxed);
             if self.config.report_refreshed_token {
-                // `reportRefreshedAccessToken` is in the IDL (from the
-                // Android client); the macOS 26.5.0 binary does not
-                // reference it. Best effort: a failure does not undo the
-                // refresh.
-                let report = self
-                    .call(
-                        "reportRefreshedAccessToken",
-                        crate::tv!({"request": {"accessToken": token}}),
-                        TOKEN_REFRESH_PATH,
-                        Protocol::Compact,
-                    )
-                    .await;
-                if let Err(e) = report {
-                    self.log(
-                        "ReportRefreshedAccessTokenError",
-                        serde_json::json!({"error": e.to_string()}),
-                    );
-                }
+                // `fa0/o.java` launches the report as its own job; a failure
+                // does not undo the refresh.
+                let c = self.clone();
+                tokio::spawn(async move {
+                    let report = c
+                        .call_refresh_api(
+                            "reportRefreshedAccessToken",
+                            crate::tv!({"request": {"accessToken": token}}),
+                            policy,
+                        )
+                        .await;
+                    if let Err(e) = report {
+                        c.log(
+                            "ReportRefreshedAccessTokenError",
+                            serde_json::json!({"error": e.to_string()}),
+                        );
+                    }
+                });
             }
             Ok(())
         })
+    }
+
+    /// Call an `AccessTokenRefreshService` method, retrying with `policy`.
+    async fn call_refresh_api(
+        &self,
+        method: &str,
+        args: Value,
+        policy: BackoffPolicy,
+    ) -> Result<Value> {
+        let mut backoff = Backoff::new(policy);
+        let mut attempt = 1;
+        loop {
+            match self
+                .call(method, args.clone(), TOKEN_REFRESH_PATH, Protocol::Compact)
+                .await
+            {
+                Err(e) if attempt < REFRESH_MAX_ATTEMPTS && is_retryable_refresh_error(&e) => {
+                    let delay = backoff.next_delay();
+                    self.log(
+                        "RefreshRetry",
+                        serde_json::json!({
+                            "method": method,
+                            "attempt": attempt,
+                            "delayMs": delay.as_millis() as u64,
+                            "error": e.to_string(),
+                        }),
+                    );
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                }
+                other => return other,
+            }
+        }
+    }
+
+    /// The saved `retryPolicy` of the last refresh, or the Android
+    /// defaults.
+    async fn refresh_retry_policy(&self) -> BackoffPolicy {
+        let stored = self
+            .storage
+            .get(REFRESH_RETRY_POLICY_KEY)
+            .await
+            .ok()
+            .flatten();
+        stored
+            .map(|v| retry_policy_from_json(&v))
+            .unwrap_or(DEFAULT_REFRESH_RETRY)
     }
 
     /// Adopt a rotated token from `X-Line-Next-Access` when the request was
@@ -569,13 +654,62 @@ impl BaseClient {
         if next.is_empty() || sent == Some(next) {
             return;
         }
-        if !self.config.apply_next_access {
-            // Only report it (the pre-rotation behaviour).
-            self.emit(ClientEvent::UpdateAuthToken(next.to_string()));
-        } else if sent.is_some() && sent == self.auth_token().as_deref() {
+        if self.config.apply_next_access && sent.is_some() && sent == self.auth_token().as_deref() {
             self.set_auth_token(Some(next.to_string()));
             self.emit(ClientEvent::UpdateAuthToken(next.to_string()));
         }
+    }
+}
+
+/// Storage key of the last `RefreshAccessTokenResponse.retryPolicy`.
+pub const REFRESH_RETRY_POLICY_KEY: &str = "refreshRetryPolicy";
+
+/// Tries of one refresh (or report) call before giving up.
+pub const REFRESH_MAX_ATTEMPTS: u32 = 5;
+
+/// Wait after a failed background refresh before the next one.
+pub const PROACTIVE_RETRY_AFTER: Duration = Duration::from_secs(60);
+
+/// `RetryPolicy` defaults of the Android app (`fa0/o.java`).
+const DEFAULT_REFRESH_RETRY: BackoffPolicy = BackoffPolicy {
+    initial: Duration::from_millis(1000),
+    max: Duration::from_millis(60_000),
+    multiplier: 1.5,
+    jitter: 0.1,
+};
+
+/// A `RetryPolicy` (`initialDelayInMillis`, `maxDelayInMillis`,
+/// `multiplier`, `jitterRate`); missing or nonsensical fields keep the
+/// defaults.
+fn retry_policy_from_json(v: &serde_json::Value) -> BackoffPolicy {
+    let d = DEFAULT_REFRESH_RETRY;
+    let ms = |k: &str, def: Duration| {
+        v[k].as_u64()
+            .filter(|&n| n > 0)
+            .map_or(def, Duration::from_millis)
+    };
+    let initial = ms("initialDelayInMillis", d.initial);
+    BackoffPolicy {
+        initial,
+        max: ms("maxDelayInMillis", d.max).max(initial),
+        multiplier: v["multiplier"]
+            .as_f64()
+            .filter(|m| m.is_finite() && *m >= 1.0)
+            .unwrap_or(d.multiplier),
+        jitter: v["jitterRate"]
+            .as_f64()
+            .filter(|j| (0.0..=1.0).contains(j))
+            .unwrap_or(d.jitter),
+    }
+}
+
+/// `AccessTokenRefreshException.errorCode = RETRY_REQUIRED`, or the call
+/// never got an answer.
+fn is_retryable_refresh_error(e: &Error) -> bool {
+    match e {
+        Error::Request { data, .. } => data["errorCode"].as_str() == Some("RETRY_REQUIRED"),
+        Error::Http(_) => true,
+        other => other.is_timeout(),
     }
 }
 

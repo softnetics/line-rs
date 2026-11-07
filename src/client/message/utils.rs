@@ -111,8 +111,10 @@ pub fn sticker_metadata(
 #[derive(Debug, Clone, Default)]
 pub struct MessageInput {
     pub text: Option<String>,
-    /// `None` = plain first, retrying with E2EE if the server demands it
-    /// (talk only; ignored for square).
+    /// `None` (default): encrypt text and location when the chat uses
+    /// Letter Sealing for them (see
+    /// [`E2eeChatState`](crate::e2ee::E2eeChatState)). `Some(true)`: always
+    /// encrypt; `Some(false)`: always plain. Talk only; ignored for square.
     pub e2ee: Option<bool>,
     /// `ContentType` variant name (default `NONE`).
     pub content_type: Option<String>,
@@ -122,6 +124,10 @@ pub struct MessageInput {
     pub location: Option<Value>,
     /// Pre-encrypted E2EE chunks.
     pub chunks: Option<Vec<Vec<u8>>>,
+    /// `reqSeq` for the send (talk only). Every retry of one send reuses
+    /// it; pass the same value again to retry a send whose answer was lost.
+    /// Default: allocated once per send.
+    pub req_seq: Option<i64>,
 }
 
 impl MessageInput {
@@ -182,6 +188,35 @@ impl MessageInput {
     pub fn reply_to(mut self, message_id: impl Into<String>) -> Self {
         self.related_message_id = Some(message_id.into());
         self
+    }
+    /// Send with this `reqSeq` (see [`MessageInput::req_seq`]).
+    pub fn req_seq(mut self, req_seq: i64) -> Self {
+        self.req_seq = Some(req_seq);
+        self
+    }
+    /// Sticker type (`STKOPT`) as LINE for Android sends it
+    /// (`zu5/s.java`): `""` static, `A` animated, `S` sound, `AS`
+    /// animated with sound, `P` popup or effect, `PS` popup or effect with
+    /// sound, `T` custom name text, `CT` message sticker. Recipients use it
+    /// to play the animation or sound.
+    pub fn sticker_options(self, options: impl Into<String>) -> Self {
+        self.metadata("STKOPT", options)
+    }
+    /// Text shown with the sticker (`STKTXT`), such as its name for
+    /// notifications.
+    pub fn sticker_text(self, text: impl Into<String>) -> Self {
+        self.metadata("STKTXT", text)
+    }
+    /// Send without a notification on the recipients' devices: LINE for
+    /// Android's "send silently" writes `NOTIFICATION_DISABLED=true`
+    /// (`tq8/p1.a`). The message itself arrives as usual.
+    pub fn silent(mut self, silent: bool) -> Self {
+        if silent {
+            self.metadata("NOTIFICATION_DISABLED", "true")
+        } else {
+            self.content_metadata.shift_remove("NOTIFICATION_DISABLED");
+            self
+        }
     }
 }
 
@@ -592,6 +627,14 @@ mod tests {
             ("p", Some(1), Some(sticon_url("p", "s").as_str()))
         );
         assert_eq!(decos[4].text, "");
+    }
+
+    #[test]
+    fn silent_sends_disable_notifications() {
+        let input = MessageInput::text("hi").silent(true);
+        assert_eq!(input.content_metadata["NOTIFICATION_DISABLED"], "true");
+        let input = input.silent(false);
+        assert!(!input.content_metadata.contains_key("NOTIFICATION_DISABLED"));
     }
 
     #[test]

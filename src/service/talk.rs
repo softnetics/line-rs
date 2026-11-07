@@ -13,7 +13,6 @@ use self::compact::{
 };
 use super::{TalkService, rename_raw};
 use crate::base::ClientEvent;
-use crate::e2ee::E2eeContent;
 use crate::error::{Error, Result};
 use crate::request::{Parse, RequestOptions};
 use crate::thrift::{Schema, TType, TValue, TypeRef, Value};
@@ -42,10 +41,18 @@ pub struct SendMessageOptions {
     pub related_message_id: Option<String>,
     /// A `Location` struct value.
     pub location: Option<Value>,
-    /// Pre-encrypted E2EE chunks.
+    /// Pre-encrypted E2EE chunks, sent once as they are (no E2EE
+    /// recovery).
     pub chunks: Option<Vec<Vec<u8>>>,
-    /// `Some(true)` encrypts; `None` retries with E2EE when the server asks.
+    /// `None` (default): encrypt when the chat's
+    /// [`E2eeChatState`](crate::e2ee::E2eeChatState) allows the content
+    /// type. `Some(true)`: always encrypt, never fall back to plain.
+    /// `Some(false)`: always plain.
     pub e2ee: Option<bool>,
+    /// `reqSeq` for every attempt of this send. Pass the same value again to
+    /// retry a send whose answer was lost, so the server can tell it is the
+    /// same message. Default: the next `talk` sequence, taken once.
+    pub req_seq: Option<i64>,
 }
 
 impl SendMessageOptions {
@@ -90,6 +97,56 @@ pub struct GetChatsOptions {
     pub with_members: Option<bool>,
 }
 
+/// One page of [`TalkService::message_box_page`]. [`Default`] is what LINE
+/// for Android asks for (`ts8/qd.java`): active boxes only, 100 a page,
+/// with unread counts, no last messages.
+#[derive(Debug, Clone)]
+pub struct MessageBoxQuery {
+    /// Paging cursor: the id of the last box of the previous page.
+    pub min_chat_id: Option<String>,
+    /// Leave out boxes the user deleted or that have no messages left.
+    pub active_only: bool,
+    pub limit: i32,
+    pub with_unread_count: bool,
+    /// How many of each box's newest messages to include.
+    pub last_messages: i32,
+    pub unread_only: bool,
+    /// The operation revision the app sends on a full sync.
+    pub last_op_revision: Option<i64>,
+}
+
+impl Default for MessageBoxQuery {
+    fn default() -> Self {
+        Self {
+            min_chat_id: None,
+            active_only: true,
+            limit: 100,
+            with_unread_count: true,
+            last_messages: 0,
+            unread_only: false,
+            last_op_revision: None,
+        }
+    }
+}
+
+impl MessageBoxQuery {
+    /// `getMessageBoxes` arguments.
+    pub fn args(&self) -> Value {
+        let mut req = crate::tv!({
+            "activeOnly": self.active_only,
+            "messageBoxCountLimit": self.limit,
+            "withUnreadCount": self.with_unread_count,
+            "lastMessagesPerMessageBoxCount": self.last_messages,
+            "unreadOnly": self.unread_only,
+        });
+        req.insert("minChatId", self.min_chat_id.as_deref());
+        req.insert("lastOpRevision", self.last_op_revision);
+        let mut args = crate::tv!({"syncReason": "INTERNAL"});
+        args.insert("messageBoxListRequest", req);
+        args
+    }
+}
+
 /// Number of a `ContentType` given as a variant name or number.
 fn content_type_number(v: &Value) -> i32 {
     match v {
@@ -118,7 +175,8 @@ pub(crate) fn sync_args(o: &SyncOptions) -> Value {
     }})
 }
 
-pub(crate) fn send_message_args(seq: i64, o: &SendMessageOptions) -> Value {
+/// The `Message` struct of a send (`text`/`location`/`chunks` as given).
+pub(crate) fn talk_message_value(o: &SendMessageOptions) -> Value {
     let mut message = crate::tv!({
         "to": o.to,
         "createdTime": 0,
@@ -152,8 +210,12 @@ pub(crate) fn send_message_args(seq: i64, o: &SendMessageOptions) -> Value {
         message.insert("messageRelationType", "REPLY");
         message.insert("relatedMessageServiceCode", "TALK");
     }
+    message
+}
+
+pub(crate) fn send_message_args(seq: i64, o: &SendMessageOptions) -> Value {
     let mut args = crate::tv!({"seq": seq});
-    args.insert("message", message);
+    args.insert("message", talk_message_value(o));
     args
 }
 
@@ -167,13 +229,21 @@ pub(crate) fn react_args(req_seq: i64, o: &ReactOptions) -> Value {
     args
 }
 
+/// `sendPostback` arguments. Empty `message_id` and `origin_mid` are left
+/// out, as LINE for Android leaves them unset for rich-menu taps
+/// (`vp1/d.java` passes no message).
 pub(crate) fn postback_args(
-    message_id: &str,
+    message_id: Option<&str>,
     url: &str,
     chat_mid: &str,
-    origin_mid: &str,
+    origin_mid: Option<&str>,
 ) -> Value {
-    crate::tv!({"request": {"messageId": message_id, "url": url, "chatMID": chat_mid, "originMID": origin_mid}})
+    let mut req = crate::tv!({"url": url, "chatMID": chat_mid});
+    req.insert("messageId", message_id.filter(|s| !s.is_empty()));
+    req.insert("originMID", origin_mid.filter(|s| !s.is_empty()));
+    let mut args = Value::object();
+    args.insert("request", req);
+    args
 }
 
 pub(crate) fn get_chats_args(o: &GetChatsOptions) -> Value {
@@ -223,83 +293,51 @@ impl TalkService<'_> {
         .await
     }
 
-    /// Send a message. With `e2ee: Some(true)` the text/location is
-    /// encrypted first; with `e2ee: None` an `E2EE*` error code triggers one
-    /// retry with encryption (as linejs). With `Config::e2ee_send_recovery`,
-    /// messages are also recovered from E2EE send errors as the official
-    /// client does (see [`crate::e2ee::send_recovery`]): re-encrypt with fresh
-    /// keys, recreate the group key, or (only when `e2ee` was unset) fall back
-    /// to plain, for at most [`crate::e2ee::MAX_E2EE_SEND_ATTEMPTS`] attempts.
+    /// Send a message as LINE for Android does (see
+    /// [`BaseClient::send_with_e2ee_recovery`](crate::base::BaseClient::send_with_e2ee_recovery)):
+    /// text and location are encrypted first when the chat's
+    /// [`E2eeChatState`](crate::e2ee::E2eeChatState) allows the content type,
+    /// and `E2EE_*` errors are recovered (re-encrypt with fresh keys,
+    /// recreate the group key, reload our key, or, unless `e2ee` is
+    /// `Some(true)`, fall back to plain), for at most
+    /// [`crate::e2ee::MAX_E2EE_SEND_ATTEMPTS`] attempts with one `reqSeq`.
+    /// A location without a content type is sent as `LOCATION`. Messages
+    /// with nothing to encrypt (stickers, contacts, ...) and pre-encrypted
+    /// `chunks` are sent as they are.
     pub async fn send_message(&self, options: SendMessageOptions) -> Result<Value> {
-        use crate::e2ee::{E2eeSendRecovery, MAX_E2EE_SEND_ATTEMPTS, send_recovery};
-        let requested = options.e2ee;
-        // Only plaintext we hold can be re-encrypted or resent in the clear.
-        let reencryptable =
-            options.chunks.is_none() && (options.text.is_some() || options.location.is_some());
         let mut options = options;
-        let mut attempts = 0;
-        loop {
-            attempts += 1;
-            let mut send = options.clone();
-            if send.e2ee == Some(true)
-                && send.chunks.is_none()
-                && (send.text.as_deref().is_some_and(|t| !t.is_empty()) || send.location.is_some())
-            {
-                let content_type =
-                    content_type_number(send.content_type.as_ref().unwrap_or(&Value::Int(0)));
-                let content = match (send.text.take(), send.location.take()) {
-                    (Some(text), _) if !text.is_empty() => E2eeContent::Text(text),
-                    (_, Some(location)) => E2eeContent::Location(location),
-                    _ => E2eeContent::Text("invalid".into()),
-                };
-                send.chunks = Some(
-                    self.client
-                        .encrypt_e2ee_message(&send.to, content, content_type, 2)
-                        .await?,
-                );
-                send.content_metadata
-                    .insert("e2eeVersion".into(), "2".into());
-                send.content_metadata
-                    .insert("contentType".into(), content_type.to_string());
-                send.content_metadata.insert("e2eeMark".into(), "2".into());
-            }
-            let seq = self.client.get_reqseq("talk").await?;
-            let err = match self
-                .call("sendMessage", send_message_args(seq, &send))
-                .await
-            {
-                Err(e) if attempts < MAX_E2EE_SEND_ATTEMPTS => e,
-                res => return res,
-            };
-            let code = err.code().unwrap_or_default();
-            if !self.client.config.e2ee_send_recovery {
-                // linejs: retry once with encryption when `e2ee` was unset.
-                if attempts == 1 && options.e2ee.is_none() && code.contains("E2EE") {
-                    options.e2ee = Some(true);
-                    continue;
-                }
-                return Err(err);
-            }
-            match send_recovery(code) {
-                Some(E2eeSendRecovery::RetryPlain)
-                    if requested.is_none() && reencryptable && options.e2ee == Some(true) =>
-                {
-                    options.e2ee = Some(false);
-                }
-                Some(r @ (E2eeSendRecovery::Reencrypt | E2eeSendRecovery::RecreateGroupKey))
-                    if requested != Some(false)
-                        && options.e2ee != Some(false)
-                        && (reencryptable || options.e2ee.is_none()) =>
-                {
-                    self.client.prepare_e2ee_resend(&options.to, r).await?;
-                    options.e2ee = Some(true);
-                }
-                None if options.e2ee.is_none() && code.contains("E2EE") => {
-                    options.e2ee = Some(true)
-                }
-                _ => return Err(err),
-            }
+        if options.location.is_some() && options.content_type.is_none() {
+            options.content_type = Some("LOCATION".into());
         }
+        if options.chunks.is_some() {
+            let seq = match options.req_seq {
+                Some(seq) => seq,
+                None => self.client.get_reqseq("talk").await?,
+            };
+            return self
+                .call("sendMessage", send_message_args(seq, &options))
+                .await;
+        }
+        let encryptable =
+            options.text.as_deref().is_some_and(|t| !t.is_empty()) || options.location.is_some();
+        let send_options = crate::e2ee::E2eeSendOptions {
+            content_type: content_type_number(
+                options.content_type.as_ref().unwrap_or(&Value::Int(0)),
+            ),
+            e2ee: if encryptable {
+                options.e2ee
+            } else {
+                Some(false)
+            },
+            req_seq: options.req_seq,
+        };
+        let client = self.client;
+        let options = &options;
+        client
+            .send_with_e2ee_recovery(&options.to, send_options, |attempt| {
+                client.talk_message_for_attempt(options, attempt)
+            })
+            .await
     }
 
     /// Send a text via the compact protocol (`/CA5`), falling back to
@@ -350,7 +388,7 @@ impl TalkService<'_> {
             (Some(c), _) => c,
             (None, Some(text)) => {
                 self.client
-                    .encrypt_e2ee_message(to, E2eeContent::Text(text.into()), 0, 2)
+                    .encrypt_e2ee_message(to, crate::e2ee::E2eeContent::Text(text.into()), 0, 2)
                     .await?
             }
             (None, None) => {
@@ -431,27 +469,43 @@ impl TalkService<'_> {
         }
     }
 
-    /// Invite users into a group chat.
+    /// Invite users into a group chat. `reqSeq` auto.
     pub async fn invite_into_chat(
         &self,
         chat_mid: &str,
         target_user_mids: &[String],
     ) -> Result<Value> {
+        let seq = self.client.get_reqseq("talk").await?;
         self.call(
             "inviteIntoChat",
-            crate::tv!({"request": {"targetUserMids": target_user_mids, "chatMid": chat_mid}}),
+            crate::tv!({"request": {"reqSeq": seq, "targetUserMids": target_user_mids, "chatMid": chat_mid}}),
         )
         .await
     }
 
     /// Report a Flex message postback action (`sendPostback`): `url` is the
     /// action's postback URL, `origin_mid` the sender of the Flex message.
+    /// Build `url` with [`Postback`](crate::client::postback::Postback).
     pub async fn send_flex_postback(
         &self,
         message_id: &str,
         url: &str,
         chat_mid: &str,
         origin_mid: &str,
+    ) -> Result<Value> {
+        self.send_postback_url(url, chat_mid, Some(message_id), Some(origin_mid))
+            .await
+    }
+
+    /// `sendPostback` with an optional message and sender: rich-menu taps
+    /// have neither. `url` is a `linepostback://` URL (see
+    /// [`client::postback`](crate::client::postback)).
+    pub async fn send_postback_url(
+        &self,
+        url: &str,
+        chat_mid: &str,
+        message_id: Option<&str>,
+        origin_mid: Option<&str>,
     ) -> Result<Value> {
         self.call(
             "sendPostback",
@@ -473,6 +527,13 @@ impl TalkService<'_> {
             None => self.client.get_reqseq("talk").await?,
         };
         self.call("react", react_args(req_seq, &options)).await
+    }
+
+    /// One page of message boxes (`getMessageBoxes`): the chats with
+    /// history, their unread counts and, per box, `lastRemovedMessageId`
+    /// and `hiddenAtMessageId` from deletes and hides on other devices.
+    pub async fn message_box_page(&self, query: &MessageBoxQuery) -> Result<Value> {
+        self.call("getMessageBoxes", query.args()).await
     }
 
     /// `getChats` (members and invitees included by default).
@@ -1238,6 +1299,43 @@ mod tests {
     }
 
     #[test]
+    fn message_box_query_defaults_to_the_apps() {
+        let mut q = MessageBoxQuery::default();
+        let f = encode("getMessageBoxes_args", &q.args());
+        assert!(matches!(path(&f, &[2, 3]), Some(TValue::Bool(true))));
+        assert!(matches!(path(&f, &[2, 4]), Some(TValue::I32(100))));
+        assert!(matches!(path(&f, &[2, 6]), Some(TValue::I32(0))));
+        assert_eq!(path(&f, &[2, 1]), None);
+        assert_eq!(path(&f, &[2, 8]), None);
+        q.min_chat_id = Some("c9".into());
+        q.last_op_revision = Some(1 << 40);
+        let f = encode("getMessageBoxes_args", &q.args());
+        assert_eq!(path(&f, &[2, 1]), Some(&s("c9")));
+        assert_eq!(path(&f, &[2, 8]), Some(&TValue::I64(1 << 40)));
+    }
+
+    #[test]
+    fn rich_menu_postback_has_no_message_or_origin() {
+        let args = encode(
+            "sendPostback_args",
+            &postback_args(Some(""), "linepostback://postback?_data=x", "u1", None),
+        );
+        assert_eq!(path(&args, &[2, 1]), None);
+        assert_eq!(
+            path(&args, &[2, 2]),
+            Some(&s("linepostback://postback?_data=x"))
+        );
+        assert_eq!(path(&args, &[2, 3]), Some(&s("u1")));
+        assert_eq!(path(&args, &[2, 4]), None);
+        let flex = encode(
+            "sendPostback_args",
+            &postback_args(Some("9"), "u", "c1", Some("u2")),
+        );
+        assert_eq!(path(&flex, &[2, 1]), Some(&s("9")));
+        assert_eq!(path(&flex, &[2, 4]), Some(&s("u2")));
+    }
+
+    #[test]
     fn sync_args_defaults() {
         let f = encode(
             "sync_args",
@@ -1255,7 +1353,7 @@ mod tests {
     fn postback_args_encoding() {
         let f = encode(
             "sendPostback_args",
-            &postback_args("1", "https://p", "c1", "u1"),
+            &postback_args(Some("1"), "https://p", "c1", Some("u1")),
         );
         assert_eq!(path(&f, &[2, 1]), Some(&s("1")));
         assert_eq!(path(&f, &[2, 2]), Some(&s("https://p")));

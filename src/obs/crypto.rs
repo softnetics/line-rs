@@ -1,8 +1,8 @@
 //! "E2EE Next" file encryption used by OBS media upload/download (uploads
-//! use the v1 whole-file HMAC; downloads accept v1 and v2 chunked HMAC, see
-//! [`crate::e2ee::media`]). The
-//! primitives live in [`crate::e2ee::crypto`]; this module keeps the
-//! OBS-facing [`EncryptedFile`] shape.
+//! use the v1 whole-file HMAC except videos, which use the v2 chunked HMAC;
+//! downloads accept both, see [`crate::e2ee::media`]). The primitives live
+//! in [`crate::e2ee::crypto`]; this module keeps the OBS-facing
+//! [`EncryptedFile`] shape.
 
 pub use crate::e2ee::crypto::{
     decrypt_by_key_material, decrypt_by_key_material_b64, derive_key_material,

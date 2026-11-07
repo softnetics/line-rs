@@ -25,7 +25,10 @@ pub mod liff;
 mod listen;
 mod login;
 pub mod message;
+pub mod postback;
+mod premium;
 mod profile;
+pub mod settings;
 mod square;
 mod user;
 pub mod voom;
@@ -47,20 +50,19 @@ pub use message::{
     Mid, PostNotificationInfo, ReactionType, SquareMessage, SquareThreadMessage, TalkMessage,
     build_text_decorations,
 };
+pub use premium::PremiumStatus;
 pub use profile::{MyProfileUpdate, ProfileAttribute};
 pub use square::{Square, SquareChat, SquareChatEvent};
 pub use user::User;
 pub use voom::{Voom, VoomChannel, VoomRestOptions, VoomRestResponse, VoomRouting};
 
 use crate::base::BaseClient;
-use crate::e2ee::E2eeContent;
 use crate::error::{Error, Result};
 use crate::request::{Parse, RequestOptions};
-use crate::service::talk::SendCompactMessageOptions;
 use crate::service::talk::compact::CompactMessageResponse;
+use crate::service::talk::{SendCompactMessageOptions, SendMessageOptions};
 use crate::thrift::{Protocol, TType, TValue, Value};
 use crate::tv;
-use message::types::enum_value;
 use message::utils::metadata_value;
 
 /// Events emitted by [`Client`] while [listening](Client::listen).
@@ -104,7 +106,7 @@ struct Inner {
 impl Client {
     /// Wrap a (logged-in) base client.
     pub fn new(base: BaseClient) -> Self {
-        let (events, _) = broadcast::channel(256);
+        let (events, _) = broadcast::channel(crate::base::EVENT_CAPACITY);
         Self {
             base,
             inner: Arc::new(Inner {
@@ -116,7 +118,11 @@ impl Client {
         }
     }
 
-    /// Subscribe to [`ClientEvent`]s.
+    /// Subscribe to [`ClientEvent`]s. A receiver more than
+    /// [`EVENT_CAPACITY`](crate::base::EVENT_CAPACITY) events behind gets
+    /// `RecvError::Lagged(n)` and has lost `n` events: reload the chat list
+    /// and recent messages, then keep receiving (see
+    /// [`BaseClient::subscribe`]).
     pub fn subscribe(&self) -> broadcast::Receiver<ClientEvent> {
         self.inner.events.subscribe()
     }
@@ -139,9 +145,12 @@ impl Client {
     // Sending
     // -----------------------------------------------------------------------
 
-    /// Send a talk message to `to` (user, group or room); port of linejs
-    /// `talk.sendMessage`. With `e2ee: Some(true)` text/location is encrypted;
-    /// with `None` a server E2EE demand triggers one encrypted retry.
+    /// Send a talk message to `to` (user, group or room) through
+    /// [`TalkService::send_message`](crate::service::TalkService::send_message):
+    /// text and location are encrypted first when the chat uses Letter
+    /// Sealing for them, and `E2EE_*` errors are recovered with one `reqSeq`
+    /// (see [`BaseClient::send_with_e2ee_recovery`]). `e2ee: Some(true)`
+    /// always encrypts; `Some(false)` always sends plain.
     pub async fn send_message(
         &self,
         to: &str,
@@ -162,77 +171,7 @@ impl Client {
     }
 
     async fn send_message_raw(&self, to: &str, input: MessageInput) -> Result<Value> {
-        let mut input = input;
-        loop {
-            let original = input.clone();
-            let mut input_now = input.clone();
-            let content_type = input_now
-                .content_type
-                .clone()
-                .unwrap_or_else(|| "NONE".into());
-            if input_now.e2ee == Some(true)
-                && input_now.chunks.is_none()
-                && (input_now.text.is_some() || input_now.location.is_some())
-            {
-                let ct =
-                    enum_value(&Value::String(content_type.clone()), "ContentType").unwrap_or(0);
-                let payload = match (
-                    input_now.text.take().filter(|t| !t.is_empty()),
-                    input_now.location.take(),
-                ) {
-                    (Some(t), _) => E2eeContent::Text(t),
-                    (None, Some(loc)) => E2eeContent::Location(loc),
-                    (None, None) => E2eeContent::Text("invalid".into()),
-                };
-                let chunks = self.base.encrypt_e2ee_message(to, payload, ct, 2).await?;
-                input_now
-                    .content_metadata
-                    .insert("e2eeVersion".into(), "2".into());
-                input_now
-                    .content_metadata
-                    .insert("contentType".into(), ct.to_string());
-                input_now
-                    .content_metadata
-                    .insert("e2eeMark".into(), "2".into());
-                input_now.chunks = Some(chunks);
-            }
-            let mut message = tv!({
-                "to": to,
-                "createdTime": 0,
-                "deliveredTime": 0,
-                "hasContent": false,
-                "contentType": content_type,
-                "sessionId": 0,
-                "text": input_now.text,
-                "relatedMessageId": input_now.related_message_id,
-            });
-            message.insert(
-                "contentMetadata",
-                metadata_value(&input_now.content_metadata),
-            );
-            if let Some(loc) = input_now.location {
-                message.insert("location", loc);
-            }
-            if let Some(chunks) = input_now.chunks {
-                message.insert(
-                    "chunks",
-                    Value::List(chunks.into_iter().map(Value::Binary).collect()),
-                );
-            }
-            if input_now.related_message_id.is_some() {
-                message.insert("messageRelationType", "REPLY");
-                message.insert("relatedMessageServiceCode", "TALK");
-            }
-            let mut args = tv!({"seq": self.base.get_reqseq("talk").await?});
-            args.insert("message", message);
-            match self.base.talk().call("sendMessage", args).await {
-                Err(e) if original.e2ee.is_none() && error_code(&e).contains("E2EE") => {
-                    input = original;
-                    input.e2ee = Some(true);
-                }
-                other => return other,
-            }
-        }
+        self.base.talk().send_message(send_options(to, input)).await
     }
 
     /// Send a message to a square chat (`SquareService.sendMessage`).
@@ -301,6 +240,28 @@ impl Client {
             .as_list()
             .unwrap_or_default()
             .to_vec();
+        if mids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let res = self.get_chats(Value::List(mids)).await?;
+        Ok(list(&res["chats"])
+            .into_iter()
+            .map(|raw| Chat::new(self.clone(), raw))
+            .collect())
+    }
+
+    /// Groups we are invited to but have not joined
+    /// (`getAllChatMids` with `withInvitedChats`, as `wf3/e.java` asks).
+    pub async fn fetch_invited_chats(&self) -> Result<Vec<Chat>> {
+        let res = self
+            .base
+            .talk()
+            .call(
+                "getAllChatMids",
+                tv!({"request": {"withMemberChats": false, "withInvitedChats": true}, "syncReason": "INTERNAL"}),
+            )
+            .await?;
+        let mids: Vec<Value> = list(&res["invitedChatMids"]);
         if mids.is_empty() {
             return Ok(Vec::new());
         }
@@ -467,6 +428,21 @@ pub(crate) fn error_code(e: &Error) -> String {
     }
 }
 
+/// [`SendMessageOptions`] for a talk [`MessageInput`].
+fn send_options(to: &str, input: MessageInput) -> SendMessageOptions {
+    SendMessageOptions {
+        to: to.to_string(),
+        text: input.text,
+        content_type: input.content_type.map(Value::String),
+        content_metadata: input.content_metadata,
+        related_message_id: input.related_message_id,
+        location: input.location,
+        chunks: input.chunks,
+        e2ee: input.e2ee,
+        req_seq: input.req_seq,
+    }
+}
+
 fn is_api_not_capable(e: &Error) -> bool {
     e.to_string()
         .to_ascii_lowercase()
@@ -600,6 +576,26 @@ fn object_sum(base: &mut Value, add: Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn send_options_carry_req_seq_and_sticker_metadata() {
+        let input = MessageInput::sticker("1", "2", "100")
+            .sticker_options("AS")
+            .sticker_text("hi")
+            .req_seq(77);
+        let o = send_options("u-them", input);
+        assert_eq!(o.req_seq, Some(77));
+        assert_eq!(o.content_type, Some(Value::from("STICKER")));
+        for (k, v) in [
+            ("STKPKGID", "1"),
+            ("STKID", "2"),
+            ("STKVER", "100"),
+            ("STKOPT", "AS"),
+            ("STKTXT", "hi"),
+        ] {
+            assert_eq!(o.content_metadata[k], v);
+        }
+    }
 
     fn not_capable() -> Error {
         Error::internal("RequestError", "API method not capable: 'getContactsV3'")
@@ -857,7 +853,7 @@ mod tests {
         check(
             "sendPostback",
             false,
-            crate::service::talk::postback_args("1", "u", "c", "o"),
+            crate::service::talk::postback_args(Some("1"), "u", "c", Some("o")),
         );
         check("getProfile", false, tv!({"syncReason": "INTERNAL"}));
         check(

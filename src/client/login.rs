@@ -31,6 +31,10 @@ pub struct InitOptions {
     pub http: Option<reqwest::Client>,
     pub legy: LegyMode,
     pub legy_endpoint: Option<String>,
+    /// The device's name LINE shows in the phone's list of logged-in
+    /// devices (default: the computer's model, see
+    /// [`default_device_name`](crate::device::default_device_name)).
+    pub device_name: Option<String>,
 }
 
 impl InitOptions {
@@ -46,7 +50,16 @@ impl InitOptions {
             http: None,
             legy: LegyMode::Auto,
             legy_endpoint: None,
+            device_name: None,
         }
+    }
+    /// Name this device at login, e.g. `"LAAB on MacBook Air"`. LINE shows
+    /// it in the phone's list of logged-in devices. It is sent as both
+    /// `modelName` and `systemName`, as LINE for Android sends
+    /// `Build.MODEL`.
+    pub fn device_name(mut self, name: impl Into<String>) -> Self {
+        self.device_name = Some(name.into());
+        self
     }
     pub fn version(mut self, v: impl Into<String>) -> Self {
         self.version = Some(v.into());
@@ -121,6 +134,9 @@ pub fn create_base_client(init: InitOptions) -> Result<BaseClient> {
     }
     if let Some(e) = init.legy_endpoint {
         b = b.legy_endpoint(e);
+    }
+    if let Some(n) = init.device_name {
+        b = b.device_name(n);
     }
     b.build()
 }
@@ -218,6 +234,14 @@ mod tests {
         );
         // A custom endpoint has no implicit backup host.
         assert!(base.backup_endpoints.is_empty());
+        assert_eq!(
+            base.device_details.device_name,
+            crate::device::default_device_name()
+        );
+        let named =
+            create_base_client(InitOptions::new(Device::DesktopMac).device_name("Test Mac"))
+                .unwrap();
+        assert_eq!(named.device_details.device_name, "Test Mac");
     }
 
     #[test]

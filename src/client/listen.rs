@@ -8,7 +8,7 @@
 use futures::stream::{BoxStream, StreamExt};
 use tokio::task::JoinHandle;
 
-use super::message::{ReactionType, SquareMessage, TalkMessage};
+use super::message::{PaidReaction, ReactionType, SquareMessage, TalkMessage};
 use super::{Client, ClientEvent};
 use crate::error::{Error, Result};
 use crate::thrift::Value;
@@ -71,6 +71,8 @@ pub struct ReactionEvent {
     /// `curr.predefinedReactionType` of the `param2` JSON; `None` when it
     /// is missing or unknown (e.g. a paid reaction).
     pub reaction: Option<ReactionType>,
+    /// `curr.paidReactionType`: a reaction with a LINE emoji.
+    pub paid: Option<PaidReaction>,
     /// `param2` parsed as JSON (`Null` if it is not JSON).
     pub detail: serde_json::Value,
 }
@@ -116,9 +118,62 @@ pub enum TalkEvent {
     },
     /// `NOTIFIED_ACCEPT_CHAT_INVITATION` / `NOTIFIED_ACCEPT_GROUP_INVITATION`.
     Join { chat_mid: String, mid: String },
-    /// `NOTIFIED_DELETE_SELF_FROM_CHAT` / `NOTIFIED_LEAVE_GROUP` /
-    /// `NOTIFIED_LEAVE_ROOM`.
+    /// `NOTIFIED_DELETE_SELF_FROM_CHAT` / `NOTIFIED_LEAVE_CHAT` /
+    /// `NOTIFIED_LEAVE_GROUP` / `NOTIFIED_LEAVE_ROOM`: `mid` left
+    /// `chat_mid`.
     Leave { chat_mid: String, mid: String },
+    /// `DELETE_SELF_FROM_CHAT`: we left `chat_mid` (on any device).
+    LeftChat { chat_mid: String },
+    /// `UPDATE_CHAT` (`by_me`, on any device) or `NOTIFIED_UPDATE_CHAT`
+    /// (someone else): the chat's name, picture or settings changed;
+    /// re-fetch it (`getChats`), as the Android app does. `param2` and
+    /// `param3` are passed through as is.
+    ChatUpdated {
+        chat_mid: String,
+        by_me: bool,
+        param2: String,
+        param3: String,
+    },
+    /// `SEND_CHAT_REMOVED`: we deleted `chat_mid` (on any device, the
+    /// chat list's "delete"). The Android app (`SEND_CHAT_REMOVED.kt`)
+    /// reads only `param1`: it deletes a 1:1 chat, group or memo chat
+    /// from the chat list with its messages (`deleteChatWithoutMuteStatus`),
+    /// and only the messages (and album cache) of a room (`ig3/k.c.c`,
+    /// "Room"), whose row stays. `last_message_id` is `param2`, the
+    /// `sendChatRemoved` request's `lastMessageId` the app sends from the
+    /// chat's last message (inferred from the request, unverified on the
+    /// wire; the app ignores it on receipt).
+    ChatRemoved {
+        chat_mid: String,
+        last_message_id: String,
+    },
+    /// `SEND_CHAT_HIDDEN`: we hid (`hidden`) or unhid `chat_mid` up to
+    /// `last_message_id` (on any device; `param3` is `"1"` or `"0"`).
+    ChatHidden {
+        chat_mid: String,
+        last_message_id: String,
+        hidden: bool,
+    },
+    /// `REMOVE_ALL_MESSAGES`: we deleted the messages of every chat (on any
+    /// device). The Android app (`REMOVE_ALL_MESSAGES.kt`) reads no params
+    /// and deletes the messages of every chat.
+    AllMessagesRemoved,
+    /// `UPDATE_MESSAGE_REQUEST_BOX` (`by_me`, on any device) or
+    /// `NOTIFIED_UPDATE_MESSAGE_REQUEST_BOX`: `chat_mid` (`param1`) moved
+    /// into (`in_box`) or out of the message request box (`param2` > 0 or
+    /// not). The app ignores the op when `param2` is not a number. On
+    /// `NOTIFIED_…` with `in_box` the app lights a dot on the request
+    /// box entry of its chat list.
+    MessageRequestBox {
+        chat_mid: String,
+        in_box: bool,
+        by_me: bool,
+    },
+    /// `REGISTER_E2EE_PUBLICKEY`, `(NOTIFIED_)UPDATE_PUBLICKEYCHAIN` or
+    /// `NOTIFIED_E2EE_KEY_UPDATE`: Letter Sealing keys changed. The client
+    /// has already forgotten the key ids it remembered as unresolvable;
+    /// messages that could not be decrypted may open now.
+    E2eeKeysChanged { op: crate::e2ee::E2eeOpKind },
     /// `NOTIFIED_DELETE_OTHER_FROM_CHAT` / `NOTIFIED_KICKOUT_FROM_GROUP`.
     Kick {
         chat_mid: String,
@@ -129,6 +184,10 @@ pub enum TalkEvent {
     ContactAdded { mid: String, by_me: bool },
     /// `BLOCK_CONTACT` (`blocked`) / `UNBLOCK_CONTACT`, done by us.
     ContactBlocked { mid: String, blocked: bool },
+    /// `UPDATE_SETTINGS`: account settings changed (on any device). The
+    /// `SettingsAttributeEx` ids to fetch again; see
+    /// [`settings::NOTIFICATION_ATTRIBUTES`](super::settings::NOTIFICATION_ATTRIBUTES).
+    SettingsUpdated { attributes: Vec<i32> },
 }
 
 fn split_mids(s: &str) -> Vec<String> {
@@ -170,6 +229,7 @@ impl TalkEvent {
                     chat_mid: detail["chatMid"].as_str().map(str::to_string),
                     reactor_mid: p(3),
                     reaction,
+                    paid: PaidReaction::from_json(&detail["curr"]["paidReactionType"]),
                     detail,
                 })
             }
@@ -194,12 +254,54 @@ impl TalkEvent {
                     mid: p(2),
                 }
             }
-            "NOTIFIED_DELETE_SELF_FROM_CHAT" | "NOTIFIED_LEAVE_GROUP" | "NOTIFIED_LEAVE_ROOM" => {
-                TalkEvent::Leave {
-                    chat_mid: p(1),
-                    mid: p(2),
+            "NOTIFIED_DELETE_SELF_FROM_CHAT"
+            | "NOTIFIED_LEAVE_CHAT"
+            | "NOTIFIED_LEAVE_GROUP"
+            | "NOTIFIED_LEAVE_ROOM" => TalkEvent::Leave {
+                chat_mid: p(1),
+                mid: p(2),
+            },
+            "DELETE_SELF_FROM_CHAT" => TalkEvent::LeftChat { chat_mid: p(1) },
+            "UPDATE_CHAT" | "NOTIFIED_UPDATE_CHAT" => TalkEvent::ChatUpdated {
+                chat_mid: p(1),
+                by_me: kind == "UPDATE_CHAT",
+                param2: p(2),
+                param3: p(3),
+            },
+            "SEND_CHAT_REMOVED" => TalkEvent::ChatRemoved {
+                chat_mid: p(1),
+                last_message_id: p(2),
+            },
+            "UPDATE_MESSAGE_REQUEST_BOX"
+            | "NOTIFIED_UPDATE_MESSAGE_REQUEST_BOX"
+            | "155"
+            | "156" => {
+                let chat_mid = p(1);
+                let in_box = p(2).trim().parse::<i64>().ok()? > 0;
+                if chat_mid.is_empty() {
+                    return None;
+                }
+                TalkEvent::MessageRequestBox {
+                    chat_mid,
+                    in_box,
+                    by_me: matches!(kind.as_str(), "UPDATE_MESSAGE_REQUEST_BOX" | "155"),
                 }
             }
+            // The Android app ignores the op unless param3 is "0" or "1"
+            // (`SEND_CHAT_HIDDEN.kt`).
+            "UPDATE_SETTINGS" => TalkEvent::SettingsUpdated {
+                attributes: super::settings::updated_setting_attributes(&p(3)),
+            },
+            "SEND_CHAT_HIDDEN" => TalkEvent::ChatHidden {
+                chat_mid: p(1),
+                last_message_id: p(2),
+                hidden: match p(3).as_str() {
+                    "1" => true,
+                    "0" => false,
+                    _ => return None,
+                },
+            },
+            "REMOVE_ALL_MESSAGES" => TalkEvent::AllMessagesRemoved,
             "NOTIFIED_DELETE_OTHER_FROM_CHAT" | "NOTIFIED_KICKOUT_FROM_GROUP" => TalkEvent::Kick {
                 chat_mid: p(1),
                 kicker_mid: p(2),
@@ -221,7 +323,16 @@ impl TalkEvent {
                 mid: p(1),
                 blocked: false,
             },
-            _ => return None,
+            _ => {
+                use crate::e2ee::{E2eeOpKind, E2eeOperation};
+                let op = E2eeOperation::from_op(op)?.kind;
+                match op {
+                    E2eeOpKind::RegisterPublicKey
+                    | E2eeOpKind::UpdatePublicKeyChain
+                    | E2eeOpKind::KeyUpdate => TalkEvent::E2eeKeysChanged { op },
+                    _ => return None,
+                }
+            }
         })
     }
 }
@@ -335,19 +446,22 @@ impl Client {
         let kind = op_type(&op);
         let message = op["message"].clone();
         let typed = TalkEvent::from_operation(&op);
+        if matches!(typed, Some(TalkEvent::E2eeKeysChanged { .. })) {
+            self.base.forget_unresolvable_e2ee_keys();
+        }
         self.emit(ClientEvent::Event(op));
         if let Some(t) = typed {
             self.emit(ClientEvent::Talk(t));
         }
         match kind.as_str() {
             "SEND_MESSAGE" | "RECEIVE_MESSAGE" => {
-                let raw = self.base.decrypt_e2ee_message(message).await?;
+                let raw = self.decrypt_or_keep(message).await;
                 self.emit(ClientEvent::Message(TalkMessage::new(self.clone(), raw)));
             }
             // 158 = EDIT_MESSAGE (ours, from another device), 159 =
             // NOTIFIED_EDIT_MESSAGE; not in the bundled IDL yet.
             "EDIT_MESSAGE" | "NOTIFIED_EDIT_MESSAGE" | "158" | "159" => {
-                let raw = self.base.decrypt_e2ee_message(message).await?;
+                let raw = self.decrypt_or_keep(message).await;
                 self.emit(ClientEvent::MessageEdit(TalkMessage::new(
                     self.clone(),
                     raw,
@@ -356,6 +470,27 @@ impl Client {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Decrypt an E2EE message, or keep it as it came when that fails, as
+    /// the Android app keeps such a message as `E2EE_UNDECRYPTED` instead
+    /// of dropping it: its `chunks` stay, `text` stays empty (see
+    /// [`is_undecrypted`](crate::e2ee::is_undecrypted)), and the failure
+    /// is logged (`e2ee` / `decryptFailed`) with the ids from
+    /// [`describe_e2ee_message`](crate::e2ee::describe_e2ee_message).
+    async fn decrypt_or_keep(&self, message: Value) -> Value {
+        match self.base.decrypt_e2ee_message(message.clone()).await {
+            Ok(raw) => raw,
+            Err(e) => {
+                let mut info = crate::e2ee::describe_e2ee_message(&message);
+                info["error"] = e.to_string().into();
+                self.base.log(
+                    "e2ee",
+                    serde_json::json!({"type": "decryptFailed", "message": info}),
+                );
+                message
+            }
+        }
     }
 
     /// Emit events for one `SquareEvent`.
@@ -474,6 +609,12 @@ mod tests {
             })
         );
         assert_eq!(
+            ev(tv!({"type": 36, "param3": "0\u{1e}40"})),
+            Some(TalkEvent::SettingsUpdated {
+                attributes: vec![0, 40]
+            })
+        );
+        assert_eq!(
             ev(tv!({"type": "SEND_CHAT_CHECKED", "param1": "c1", "param2": "9"})),
             Some(TalkEvent::ChatChecked {
                 chat_mid: s("c1"),
@@ -499,7 +640,32 @@ mod tests {
         else {
             panic!("not a reaction")
         };
-        assert_eq!((r.reaction, r.chat_mid), (None, None));
+        assert_eq!((r.reaction, r.chat_mid, r.paid), (None, None, None));
+        let Some(TalkEvent::Reaction(r)) = ev(tv!({"type": 140, "param1": "1",
+            "param2": r#"{"curr":{"paidReactionType":{"productId":"p1","emojiId":"007","resourceType":2,"version":4}}}"#}))
+        else {
+            panic!("not a reaction")
+        };
+        assert_eq!(r.reaction, None);
+        let paid = r.paid.unwrap();
+        assert_eq!(
+            (
+                paid.product_id.as_str(),
+                paid.emoji_id.as_str(),
+                paid.animated,
+                paid.version
+            ),
+            ("p1", "007", true, 4)
+        );
+        assert!(
+            paid.image_url()
+                .ends_with("/p1/sticon/android/007_animation.png?v=4")
+        );
+        // Numbered fields, as a schema without field 2 decoded them.
+        let numbered =
+            PaidReaction::from_json(&serde_json::json!({"1": "p2", "2": "001", "3": 1})).unwrap();
+        assert_eq!((numbered.animated, numbered.version), (false, 1));
+        assert!(PaidReaction::from_json(&serde_json::Value::Null).is_none());
         assert_eq!(
             ev(tv!({"type": 65, "param1": "c1", "param2": "100"})),
             Some(TalkEvent::Unsend {
@@ -564,6 +730,151 @@ mod tests {
         );
         assert_eq!(ev(tv!({"type": 25})), None);
         assert_eq!(ev(tv!({"type": 9999})), None);
+    }
+
+    #[test]
+    fn classifies_chat_list_and_membership_ops() {
+        let ev = |v: Value| TalkEvent::from_operation(&v);
+        let s = |v: &str| v.to_string();
+        // 61 = NOTIFIED_LEAVE_CHAT
+        assert_eq!(
+            ev(tv!({"type": 61, "param1": "c1", "param2": "u2"})),
+            Some(TalkEvent::Leave {
+                chat_mid: s("c1"),
+                mid: s("u2")
+            })
+        );
+        // 127 = DELETE_SELF_FROM_CHAT
+        assert_eq!(
+            ev(tv!({"type": 127, "param1": "c1"})),
+            Some(TalkEvent::LeftChat { chat_mid: s("c1") })
+        );
+        // 121 = UPDATE_CHAT, 122 = NOTIFIED_UPDATE_CHAT
+        assert_eq!(
+            ev(tv!({"type": 121, "param1": "c1", "param2": "u1", "param3": "1"})),
+            Some(TalkEvent::ChatUpdated {
+                chat_mid: s("c1"),
+                by_me: true,
+                param2: s("u1"),
+                param3: s("1")
+            })
+        );
+        assert!(matches!(
+            ev(tv!({"type": "NOTIFIED_UPDATE_CHAT", "param1": "c1"})),
+            Some(TalkEvent::ChatUpdated { by_me: false, ref chat_mid, .. }) if chat_mid == "c1"
+        ));
+        // 41 = SEND_CHAT_REMOVED
+        assert_eq!(
+            ev(tv!({"type": 41, "param1": "u3", "param2": "200"})),
+            Some(TalkEvent::ChatRemoved {
+                chat_mid: s("u3"),
+                last_message_id: s("200")
+            })
+        );
+        // 155/156 = (NOTIFIED_)UPDATE_MESSAGE_REQUEST_BOX
+        assert_eq!(
+            ev(tv!({"type": 156, "param1": "u4", "param2": "1"})),
+            Some(TalkEvent::MessageRequestBox {
+                chat_mid: s("u4"),
+                in_box: true,
+                by_me: false
+            })
+        );
+        assert_eq!(
+            ev(tv!({"type": "UPDATE_MESSAGE_REQUEST_BOX", "param1": "u4", "param2": "0"})),
+            Some(TalkEvent::MessageRequestBox {
+                chat_mid: s("u4"),
+                in_box: false,
+                by_me: true
+            })
+        );
+        assert_eq!(ev(tv!({"type": 156, "param1": "u4", "param2": "x"})), None);
+        assert_eq!(ev(tv!({"type": 156, "param2": "1"})), None);
+        // 77 = NOTIFIED_E2EE_KEY_UPDATE, 72 = REGISTER_E2EE_PUBLICKEY
+        assert_eq!(
+            ev(tv!({"type": 77})),
+            Some(TalkEvent::E2eeKeysChanged {
+                op: crate::e2ee::E2eeOpKind::KeyUpdate
+            })
+        );
+        assert!(matches!(
+            ev(tv!({"type": 72})),
+            Some(TalkEvent::E2eeKeysChanged { .. })
+        ));
+        // 73 = NOTIFIED_E2EE_KEY_EXCHANGE_REQ: not a key change by itself.
+        assert_eq!(ev(tv!({"type": 73})), None);
+        // 137 = SEND_CHAT_HIDDEN
+        assert_eq!(
+            ev(tv!({"type": 137, "param1": "c1", "param2": "300", "param3": "1"})),
+            Some(TalkEvent::ChatHidden {
+                chat_mid: s("c1"),
+                last_message_id: s("300"),
+                hidden: true
+            })
+        );
+        assert_eq!(
+            ev(tv!({"type": 137, "param1": "c1", "param2": "300", "param3": "0"})),
+            Some(TalkEvent::ChatHidden {
+                chat_mid: s("c1"),
+                last_message_id: s("300"),
+                hidden: false
+            })
+        );
+        assert_eq!(ev(tv!({"type": 137, "param1": "c1", "param3": "x"})), None);
+        // 46 = REMOVE_ALL_MESSAGES
+        assert_eq!(
+            ev(tv!({"type": 46, "param1": "a"})),
+            Some(TalkEvent::AllMessagesRemoved)
+        );
+    }
+
+    #[tokio::test]
+    async fn undecryptable_message_is_delivered_and_logged() {
+        let c = client();
+        let (mut rx, mut base_rx) = (c.subscribe(), c.base.subscribe());
+        let mut message = tv!({"id": "9", "from": "u-them", "to": "u-self", "toType": "USER", "contentType": "NONE"});
+        message.insert(
+            "contentMetadata",
+            Value::Map(vec![("e2eeVersion".into(), "2".into())]),
+        );
+        message.insert(
+            "chunks",
+            Value::List(vec![
+                Value::Binary(vec![1; 16]),
+                Value::Binary(vec![2; 32]),
+                Value::Binary(vec![3; 12]),
+                Value::Binary(vec![0, 0, 0, 7]),
+                Value::Binary(vec![0, 0, 0, 8]),
+            ]),
+        );
+        let mut op = tv!({"type": "RECEIVE_MESSAGE"});
+        op.insert("message", message);
+        let talk = futures::stream::iter(vec![Ok(op)]).boxed();
+        c.listen_with(Some(talk), None).join().await;
+        let delivered: Vec<_> = drain(&mut rx)
+            .into_iter()
+            .filter_map(|e| match e {
+                ClientEvent::Message(m) => Some(m),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(delivered.len(), 1);
+        assert!(crate::e2ee::is_undecrypted(&delivered[0].raw));
+        assert!(logs(&mut base_rx).contains(&"e2ee".to_string()));
+    }
+
+    #[tokio::test]
+    async fn key_change_forgets_unresolvable_keys() {
+        let c = client();
+        let talk =
+            futures::stream::iter(vec![Ok(tv!({"type": "NOTIFIED_E2EE_KEY_UPDATE"}))]).boxed();
+        let mut rx = c.subscribe();
+        c.listen_with(Some(talk), None).join().await;
+        assert!(
+            drain(&mut rx)
+                .iter()
+                .any(|e| matches!(e, ClientEvent::Talk(TalkEvent::E2eeKeysChanged { .. })))
+        );
     }
 
     #[tokio::test]

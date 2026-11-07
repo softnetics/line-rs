@@ -15,7 +15,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use crate::base::{BaseClient, ClientEvent};
 use crate::device::Device;
 use crate::e2ee;
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorCode, Result};
 use crate::request::auth_token::parse_auth_token_input;
 use crate::request::{Parse, RequestOptions};
 use crate::thrift::{Protocol, TValue, Value};
@@ -171,6 +171,138 @@ pub fn is_valid_password(pw: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || "!@#$%^&*()_+-=[]{};':\"\\|,.<>/?".contains(c))
 }
 
+/// Check the E2EE key chain of a login response before it is used, as
+/// LINE for Android does (`p95/w0.java`).
+///
+/// `info` is the response's E2EE metadata (`metaData` of
+/// `qrCodeLoginV2ForSecure`, the `/LF1` `metadata`): a map, or JSON text.
+///
+/// * `errorCode = E2EE_INVALID_VERSION` (the phone can't share keys with
+///   this E2EE version) fails as an [`Error::Request`] from `method` and
+///   `path` whose [`Error::error_code`] is
+///   [`ErrorCode::E2eeInvalidVersion`](crate::error::ErrorCode::E2eeInvalidVersion).
+/// * `hashKeyChain` must equal `AES-ECB(sha256(shared ‖ "Key"),
+///   xor(sha256(encryptedKeyChain)))`, with `shared` the X25519 secret of
+///   `secret` and `publicKey`. A mismatch fails with [`Error::Crypto`]
+///   (so [`Error::is_e2ee`] is true) and the key chain is not used.
+///
+/// A response without a key chain, or without `hashKeyChain` (older
+/// flows), passes.
+pub(crate) fn check_login_key_chain(
+    info: &Value,
+    secret: &[u8],
+    method: &str,
+    path: &str,
+) -> Result<()> {
+    let parsed;
+    let meta = match info {
+        Value::String(text) => match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(v) => {
+                parsed = Value::from(v);
+                &parsed
+            }
+            Err(_) => return Ok(()),
+        },
+        v => v,
+    };
+    let error_code = match &meta["errorCode"] {
+        Value::Int(n) => Some(ErrorCode::from_number(*n)),
+        v => v.as_str().map(ErrorCode::parse),
+    };
+    if error_code == Some(ErrorCode::E2eeInvalidVersion) {
+        return Err(Error::Request {
+            method: method.to_string(),
+            path: path.to_string(),
+            data: crate::tv!({
+                "code": "E2EE_INVALID_VERSION",
+                "reason": "the phone cannot share Letter Sealing keys with this E2EE version",
+            }),
+        });
+    }
+    let bytes = |v: &Value| match v {
+        Value::String(s) => e2ee::crypto::decode_base64(s),
+        Value::Binary(b) => b.clone(),
+        _ => Vec::new(),
+    };
+    let chain = bytes(&meta["encryptedKeyChain"]);
+    let hash = bytes(&meta["hashKeyChain"]);
+    if chain.is_empty() || hash.is_empty() {
+        return Ok(());
+    }
+    let public_key = bytes(&meta["publicKey"]);
+    let expected = e2ee::crypto::encrypt_device_secret(&public_key, secret, &chain);
+    if expected != hash {
+        return Err(Error::Crypto(
+            "E2EE login key chain failed its hashKeyChain check; it was not used".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// `LoginRequest` for `loginZ` / `loginV2`, with the fields LINE for
+/// Android sets (`r95/a.java` `c()`): `keepLoggedIn = true` and the device
+/// name as both `systemName` and `modelName`.
+#[allow(clippy::too_many_arguments)]
+fn login_request(
+    provider: IdentityProvider,
+    keynm: &str,
+    encrypted: &str,
+    verifier: Option<&str>,
+    secret: Option<&[u8]>,
+    cert: Option<&str>,
+    device_name: &str,
+) -> Vec<(i16, TValue)> {
+    let login_type = if verifier.is_some() {
+        1
+    } else if secret.is_some() {
+        2
+    } else {
+        0
+    };
+    let mut req = vec![
+        (1, TValue::I32(login_type)),
+        (2, TValue::I32(provider.as_i32())),
+        (3, s(keynm)),
+        (4, s(encrypted)),
+        (5, TValue::Bool(true)),
+        (6, s("")),
+        (7, s(device_name)),
+    ];
+    if let Some(c) = cert {
+        req.push((8, s(c)));
+    }
+    if let Some(v) = verifier {
+        req.push((9, s(v)));
+    }
+    if let Some(sec) = secret {
+        req.push((10, TValue::Binary(sec.to_vec())));
+    }
+    req.push((11, TValue::I32(1)));
+    req.push((12, s(device_name)));
+    req
+}
+
+/// `qrCodeLoginV2ForSecure` arguments: `{1 authSessionId, 2 systemName,
+/// 3 modelName, 4 autoLoginIsRequired, 5 nonce}`.
+fn qr_login_v2_for_secure_args(
+    sqr: &str,
+    nonce: &str,
+    model_name: &str,
+    system_name: &str,
+    auto_login: bool,
+) -> Vec<(i16, TValue)> {
+    vec![(
+        1,
+        TValue::Struct(vec![
+            (1, s(sqr)),
+            (2, s(system_name)),
+            (3, s(model_name)),
+            (4, TValue::Bool(auto_login)),
+            (5, s(nonce)),
+        ]),
+    )]
+}
+
 impl BaseClient {
     /// Log in and fetch the profile (emits `Ready`).
     pub async fn login(&self, option: LoginOption) -> Result<()> {
@@ -290,7 +422,8 @@ impl BaseClient {
             self.emit(ClientEvent::UpdateQrCert(pem.to_string()));
             self.register_qr_cert(pem).await?;
         }
-        self.finish_e2ee_login(&res["4"], &secret).await?;
+        self.finish_e2ee_login(&res["4"], &secret, "qrCodeLogin")
+            .await?;
         res["2"]
             .as_str()
             .map(str::to_string)
@@ -318,8 +451,9 @@ impl BaseClient {
             ));
         }
         self.verify_cert_or_pin(&sqr, max_count, interval).await?;
+        let name = self.device_details.device_name.clone();
         let res = self
-            .qr_code_login_v2_for_secure(&sqr, &nonce, "evex-device", "linejs-v2", true)
+            .qr_code_login_v2_for_secure(&sqr, &nonce, &name, &name, true)
             .await?;
         if let Some(pem) = res["1"].as_str() {
             self.emit(ClientEvent::UpdateQrCert(pem.to_string()));
@@ -330,7 +464,8 @@ impl BaseClient {
         } else {
             res["10"].clone()
         };
-        self.finish_e2ee_login(&e2ee_info, &secret).await?;
+        self.finish_e2ee_login(&e2ee_info, &secret, "qrCodeLoginV2ForSecure")
+            .await?;
         let token_info = &res["3"];
         self.store_v3_token(token_info).await?;
         token_info["1"].as_str().map(str::to_string).ok_or_else(|| {
@@ -353,9 +488,15 @@ impl BaseClient {
         Ok(())
     }
 
-    async fn finish_e2ee_login(&self, e2ee_info: &Value, secret: &[u8]) -> Result<()> {
+    async fn finish_e2ee_login(
+        &self,
+        e2ee_info: &Value,
+        secret: &[u8],
+        method: &str,
+    ) -> Result<()> {
         let mut decoded = None;
         if !e2ee_info.is_null() {
+            check_login_key_chain(e2ee_info, secret, method, SQR_PATH)?;
             decoded = self.decode_e2ee_key_v1(e2ee_info, secret).await?;
         }
         if decoded.is_none() {
@@ -364,13 +505,24 @@ impl BaseClient {
         Ok(())
     }
 
-    /// Persist `refreshToken` and `expire` from a raw `TokenV3IssueResult`.
+    /// Persist `refreshToken`, `expire` and the refresh retry policy from a
+    /// raw `TokenV3IssueResult`.
+    ///
+    /// The Android app keeps `refreshApiRetryPolicy` (field 4) with the
+    /// tokens (`r95/f.java:139-158`) and backs off by it when the first
+    /// refresh fails; it is stored where later refreshes keep theirs
+    /// ([`REFRESH_RETRY_POLICY_KEY`](crate::request::REFRESH_RETRY_POLICY_KEY)).
     async fn store_v3_token(&self, token_info: &Value) -> Result<()> {
         if let Some(rt) = token_info["2"].as_str() {
             self.storage.set("refreshToken", rt.into()).await?;
         }
         if let (Some(a), Some(b)) = (token_info["3"].as_i64(), token_info["6"].as_i64()) {
             self.set_token_expire(a + b).await?;
+        }
+        if let Some(policy) = retry_policy_json(&token_info["4"]) {
+            self.storage
+                .set(crate::request::REFRESH_RETRY_POLICY_KEY, policy)
+                .await?;
         }
         Ok(())
     }
@@ -562,6 +714,12 @@ impl BaseClient {
             .get_json("/LF1", self.verifier_headers(verifier))
             .await?;
         let meta = info["result"]["metadata"].clone();
+        check_login_key_chain(
+            &Value::from(meta.clone()),
+            secret,
+            "confirmE2EELogin",
+            "/LF1",
+        )?;
         self.decode_e2ee_key_v1(&Value::from(meta.clone()), secret)
             .await?;
         let pk = B64
@@ -596,33 +754,15 @@ impl BaseClient {
         cert: Option<&str>,
         method: &str,
     ) -> Result<Value> {
-        let login_type = if verifier.is_some() {
-            1
-        } else if secret.is_some() {
-            2
-        } else {
-            0
-        };
-        let mut req = vec![
-            (1, TValue::I32(login_type)),
-            (2, TValue::I32(provider.as_i32())),
-            (3, s(keynm)),
-            (4, s(encrypted)),
-            (5, TValue::Bool(false)),
-            (6, s("")),
-            (7, s(self.device.as_str())),
-        ];
-        if let Some(c) = cert {
-            req.push((8, s(c)));
-        }
-        if let Some(v) = verifier {
-            req.push((9, s(v)));
-        }
-        if let Some(sec) = secret {
-            req.push((10, TValue::Binary(sec.to_vec())));
-        }
-        req.push((11, TValue::I32(1)));
-        req.push((12, s("System Product Name")));
+        let req = login_request(
+            provider,
+            keynm,
+            encrypted,
+            verifier,
+            secret,
+            cert,
+            &self.device_details.device_name,
+        );
         let parse = if method == "loginZ" {
             Parse::Struct("LoginResult")
         } else {
@@ -785,16 +925,7 @@ impl BaseClient {
         auto_login: bool,
     ) -> Result<Value> {
         self.request(
-            vec![(
-                1,
-                TValue::Struct(vec![
-                    (1, s(sqr)),
-                    (2, s(system_name)),
-                    (3, s(model_name)),
-                    (4, TValue::Bool(auto_login)),
-                    (5, s(nonce)),
-                ]),
-            )],
+            qr_login_v2_for_secure_args(sqr, nonce, model_name, system_name, auto_login),
             "qrCodeLoginV2ForSecure",
             self.sqr_opts(SQR_PATH),
         )
@@ -849,9 +980,64 @@ impl BaseClient {
     }
 }
 
+/// A raw `RefreshApiRetryPolicy` (`1 initialDelayInMillis, 2
+/// maxDelayInMillis, 3 multiplier, 4 jitterRate`; named fields are read
+/// too) as the JSON a refresh's `retryPolicy` is stored as. `None` when the
+/// login carried none.
+fn retry_policy_json(v: &Value) -> Option<serde_json::Value> {
+    let get = |name: &str, id: &str| match v.get(name) {
+        Some(x) if !x.is_null() => Some(x.to_json()),
+        _ => v.get(id).filter(|x| !x.is_null()).map(Value::to_json),
+    };
+    let fields = [
+        ("initialDelayInMillis", "1"),
+        ("maxDelayInMillis", "2"),
+        ("multiplier", "3"),
+        ("jitterRate", "4"),
+    ];
+    let mut out = serde_json::Map::new();
+    for (name, id) in fields {
+        if let Some(x) = get(name, id) {
+            out.insert(name.into(), x);
+        }
+    }
+    (!out.is_empty()).then_some(serde_json::Value::Object(out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn login_keeps_the_refresh_retry_policy() {
+        let c = BaseClient::new(crate::device::Device::Android).unwrap();
+        let mut policy = crate::tv!({"1": 2000, "2": 30000});
+        policy.insert("3", Value::Double(2.0));
+        policy.insert("4", Value::Double(0.2));
+        let mut token = crate::tv!({"1": "A", "2": "R", "3": 3600, "6": 100});
+        token.insert("4", policy);
+        c.store_v3_token(&token).await.unwrap();
+        let stored = c
+            .storage
+            .get(crate::request::REFRESH_RETRY_POLICY_KEY)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored,
+            serde_json::json!({"initialDelayInMillis": 2000, "maxDelayInMillis": 30000, "multiplier": 2.0, "jitterRate": 0.2})
+        );
+        // Without one, nothing is stored (the defaults apply).
+        let c = BaseClient::new(crate::device::Device::Android).unwrap();
+        c.store_v3_token(&crate::tv!({"2": "R"})).await.unwrap();
+        assert!(
+            c.storage
+                .get(crate::request::REFRESH_RETRY_POLICY_KEY)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[test]
     fn validators() {
@@ -885,5 +1071,105 @@ mod tests {
             registration_auth_endpoint(Device::DesktopWin),
             "/api/v3p/rs"
         );
+    }
+
+    fn field(fields: &[(i16, TValue)], id: i16) -> Option<&TValue> {
+        fields.iter().find(|(f, _)| *f == id).map(|(_, v)| v)
+    }
+
+    #[test]
+    fn login_request_names_the_device_and_keeps_logged_in() {
+        let req = login_request(
+            IdentityProvider::Line,
+            "keynm",
+            "enc",
+            None,
+            Some(b"secret"),
+            None,
+            "MacBookPro18,3",
+        );
+        assert_eq!(field(&req, 1), Some(&TValue::I32(2)));
+        assert_eq!(field(&req, 5), Some(&TValue::Bool(true)));
+        assert_eq!(field(&req, 7), Some(&s("MacBookPro18,3")));
+        assert_eq!(field(&req, 12), Some(&s("MacBookPro18,3")));
+        assert_eq!(field(&req, 8), None);
+        let with_verifier = login_request(
+            IdentityProvider::LinePhone,
+            "k",
+            "e",
+            Some("v"),
+            None,
+            Some("cert"),
+            "PC",
+        );
+        assert_eq!(field(&with_verifier, 1), Some(&TValue::I32(1)));
+        assert_eq!(field(&with_verifier, 2), Some(&TValue::I32(3)));
+        assert_eq!(field(&with_verifier, 8), Some(&s("cert")));
+        assert_eq!(field(&with_verifier, 9), Some(&s("v")));
+    }
+
+    #[test]
+    fn qr_login_v2_for_secure_sends_the_device_name() {
+        let base = BaseClient::builder(Device::DesktopMac)
+            .device_name("Test Mac")
+            .build()
+            .unwrap();
+        let name = &base.device_details.device_name;
+        let args = qr_login_v2_for_secure_args("sqr", "nonce", name, name, true);
+        let Some(TValue::Struct(req)) = field(&args, 1) else {
+            panic!("no request struct");
+        };
+        assert_eq!(field(req, 1), Some(&s("sqr")));
+        assert_eq!(field(req, 2), Some(&s("Test Mac")));
+        assert_eq!(field(req, 3), Some(&s("Test Mac")));
+        assert_eq!(field(req, 4), Some(&TValue::Bool(true)));
+        assert_eq!(field(req, 5), Some(&s("nonce")));
+    }
+
+    #[test]
+    fn login_key_chain_hash_is_checked() {
+        use crate::e2ee::crypto::{encrypt_device_secret, generate_key_pair};
+        let (secret, our_public) = generate_key_pair();
+        let (phone_private, phone_public) = generate_key_pair();
+        let chain = vec![7u8; 48];
+        // The phone hashes the chain with its own private key and our
+        // public key; the shared secret is the same.
+        let hash = encrypt_device_secret(&our_public, &phone_private, &chain);
+        let meta = |hash: &[u8]| {
+            let mut m = Value::object();
+            m.insert("encryptedKeyChain", B64.encode(&chain));
+            m.insert("publicKey", B64.encode(&phone_public));
+            m.insert("hashKeyChain", B64.encode(hash));
+            m
+        };
+        assert!(check_login_key_chain(&meta(&hash), &secret, "m", SQR_PATH).is_ok());
+
+        let mut bad = hash.clone();
+        bad[0] ^= 1;
+        let err = check_login_key_chain(&meta(&bad), &secret, "m", SQR_PATH).unwrap_err();
+        assert!(matches!(err, Error::Crypto(_)) && err.is_e2ee(), "{err}");
+
+        // The same check on a JSON-text metadata.
+        let json = Value::String(meta(&bad).to_json().to_string());
+        assert!(check_login_key_chain(&json, &secret, "m", SQR_PATH).is_err());
+
+        // Without hashKeyChain (older flows) or a key chain, nothing to check.
+        let mut no_hash = Value::object();
+        no_hash.insert("encryptedKeyChain", B64.encode(&chain));
+        assert!(check_login_key_chain(&no_hash, &secret, "m", SQR_PATH).is_ok());
+        assert!(check_login_key_chain(&Value::object(), &secret, "m", SQR_PATH).is_ok());
+    }
+
+    #[test]
+    fn login_e2ee_invalid_version_is_a_typed_error() {
+        let mut meta = Value::object();
+        meta.insert("errorCode", "E2EE_INVALID_VERSION");
+        let err =
+            check_login_key_chain(&meta, &[0; 32], "qrCodeLoginV2ForSecure", SQR_PATH).unwrap_err();
+        assert_eq!(err.error_code(), Some(ErrorCode::E2eeInvalidVersion));
+        assert!(err.is_e2ee() && !err.is_auth_dead());
+        let mut numeric = Value::object();
+        numeric.insert("errorCode", 86);
+        assert!(check_login_key_chain(&numeric, &[0; 32], "m", SQR_PATH).is_err());
     }
 }

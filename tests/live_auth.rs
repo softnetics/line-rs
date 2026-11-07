@@ -989,8 +989,9 @@ mod e2ee {
 mod session {
     use super::*;
 
-    /// Mark the stored token as expired and check the next call refreshes
-    /// it first. Only V3 tokens (with a stored `refreshToken`) can refresh.
+    /// Mark the stored token as expired and check the next call starts a
+    /// background refresh. Only V3 tokens (with a stored `refreshToken`)
+    /// can refresh.
     #[test]
     #[ignore = "hits the real LINE server with a test account"]
     fn proactive_refresh() {
@@ -1017,6 +1018,11 @@ mod session {
                 .call("getProfile", tv!({"syncReason": "INTERNAL"}))
                 .await
                 .unwrap_or_else(|e| panic!("getProfile after forcing expiry: {e}"));
+            // The refresh runs in the background; wait for it.
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while c.auth_token() == before && Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
             let expire = c
                 .base
                 .token_expire()

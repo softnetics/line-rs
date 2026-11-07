@@ -4,13 +4,13 @@
 mod events;
 mod session;
 
-pub use events::ClientEvent;
+pub use events::{ClientEvent, EVENT_CAPACITY};
 pub(crate) use session::now_epoch_sec as session_now;
 pub use session::{LEGY_BACKUP_HOST, LEGY_HOST, LogoutReason, ProxyConfig};
 
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
@@ -41,22 +41,36 @@ pub struct Config {
     pub timeout: Duration,
     /// Long-poll timeout (default 180s).
     pub long_timeout: Duration,
-    /// Refresh a v3 access token before sending a request once the stored
-    /// `expire` (issue time + `durationUntilRefreshInSec`) is within
-    /// `refresh_margin` (default on).
+    /// How long a media download may wait for its response or for the
+    /// next part of the body (default 30s). Downloads have no total limit,
+    /// so a large video on a slow line still finishes.
+    pub download_idle_timeout: Duration,
+    /// Refresh a v3 access token in the background once the stored
+    /// `expire` (issue time + `durationUntilRefreshInSec`, minus
+    /// `refresh_margin`) has passed, like the Android app
+    /// (`fa0/f0.java`): the request that notices goes out with the current
+    /// token, later requests use the new one. Default on. With it off the
+    /// token is only refreshed after the server answers
+    /// `MUST_REFRESH_V3_TOKEN`.
     pub proactive_refresh: bool,
-    /// How long before `expire` to refresh (default 60s).
+    /// How long before `expire` to refresh (default 0: `expire` already
+    /// lies before the token's real expiry).
     pub refresh_margin: Duration,
-    /// Call `reportRefreshedAccessToken` after a refresh (best effort,
-    /// default on).
+    /// Call `reportRefreshedAccessToken` after a refresh, in the background
+    /// and with retries (best effort, default on, as the Android app does).
     pub report_refreshed_token: bool,
     /// Adopt the token in an `X-Line-Next-Access` response header (default
-    /// on).
+    /// off: the Android app does not read this header). Off, the header is
+    /// ignored; on, the new token is used and reported as
+    /// [`ClientEvent::UpdateAuthToken`].
     pub apply_next_access: bool,
-    /// Recover from E2EE `sendMessage` errors the way the macOS client does
-    /// (re-encrypt, recreate group key, plain fallback; see
-    /// [`crate::e2ee::send_recovery`]). Off by default: linejs only retries
-    /// once with encryption when `e2ee` was unset.
+    /// Recover from `E2EE_*` `sendMessage` errors the way LINE for Android
+    /// does: look the chat's key up again and re-encrypt, recreate the group
+    /// key, reload our key, or send plain (see
+    /// [`crate::e2ee::send_recovery`] and
+    /// [`BaseClient::send_with_e2ee_recovery`]). Default on. Off, the only
+    /// retry is the linejs one: a plain message refused with an `E2EE*`
+    /// code is sent once more encrypted.
     pub e2ee_send_recovery: bool,
     /// `x-lal` on every request, e.g. `th_TH`. LINE writes the text it
     /// generates (event cards, system messages, errors) in this language.
@@ -69,13 +83,12 @@ impl Default for Config {
         Self {
             timeout: Duration::from_secs(30),
             long_timeout: Duration::from_secs(180),
-            // Off by default to match linejs, which only refreshes after
-            // MUST_REFRESH_V3_TOKEN and never adopts X-Line-Next-Access.
-            proactive_refresh: false,
-            refresh_margin: Duration::from_secs(60),
-            report_refreshed_token: false,
+            download_idle_timeout: Duration::from_secs(30),
+            proactive_refresh: true,
+            refresh_margin: Duration::ZERO,
+            report_refreshed_token: true,
             apply_next_access: false,
-            e2ee_send_recovery: false,
+            e2ee_send_recovery: true,
             language: "th_TH".to_string(),
         }
     }
@@ -93,9 +106,18 @@ pub struct ClientBuilder {
     legy_mode: LegyMode,
     legy_endpoint: Option<String>,
     config: Config,
+    device_name: Option<String>,
 }
 
 impl ClientBuilder {
+    /// The device's name LINE shows in the phone's list of logged-in
+    /// devices, sent at login as `modelName` and `systemName`. Default:
+    /// [`default_device_name`](crate::device::default_device_name), the
+    /// computer's model.
+    pub fn device_name(mut self, name: impl Into<String>) -> Self {
+        self.device_name = Some(name.into());
+        self
+    }
     /// LINE app version to emulate.
     pub fn version(mut self, v: impl Into<String>) -> Self {
         self.version = Some(v.into());
@@ -177,9 +199,13 @@ impl ClientBuilder {
             (None, None) => vec![LEGY_BACKUP_HOST.to_string()],
             (None, Some(_)) => Vec::new(),
         };
-        let (events, _) = broadcast::channel(256);
+        let (events, _) = broadcast::channel(EVENT_CAPACITY);
+        let mut device_details = self.device.details(self.version.as_deref());
+        if let Some(name) = self.device_name {
+            device_details.device_name = name;
+        }
         Ok(BaseClient(Arc::new(Inner {
-            device_details: self.device.details(self.version.as_deref()),
+            device_details,
             device: self.device,
             endpoint: self.endpoint.unwrap_or_else(|| LEGY_HOST.into()),
             backup_endpoints,
@@ -202,9 +228,15 @@ impl ClientBuilder {
             kicked_out: RwLock::new(None),
             token_expire: RwLock::new(None),
             refresh_lock: Mutex::new(()),
+            refresh_running: AtomicBool::new(false),
+            refresh_not_before: AtomicI64::new(0),
             e2ee: E2eeState::default(),
+            obs_state: Default::default(),
             sync: Mutex::new(SyncData::default()),
+            sync_loaded: AtomicBool::new(false),
+            sync_saved: Mutex::new(None),
             push: crate::push::PushState::default(),
+            calendar_token: Mutex::new(None),
         })))
     }
 }
@@ -241,9 +273,21 @@ pub struct Inner {
     /// Cached `expire` (`None` = not loaded from storage yet).
     token_expire: RwLock<Option<Option<i64>>>,
     pub(crate) refresh_lock: Mutex<()>,
+    /// A background (proactive) refresh is running.
+    pub(crate) refresh_running: AtomicBool,
+    /// No proactive refresh before this Unix time (after a failed one).
+    pub(crate) refresh_not_before: AtomicI64,
     pub(crate) e2ee: E2eeState,
+    /// OBS access token and per-chat media flows.
+    pub(crate) obs_state: crate::obs::ObsState,
     pub(crate) sync: Mutex<SyncData>,
+    /// Whether `sync` was restored from storage or set by the caller.
+    pub(crate) sync_loaded: AtomicBool,
+    /// Last `SyncData` written to storage (skips identical writes).
+    pub(crate) sync_saved: Mutex<Option<SyncData>>,
     pub(crate) push: crate::push::PushState,
+    /// LINE Calendar channel token and its expiry (epoch ms).
+    pub(crate) calendar_token: Mutex<Option<(String, i64)>>,
 }
 
 impl Deref for BaseClient {
@@ -266,6 +310,7 @@ impl BaseClient {
             legy_mode: LegyMode::Auto,
             legy_endpoint: None,
             config: Config::default(),
+            device_name: None,
         }
     }
 
@@ -308,6 +353,14 @@ impl BaseClient {
 
     /// Subscribe to client events. Subscribe before calling login to see
     /// `QrCall`/`PinCall`.
+    ///
+    /// The channel keeps the last [`EVENT_CAPACITY`] events for each
+    /// receiver. A receiver that falls further behind gets
+    /// `Err(RecvError::Lagged(n))`: `n` events are lost to it and it goes on
+    /// with the oldest one still kept. Treat that like
+    /// [`ClientEvent::FullSyncRequired`] with `categories = [All]`: reload
+    /// what you show (chat list, recent messages), then keep receiving.
+    /// `Err(RecvError::Closed)` only happens when the client is dropped.
     pub fn subscribe(&self) -> broadcast::Receiver<ClientEvent> {
         self.events.subscribe()
     }
@@ -353,6 +406,13 @@ impl BaseClient {
         self.disable();
         self.emit(ClientEvent::KickedOut(reason));
         self.emit(ClientEvent::End(self.profile()));
+    }
+
+    /// Whether a server error made with this client's token means the
+    /// session is gone ([`LogoutReason::from_error_for`], with the extra
+    /// codes for secondary devices when this client is one).
+    pub fn logout_reason(&self, e: &Error) -> Option<LogoutReason> {
+        LogoutReason::from_error_for(e, session::is_secondary_device(self.device))
     }
 
     /// Host requests currently go to (primary or a backup after failover).

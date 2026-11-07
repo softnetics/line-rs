@@ -104,6 +104,65 @@ unsends, calls, group membership, contacts), `SquareMessage` and
 `SquareEvent`. `Client::listen` uses the push connection; set
 `ListenOptions { polling: true, .. }` to poll instead.
 
+### Logging in
+
+`client::login_with_qr`, `login_with_password` and `login_with_auth_token`
+take `InitOptions`. LINE shows the device's name in the phone's list of
+logged-in devices; set it with `InitOptions::device_name`:
+
+```rust
+let init = InitOptions::new(Device::DesktopMac).device_name("LAAB on MacBook Air");
+```
+
+Without one, line-rs sends the computer's model (`hw.model` on macOS, such
+as `Mac14,2`; the DMI product name on Linux), or `Mac`, `Windows PC` or
+`Linux PC`. Like LINE for Android, it sends the name as both `modelName`
+and `systemName` and asks to stay logged in (`keepLoggedIn`).
+
+QR and PIN logins check the Letter Sealing key chain against its
+`hashKeyChain` before using it, as the Android app does. A mismatch fails
+with an E2EE error; a phone that can't share keys with this E2EE version
+fails with `ErrorCode::E2eeInvalidVersion`.
+
+### Errors
+
+Every call returns `line_rs::Error`. Decide what to do with its helpers
+rather than its text, which can change:
+
+| Helper | True when | What an app usually does |
+|---|---|---|
+| `is_auth_dead()` | `AUTHENTICATION_FAILED`, `NOT_AUTHORIZED_DEVICE`, `NOT_AVAILABLE_USER`, a logout reason (`V3_TOKEN_CLIENT_LOGGED_OUT`, ...), a token refresh refused with `INVALID_REQUEST`, or the client was logged out | Show the login screen |
+| `is_network()` / `is_timeout()` | No connection, a timeout, or a dropped connection (found anywhere in the source chain) | Retry later, show "offline" |
+| `is_e2ee()` | An `E2EE_*` or `REFRESH_MEDIA_FLOW` code, a decrypt or self-check failure, missing keys | Explain Letter Sealing, suggest logging in again |
+| `is_rate_limited()` | HTTP 429, `EXCESSIVE_ACCESS`, `CONGESTION_CONTROL`, `ABUSE_BLOCK`, ... | Back off |
+| `is_server()` | HTTP 5xx, `INTERNAL_ERROR`, `SYSTEM_ERROR`, `SERVER_BUSY`, ... | Retry later |
+| `http_status()` | The status of a failed HTTP call (media, REST, push) | |
+| `error_code()` | The server's `TalkException` code as an `ErrorCode` | Match a specific case |
+
+```rust
+use line_rs::ErrorCode;
+
+match chat.send_message("hi").await {
+    Err(e) if e.is_auth_dead() => show_login(),
+    Err(e) if e.error_code() == Some(ErrorCode::NotAMember) => tell("you left this chat"),
+    Err(e) if e.is_network() => retry_later(),
+    Err(e) => tracing::warn!("send failed: {}", e.full_message()),
+    Ok(_) => {}
+}
+```
+
+`MUST_REFRESH_V3_TOKEN` is not `is_auth_dead()`: line-rs refreshes the
+token and retries once by itself, and a failed refresh returns the
+refresh's own error. `ErrorCode` covers the IDL's `ErrorCode` enum and the
+newer Android codes such as `MESSAGE_NOT_EDITABLE`; anything else is
+`ErrorCode::Unknown` with what the server sent. `Error::code()` still
+returns the raw name.
+
+reqwest leaves the cause out of its error message (a timeout reads only
+"error sending request for url"). `Display` follows the Rust convention
+and shows only the error's own message, so log `e.full_message()`, which
+adds every source error.
+
 ## What line-rs adds to LINEJS
 
 Compared with LINEJS at
@@ -111,15 +170,21 @@ Compared with LINEJS at
 
 Session handling:
 
-- Can refresh the v3 access token shortly before it expires, using the
-  cached expiry (set `Config::proactive_refresh`; it's off by default).
-  LINEJS refreshes only after the server answers `MUST_REFRESH_V3_TOKEN`,
-  which line-rs also handles.
+- Refreshes the v3 access token in the background once its refresh time
+  has passed, retries with the server's retry policy and reports the new
+  token, as the Android app does (`Config::proactive_refresh` and
+  `report_refreshed_token`, both on by default). LINEJS refreshes only
+  after the server answers `MUST_REFRESH_V3_TOKEN`, which line-rs also
+  handles.
 - Recognizes more logout reasons (`V3_TOKEN_CLIENT_LOGGED_OUT` and others,
   not only `NOT_AUTHORIZED_DEVICE`) and emits `ClientEvent::KickedOut`.
 - Fails over to the `legy-backup` host when a connection fails, and can go
   through an HTTP or SOCKS proxy.
 - Logs in with a phone number and password.
+- Typed errors: `ErrorCode` and `Error::is_auth_dead`, `is_network`,
+  `is_e2ee` and other helpers, so apps don't match error text.
+- Names the device honestly at login (`InitOptions::device_name`) and
+  checks the login key chain's hash, like LINE for Android.
 - The `link` module parses `line://` and `line.me/R/` links.
 
 Messaging:
@@ -129,10 +194,13 @@ Messaging:
   Sealing when the chat uses it. In LINEJS's client only OpenChat has these.
 - `ClientEvent::Talk` turns raw operations into typed events: read receipts,
   reactions, unsends, calls, group membership and contacts.
-- An encrypted send that the server rejects is retried up to 5 times, with
-  the fix the error asks for: re-encrypt with fresh keys, register a new
-  group key, or send in plain text when encryption wasn't forced. LINEJS
-  retries once with encryption on.
+- Text and locations are encrypted first when the chat uses Letter Sealing
+  for them, as LINE for Android does; the chat's state is looked up once
+  and stored. A send the server rejects with an `E2EE_*` code is tried up
+  to 3 times with the same `reqSeq`, with the fix the error asks for:
+  re-encrypt with fresh keys, register a new group key, reload our key, or
+  send in plain text when encryption wasn't forced. LINEJS sends plain
+  first and retries once with encryption on.
 - E2EE media v2 integrity checks (HMAC over 128 KiB chunks) and the E2EE key
   exchange calls.
 

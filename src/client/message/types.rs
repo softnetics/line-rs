@@ -211,6 +211,60 @@ pub struct ChatEventInfo {
     pub loc_args: Vec<String>,
 }
 
+/// A reaction with a LINE emoji (`ReactionType.paidReactionType`, field
+/// 2; LINE for Android `ts8/jf`, `ts8/ke`): the emoji's package and id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaidReaction {
+    pub product_id: String,
+    pub emoji_id: String,
+    /// `resourceType` is `ANIMATION` (2).
+    pub animated: bool,
+    /// Package version (default 1).
+    pub version: i64,
+}
+
+impl PaidReaction {
+    /// Read a `PaidReactionType` from JSON, with named fields (as
+    /// `to_json` and the reaction operation give them) or numbered ones.
+    pub fn from_json(v: &serde_json::Value) -> Option<Self> {
+        let field = |name: &str, n: &str| {
+            let f = &v[name];
+            if f.is_null() { &v[n] } else { f }
+        };
+        let text = |name: &str, n: &str| {
+            let f = field(name, n);
+            f.as_str()
+                .map(str::to_string)
+                .or_else(|| f.as_i64().map(|i| i.to_string()))
+                .filter(|s| !s.is_empty())
+        };
+        let kind = field("resourceType", "3");
+        Some(Self {
+            product_id: text("productId", "1")?,
+            emoji_id: text("emojiId", "2")?,
+            animated: kind.as_i64() == Some(2) || kind.as_str() == Some("ANIMATION"),
+            version: field("version", "4")
+                .as_i64()
+                .or_else(|| field("version", "4").as_str().and_then(|s| s.parse().ok()))
+                .unwrap_or(1),
+        })
+    }
+
+    /// The emoji's picture on the sticker CDN, at LINE for Android's path
+    /// (`ev5/m.java`; that paid reactions use it is unverified).
+    pub fn image_url(&self) -> String {
+        let file = if self.animated {
+            format!("{}_animation.png", self.emoji_id)
+        } else {
+            format!("{}.png", self.emoji_id)
+        };
+        format!(
+            "https://stickershop.line-scdn.net/sticonshop/v1/{}/sticon/android/{file}?v={}",
+            self.product_id, self.version
+        )
+    }
+}
+
 /// `MessageReactionType`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReactionType {
@@ -272,16 +326,5 @@ pub(crate) fn enum_name(v: &Value, enum_name: &str) -> Option<String> {
             .map(str::to_string)
             .or_else(|| Some(i.to_string())),
         _ => None,
-    }
-}
-
-/// Numeric value of an enum given by name or number.
-pub(crate) fn enum_value(v: &Value, enum_name: &str) -> Option<i32> {
-    match v {
-        Value::String(s) => Schema::line()
-            .get_enum(enum_name)
-            .and_then(|e| e.value_of(s))
-            .or_else(|| s.parse().ok()),
-        other => other.as_i64().map(|i| i as i32),
     }
 }

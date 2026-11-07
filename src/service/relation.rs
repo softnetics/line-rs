@@ -96,7 +96,10 @@ impl RelationService<'_> {
         .await
     }
 
-    /// Look up a contact by LINE ID (search id) or ticket.
+    /// Look up a user by LINE ID (search id). Returns a
+    /// `GetContactV3Response`: `targetUserMid`, `userType`,
+    /// `targetProfileDetail{profileName, picturePath, statusMessage}`,
+    /// `friendDetail` and `blockDetail`.
     pub async fn find_contact_by_search_id_or_ticket_v3(&self, search_id: &str) -> Result<Value> {
         let args = vec![(
             1,
@@ -108,7 +111,7 @@ impl RelationService<'_> {
         self.request(
             "findContactBySearchIdOrTicketV3",
             args,
-            Parse::Struct("Contact"),
+            Parse::Struct("GetContactV3Response"),
         )
         .await
     }
@@ -117,7 +120,7 @@ impl RelationService<'_> {
     pub async fn add_friend_by_user_id(&self, user_id: &str) -> Result<Value> {
         let contact = self.find_contact_by_search_id_or_ticket_v3(user_id).await?;
         self.add_friend_by_mid(AddFriendByMidOptions {
-            mid: contact["mid"].as_str().unwrap_or_default().to_string(),
+            mid: found_mid(&contact)?,
             reference: Some(r#"{"screen":"friendAdd:idSearch","spec":"native"}"#.into()),
             tracking_meta_type: 3,
             tracking_meta_hint: Some(user_id.into()),
@@ -125,18 +128,22 @@ impl RelationService<'_> {
         .await
     }
 
-    /// Look up a contact by phone number.
+    /// Look up a user by phone number (a `GetContactV3Response`).
     pub async fn find_contact_by_phone_v3(&self, phone: &str) -> Result<Value> {
         let args = vec![(1, TValue::Struct(vec![(1, TValue::string(phone))]))];
-        self.request("findContactByPhoneV3", args, Parse::Struct("Contact"))
-            .await
+        self.request(
+            "findContactByPhoneV3",
+            args,
+            Parse::Struct("GetContactV3Response"),
+        )
+        .await
     }
 
     /// Add a friend by phone number.
     pub async fn add_friend_by_phone(&self, phone: &str) -> Result<Value> {
         let contact = self.find_contact_by_phone_v3(phone).await?;
         self.add_friend_by_mid(AddFriendByMidOptions {
-            mid: contact["mid"].as_str().unwrap_or_default().to_string(),
+            mid: found_mid(&contact)?,
             reference: Some(r#"{"screen":"friendAdd:phoneSearch","spec":"native"}"#.into()),
             tracking_meta_type: 2,
             tracking_meta_hint: Some(phone.into()),
@@ -272,6 +279,44 @@ impl RelationService<'_> {
     }
 }
 
+/// The mid of a `GetContactV3Response`, or `NotFound`.
+fn found_mid(contact: &Value) -> Result<String> {
+    contact["targetUserMid"]
+        .as_str()
+        .filter(|m| !m.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| crate::error::Error::internal("NotFound", "no user with that id"))
+}
+
+/// Every id of a paged id list: `request(page_field)` until the response's
+/// `next_field` is empty. Stops after 100 pages.
+async fn all_ids<F, Fut>(
+    ids_field: &str,
+    next_field: &str,
+    page_field: &str,
+    mut call: F,
+) -> Result<Vec<String>>
+where
+    F: FnMut(Value) -> Fut,
+    Fut: std::future::Future<Output = Result<Value>>,
+{
+    let mut out = Vec::new();
+    let mut token: Option<String> = None;
+    for _ in 0..100 {
+        let res = call(page_request(page_field, token.as_deref())).await?;
+        out.extend(
+            crate::client::list(&res[ids_field])
+                .into_iter()
+                .filter_map(|v| v.as_str().map(str::to_string)),
+        );
+        match res[next_field].as_str().filter(|t| !t.is_empty()) {
+            Some(next) if token.as_deref() != Some(next) => token = Some(next.to_string()),
+            _ => break,
+        }
+    }
+    Ok(out)
+}
+
 /// Wraps a request struct as the single `request` argument.
 fn request_arg(req: Value) -> Value {
     let mut args = Value::object();
@@ -336,7 +381,7 @@ impl RelationService<'_> {
         self.request(
             "findContactBySearchIdOrTicketV3",
             args,
-            Parse::Struct("Contact"),
+            Parse::Struct("GetContactV3Response"),
         )
         .await
     }
@@ -368,6 +413,34 @@ impl RelationService<'_> {
             "getUserRecommendIds",
             page_request("userPageToken", page_token),
         )
+        .await
+    }
+
+    /// Every friend's mid (`getUserFriendIds`, all pages), as LINE for
+    /// Android reads its friend list (`lf3/c1.java`).
+    pub async fn all_user_friend_ids(&self) -> Result<Vec<String>> {
+        all_ids(
+            "userFriendMids",
+            "nextUserPageToken",
+            "userPageToken",
+            |a| self.call("getUserFriendIds", a),
+        )
+        .await
+    }
+
+    /// Every blocked user's mid (`getUserBlockIds`, all pages).
+    pub async fn all_user_block_ids(&self) -> Result<Vec<String>> {
+        all_ids("userMids", "nextUserPageToken", "userPageToken", |a| {
+            self.call("getUserBlockIds", a)
+        })
+        .await
+    }
+
+    /// Every official account the user added (`getBotFriendIds`, all pages).
+    pub async fn all_bot_friend_ids(&self) -> Result<Vec<String>> {
+        all_ids("botFriendMids", "nextBotPageToken", "botPageToken", |a| {
+            self.call("getBotFriendIds", a)
+        })
         .await
     }
 
@@ -412,6 +485,52 @@ mod tests {
     use super::*;
     use crate::service::test_util::{encode, path, s};
     use crate::thrift::{Schema, TType, decode_struct};
+
+    #[test]
+    fn find_contact_v3_reads_the_v3_response() {
+        // A reply as the server encodes it: GetContactV3Response, whose
+        // field 2 is the userType enum (it clashed with Contact.createdTime).
+        let reply = TValue::Struct(vec![
+            (1, s("u-found")),
+            (2, TValue::I32(1)),
+            (3, TValue::Struct(vec![(2, s("Name")), (3, s("/0hpic"))])),
+        ]);
+        let v = decode_struct(Schema::line(), Some("GetContactV3Response"), &reply);
+        assert_eq!(found_mid(&v).unwrap(), "u-found");
+        assert_eq!(v["userType"].as_str(), Some("USER"));
+        assert_eq!(
+            v["targetProfileDetail"]["profileName"].as_str(),
+            Some("Name")
+        );
+        assert!(found_mid(&crate::tv!({})).is_err());
+    }
+
+    #[tokio::test]
+    async fn all_ids_follows_page_tokens() {
+        let pages = std::sync::Mutex::new(vec![
+            crate::tv!({"userFriendMids": ["u3"]}),
+            crate::tv!({"userFriendMids": ["u1", "u2"], "nextUserPageToken": "t1"}),
+        ]);
+        let seen = std::sync::Mutex::new(Vec::new());
+        let ids = all_ids(
+            "userFriendMids",
+            "nextUserPageToken",
+            "userPageToken",
+            |args| {
+                seen.lock().unwrap().push(
+                    args["request"]["userPageToken"]
+                        .as_str()
+                        .map(str::to_string),
+                );
+                let page = pages.lock().unwrap().pop().unwrap();
+                async move { Ok(page) }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(ids, ["u1", "u2", "u3"]);
+        assert_eq!(*seen.lock().unwrap(), [None, Some("t1".to_string())]);
+    }
 
     #[test]
     fn friend_update_requests() {
