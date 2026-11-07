@@ -7632,6 +7632,7 @@ struct MessageBoxListRequest {
     5: bool withUnreadCount;
     6: i32 lastMessagesPerMessageBoxCount;
     7: bool unreadOnly;
+    8: i64 lastOpRevision;
 }
 
 struct MessageBoxV2MessageId {
@@ -9016,6 +9017,20 @@ struct Reaction {
 
 struct ReactionType {
     1: MessageReactionType predefinedReactionType;
+    2: PaidReactionType paidReactionType;
+}
+
+// A LINE emoji used as a reaction.
+struct PaidReactionType {
+    1: string productId;
+    2: string emojiId;
+    3: PaidReactionResourceType resourceType;
+    4: i64 version;
+}
+
+enum PaidReactionResourceType {
+    STATIC = 1;
+    ANIMATION = 2;
 }
 
 struct RecommendationDetail {

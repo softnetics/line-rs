@@ -1138,6 +1138,11 @@ pub async fn run_case(id: &str, ctx: &Ctx) -> R {
                 .call("getProfile", tv!({"syncReason": "INTERNAL"}))
                 .await
                 .map_err(e("getProfile after forcing expiry"))?;
+            // The refresh runs in the background; wait for it.
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while c.auth_token() == before && Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
             let expire = c.base.token_expire().await.map_err(e("token_expire"))?;
             // Never put the token itself in the result.
             ensure!(c.auth_token() != before, "token was not refreshed");

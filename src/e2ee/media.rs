@@ -12,6 +12,9 @@
 //!   then be checked on its own against a separate *hash object*
 //!   `SHA256(c0) ‖ SHA256(c1) ‖ … ‖ HMAC`, stored next to the media as
 //!   `<oid>__ud-hash`, so a download can be validated while it streams.
+//!   The object may also hold the digests alone, with the HMAC taken from
+//!   the media file's trailer; [`ChunkHashes::parse`] accepts
+//!   both.
 //!
 //! Derived from static RE of LINE macOS 26.5.0 (`CommLib::E2EEHMACHelper`,
 //! `E2EEChunkedHMACValidator`, `E2EEChunkValidator`, the `FileEncryption`
@@ -25,7 +28,9 @@ use base64::engine::general_purpose::STANDARD as B64;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 
-use super::crypto::{aes_ctr, derive_key_material, random_bytes};
+use ctr::cipher::{KeyIvInit, StreamCipher};
+
+use super::crypto::{Aes256Ctr32, aes_ctr, derive_key_material, random_bytes};
 use crate::error::{Error, Result};
 
 /// Size of a v2 ciphertext chunk (`0x20000` in the client).
@@ -163,6 +168,85 @@ pub fn decrypt_media(data: &[u8], key_material: &[u8]) -> Result<(Vec<u8>, Media
     Ok((plain, version))
 }
 
+/// Streaming [`decrypt_media`]: feed `ciphertext ‖ HMAC` in any split and
+/// get the plaintext back as it arrives, then [`finish`](Self::finish) to
+/// check the HMAC (v1 or v2). Memory stays at one chunk whatever the file
+/// size.
+///
+/// The plaintext is handed out before the HMAC is checked: if `finish`
+/// fails, throw away everything `update` returned.
+pub struct MediaDecryptor {
+    ctr: Aes256Ctr32,
+    v1: HmacSha256,
+    v2: HmacSha256,
+    pending: Vec<u8>,
+    tail: Vec<u8>,
+}
+
+impl MediaDecryptor {
+    pub fn new(key_material: &[u8]) -> Self {
+        let keys = derive_key_material(key_material);
+        Self {
+            ctr: Aes256Ctr32::new_from_slices(&keys.enc_key, &keys.nonce)
+                .expect("derived key/nonce sizes are valid"),
+            v1: hmac(&keys.mac_key),
+            v2: hmac(&keys.mac_key),
+            pending: Vec::new(),
+            tail: Vec::with_capacity(2 * MEDIA_HMAC_LEN),
+        }
+    }
+
+    /// Decrypt the next bytes of the file. The last 32 bytes seen are held
+    /// back as the HMAC, so the output may be shorter than the input.
+    pub fn update(&mut self, data: &[u8]) -> Vec<u8> {
+        let held = self.tail.len();
+        let total = held + data.len();
+        if total <= MEDIA_HMAC_LEN {
+            self.tail.extend_from_slice(data);
+            return Vec::new();
+        }
+        let release = total - MEDIA_HMAC_LEN;
+        let mut body = Vec::with_capacity(release);
+        let from_tail = release.min(held);
+        body.extend_from_slice(&self.tail[..from_tail]);
+        body.extend_from_slice(&data[..release - from_tail]);
+        self.tail.drain(..from_tail);
+        self.tail.extend_from_slice(&data[release - from_tail..]);
+
+        self.v1.update(&body);
+        self.pending.extend_from_slice(&body);
+        let full = self.pending.len() / MEDIA_CHUNK_SIZE * MEDIA_CHUNK_SIZE;
+        for c in self.pending[..full].chunks(MEDIA_CHUNK_SIZE) {
+            self.v2.update(&Sha256::digest(c));
+        }
+        self.pending.drain(..full);
+        self.ctr.apply_keystream(&mut body);
+        body
+    }
+
+    /// Check the trailing HMAC under either scheme and report which one
+    /// matched.
+    pub fn finish(mut self) -> Result<MediaHmacVersion> {
+        if self.tail.len() < MEDIA_HMAC_LEN {
+            return Err(media_error("encrypted data too short to contain HMAC"));
+        }
+        if self.v1.verify_slice(&self.tail).is_ok() {
+            return Ok(MediaHmacVersion::V1);
+        }
+        if !self.pending.is_empty() {
+            self.v2.update(&Sha256::digest(&self.pending));
+        }
+        self.v2
+            .verify_slice(&self.tail)
+            .map(|_| MediaHmacVersion::V2)
+            .map_err(|_| {
+                media_error(
+                    "HMAC verification failed: ciphertext was tampered with or keyMaterial is wrong",
+                )
+            })
+    }
+}
+
 /// Streaming v2 check of a downloaded file (`E2EEChunkedHMACValidator`):
 /// feed the raw bytes in any split, then [`finish`](Self::finish). The last
 /// 32 bytes seen are held back as the expected HMAC.
@@ -215,10 +299,39 @@ pub struct ChunkHashes {
 }
 
 impl ChunkHashes {
-    /// Parse `SHA256(c0) ‖ … ‖ HMAC` and check its HMAC
-    /// (`E2EEHMACHelper` over everything but the last 32 bytes).
-    pub fn parse(object: &[u8], mac_key: &[u8]) -> Result<Self> {
-        if object.len() < MEDIA_HMAC_LEN || !object.len().is_multiple_of(MEDIA_HMAC_LEN) {
+    /// Parse a `__ud-hash` object and check it against `mac_key`. Two
+    /// layouts are accepted:
+    ///
+    /// * `SHA256(c0) ‖ SHA256(c1) ‖ …`: the
+    ///   HMAC of the whole object must equal the media file's own trailing
+    ///   HMAC, `file_hmac`, fetched with a Range request for the last
+    ///   32 bytes.
+    /// * `SHA256(c0) ‖ … ‖ HMAC` (the HMAC over everything but the last
+    ///   32 bytes); when
+    ///   `file_hmac` is given it must match that trailer too.
+    pub fn parse(object: &[u8], mac_key: &[u8], file_hmac: Option<&[u8]>) -> Result<Self> {
+        if !object.len().is_multiple_of(MEDIA_HMAC_LEN) {
+            return Err(media_error(format!(
+                "invalid chunk hash object length {}",
+                object.len()
+            )));
+        }
+        let digests = |body: &[u8]| -> Vec<[u8; 32]> {
+            body.chunks(MEDIA_HMAC_LEN)
+                .map(|h| h.try_into().expect("exact 32-byte chunks"))
+                .collect()
+        };
+        if let Some(file_hmac) = file_hmac {
+            let mut mac = hmac(mac_key);
+            mac.update(object);
+            if mac.verify_slice(file_hmac).is_ok() {
+                return Ok(Self {
+                    hashes: digests(object),
+                    hmac: file_hmac.to_vec(),
+                });
+            }
+        }
+        if object.len() < MEDIA_HMAC_LEN {
             return Err(media_error(format!(
                 "invalid chunk hash object length {}",
                 object.len()
@@ -227,14 +340,11 @@ impl ChunkHashes {
         let (body, tag) = object.split_at(object.len() - MEDIA_HMAC_LEN);
         let mut mac = hmac(mac_key);
         mac.update(body);
-        mac.verify_slice(tag)
-            .map_err(|_| media_error("chunk hash object HMAC verification failed"))?;
-        let hashes = body
-            .chunks(MEDIA_HMAC_LEN)
-            .map(|h| h.try_into().expect("exact 32-byte chunks"))
-            .collect();
+        if mac.verify_slice(tag).is_err() || file_hmac.is_some_and(|f| f != tag) {
+            return Err(media_error("chunk hash object HMAC verification failed"));
+        }
         Ok(Self {
-            hashes,
+            hashes: digests(body),
             hmac: tag.to_vec(),
         })
     }
@@ -280,6 +390,90 @@ impl ChunkHashes {
             Some((i, _)) => Err(media_error(format!("chunk {i} failed validation"))),
             None => Ok(()),
         }
+    }
+}
+
+/// Streaming decryption of a v2 file checked chunk by chunk against its
+/// [`ChunkHashes`], so an E2EE video can play while it downloads: every
+/// byte handed out belongs to a chunk
+/// whose digest matched, so a player can use it at once. Feed
+/// `ciphertext ‖ HMAC` in any split with [`push`](Self::push), take what is
+/// ready with [`next_chunk`](Self::next_chunk), then
+/// [`finish`](Self::finish), which
+/// checks the last chunk, the chunk count and that the file's trailing
+/// HMAC is the one the hashes were checked against.
+pub struct VerifiedMediaDecryptor {
+    hashes: ChunkHashes,
+    ctr: Aes256Ctr32,
+    buf: Vec<u8>,
+    index: usize,
+}
+
+impl VerifiedMediaDecryptor {
+    pub fn new(key_material: &[u8], hashes: ChunkHashes) -> Self {
+        let keys = derive_key_material(key_material);
+        Self {
+            hashes,
+            ctr: Aes256Ctr32::new_from_slices(&keys.enc_key, &keys.nonce)
+                .expect("derived key/nonce sizes are valid"),
+            buf: Vec::new(),
+            index: 0,
+        }
+    }
+
+    /// Plaintext bytes handed out so far.
+    pub fn verified_len(&self) -> u64 {
+        (self.index * MEDIA_CHUNK_SIZE) as u64
+    }
+
+    fn open_chunk(&mut self, n: usize) -> Result<Vec<u8>> {
+        if !self.hashes.check_chunk(self.index, &self.buf[..n]) {
+            return Err(media_error(format!(
+                "chunk {} failed validation",
+                self.index
+            )));
+        }
+        let mut plain: Vec<u8> = self.buf.drain(..n).collect();
+        self.ctr.apply_keystream(&mut plain);
+        self.index += 1;
+        Ok(plain)
+    }
+
+    /// Take the next bytes of the file.
+    pub fn push(&mut self, data: &[u8]) {
+        self.buf.extend_from_slice(data);
+    }
+
+    /// The plaintext of the next whole chunk known not to be the last one,
+    /// if one has arrived; an error if its digest doesn't match.
+    pub fn next_chunk(&mut self) -> Option<Result<Vec<u8>>> {
+        // A full chunk followed by more than the HMAC is not the last one.
+        (self.buf.len() > MEDIA_CHUNK_SIZE + MEDIA_HMAC_LEN)
+            .then(|| self.open_chunk(MEDIA_CHUNK_SIZE))
+    }
+
+    /// Check and decrypt the last chunk.
+    pub fn finish(mut self) -> Result<Vec<u8>> {
+        if self.buf.len() < MEDIA_HMAC_LEN {
+            return Err(media_error("encrypted data too short to contain HMAC"));
+        }
+        let body = self.buf.len() - MEDIA_HMAC_LEN;
+        if self.buf[body..] != *self.hashes.hmac() {
+            return Err(media_error(
+                "media HMAC does not match the chunk hash object",
+            ));
+        }
+        let plain = if body > 0 {
+            self.open_chunk(body)?
+        } else {
+            Vec::new()
+        };
+        if self.index != self.hashes.len() {
+            return Err(media_error(
+                "chunk count does not match the chunk hash object",
+            ));
+        }
+        Ok(plain)
     }
 }
 
@@ -407,13 +601,51 @@ mod tests {
     }
 
     #[test]
+    fn streaming_decryptor_matches_decrypt_media() {
+        let km = [6u8; 32];
+        for n in [0, 5, 40, MEDIA_CHUNK_SIZE, 2 * MEDIA_CHUNK_SIZE + 77] {
+            let raw = sample(n);
+            for version in [MediaHmacVersion::V1, MediaHmacVersion::V2] {
+                let enc = encrypt_media(&raw, Some(&km), version);
+                for step in [
+                    1usize,
+                    7,
+                    32,
+                    33,
+                    4096,
+                    MEDIA_CHUNK_SIZE + 3,
+                    enc.data.len().max(1),
+                ] {
+                    let mut d = MediaDecryptor::new(&km);
+                    let mut out = Vec::new();
+                    for part in enc.data.chunks(step) {
+                        out.extend(d.update(part));
+                    }
+                    let got = d.finish().unwrap();
+                    assert_eq!(out, raw, "n={n} step={step}");
+                    assert_eq!(got, decrypt_media(&enc.data, &km).unwrap().1);
+                }
+            }
+        }
+        let enc = encrypt_media(&sample(1000), Some(&km), MediaHmacVersion::V2);
+        let mut bad = enc.data.clone();
+        bad[3] ^= 1;
+        let mut d = MediaDecryptor::new(&km);
+        d.update(&bad);
+        assert!(d.finish().is_err());
+        let mut d = MediaDecryptor::new(&km);
+        assert!(d.update(&[0; 20]).is_empty());
+        assert!(d.finish().is_err());
+    }
+
+    #[test]
     fn chunk_hash_object_validation() {
         let raw = sample(3 * MEDIA_CHUNK_SIZE + 1);
         let km = [5u8; 32];
         let enc = encrypt_media(&raw, Some(&km), MediaHmacVersion::V2);
         let mac_key = derive_key_material(&km).mac_key;
         let object = enc.hash_object.clone().unwrap();
-        let hashes = ChunkHashes::parse(&object, &mac_key).unwrap();
+        let hashes = ChunkHashes::parse(&object, &mac_key, None).unwrap();
         assert_eq!(hashes.len(), 4);
         assert_eq!(hashes.hmac(), &enc.data[enc.data.len() - 32..]);
         assert!(hashes.check_chunk(0, &enc.data[..MEDIA_CHUNK_SIZE]));
@@ -433,8 +665,101 @@ mod tests {
 
         let mut bad_object = object.clone();
         bad_object[0] ^= 1;
-        assert!(ChunkHashes::parse(&bad_object, &mac_key).is_err());
-        assert!(ChunkHashes::parse(&object[..40], &mac_key).is_err());
-        assert!(ChunkHashes::parse(&object, &[0; 32]).is_err());
+        assert!(ChunkHashes::parse(&bad_object, &mac_key, None).is_err());
+        assert!(ChunkHashes::parse(&object[..40], &mac_key, None).is_err());
+        assert!(ChunkHashes::parse(&object, &[0; 32], None).is_err());
+    }
+
+    #[test]
+    fn chunk_hash_object_with_digests_only() {
+        // The object holds the digests only; the HMAC is the media file's
+        // trailer.
+        let raw = sample(2 * MEDIA_CHUNK_SIZE + 9);
+        let km = [8u8; 32];
+        let enc = encrypt_media(&raw, Some(&km), MediaHmacVersion::V2);
+        let mac_key = derive_key_material(&km).mac_key;
+        let object = enc.hash_object.unwrap();
+        let digests = &object[..object.len() - MEDIA_HMAC_LEN];
+        let trailer = &enc.data[enc.data.len() - MEDIA_HMAC_LEN..];
+
+        let hashes = ChunkHashes::parse(digests, &mac_key, Some(trailer)).unwrap();
+        assert_eq!(hashes.len(), 3);
+        assert_eq!(hashes.hmac(), trailer);
+        hashes.check_file(&enc.data).unwrap();
+        // The combined layout still parses, and must agree with the file.
+        assert_eq!(
+            ChunkHashes::parse(&object, &mac_key, Some(trailer)).unwrap(),
+            hashes
+        );
+        assert!(ChunkHashes::parse(&object, &mac_key, Some(&[0; 32])).is_err());
+        // Without the file's HMAC the digests alone cannot be checked.
+        assert!(ChunkHashes::parse(digests, &mac_key, None).is_err());
+        assert!(ChunkHashes::parse(digests, &[1; 32], Some(trailer)).is_err());
+    }
+
+    fn verified(raw: &[u8], km: &[u8; 32]) -> (EncryptedMedia, ChunkHashes) {
+        let enc = encrypt_media(raw, Some(km), MediaHmacVersion::V2);
+        let mac_key = derive_key_material(km).mac_key;
+        let hashes = ChunkHashes::parse(enc.hash_object.as_ref().unwrap(), &mac_key, None).unwrap();
+        (enc, hashes)
+    }
+
+    #[test]
+    fn verified_decryptor_hands_out_checked_chunks_only() {
+        let km = [3u8; 32];
+        for len in [
+            0,
+            5,
+            MEDIA_CHUNK_SIZE,
+            MEDIA_CHUNK_SIZE + MEDIA_HMAC_LEN,
+            3 * MEDIA_CHUNK_SIZE,
+            3 * MEDIA_CHUNK_SIZE + 7,
+        ] {
+            let raw = sample(len);
+            let (enc, hashes) = verified(&raw, &km);
+            for split in [1000, 7, MEDIA_CHUNK_SIZE, enc.data.len().max(1)] {
+                let mut dec = VerifiedMediaDecryptor::new(&km, hashes.clone());
+                let mut out = Vec::new();
+                for part in enc.data.chunks(split) {
+                    dec.push(part);
+                    while let Some(plain) = dec.next_chunk() {
+                        out.extend(plain.unwrap());
+                    }
+                    // Never more than whole chunks before the end.
+                    assert_eq!(out.len() as u64, dec.verified_len());
+                }
+                out.extend(dec.finish().unwrap());
+                assert_eq!(out, raw, "len {len}, split {split}");
+            }
+        }
+    }
+
+    #[test]
+    fn verified_decryptor_stops_at_a_bad_chunk() {
+        let km = [4u8; 32];
+        let raw = sample(3 * MEDIA_CHUNK_SIZE + 9);
+        let (enc, hashes) = verified(&raw, &km);
+
+        let mut bad = enc.data.clone();
+        bad[MEDIA_CHUNK_SIZE + 3] ^= 1;
+        let mut dec = VerifiedMediaDecryptor::new(&km, hashes.clone());
+        dec.push(&bad[..2 * MEDIA_CHUNK_SIZE + 100]);
+        assert_eq!(dec.next_chunk().unwrap().unwrap(), raw[..MEDIA_CHUNK_SIZE]);
+        let second = dec.next_chunk().unwrap();
+        assert!(second.unwrap_err().to_string().contains("chunk 1"));
+
+        // A changed last chunk, a different trailer, a missing chunk.
+        let mut last = enc.data.clone();
+        last[3 * MEDIA_CHUNK_SIZE + 2] ^= 1;
+        let mut trailer = enc.data.clone();
+        *trailer.last_mut().unwrap() ^= 1;
+        let mut short = enc.data[..2 * MEDIA_CHUNK_SIZE].to_vec();
+        short.extend_from_slice(&enc.data[enc.data.len() - MEDIA_HMAC_LEN..]);
+        for data in [last, trailer, short] {
+            let mut dec = VerifiedMediaDecryptor::new(&km, hashes.clone());
+            dec.push(&data);
+            while let Some(Ok(_)) = dec.next_chunk() {}
+            assert!(dec.finish().is_err());
+        }
     }
 }

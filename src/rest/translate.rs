@@ -16,10 +16,14 @@ use serde_json::{Map, Value as Json};
 use super::{RestAuth, RestClient, RestPrefix, RestRequest, channels};
 use crate::error::Result;
 
+/// Translation takes a token for its own channel
+/// (`X-Line-ChannelToken`, channel 1627632136).
+const AUTH: RestAuth = RestAuth::Channel(channels::TRANSLATE);
 /// The access token alone is answered with `{"code": 401, "message":
 /// "UNAUTHORIZED"}` (live, DESKTOPWIN); CHRLINE sends its timeline headers,
-/// which carry the timeline channel token.
-const AUTH: RestAuth = RestAuth::Channel(channels::TIMELINE);
+/// which carry the timeline channel token. Used when the translate
+/// channel's token can't be had or is turned down.
+const FALLBACK_AUTH: RestAuth = RestAuth::Channel(channels::TIMELINE);
 
 pub const TRANSLATE: &str = "/translate/legyTransAPI.nhn";
 pub const TRANSLATE_LIST: &str = "/translate/legyTransListAPI.nhn";
@@ -90,8 +94,8 @@ pub fn translate_list_body(items: &[TranslateText], id: String) -> Json {
     finish(m, id)
 }
 
-fn request(path: &str, body: Json, client_channel: Option<&str>) -> RestRequest {
-    let mut req = RestRequest::post(RestPrefix::Translation, path, AUTH)
+fn request(path: &str, body: Json, client_channel: Option<&str>, auth: RestAuth) -> RestRequest {
+    let mut req = RestRequest::post(RestPrefix::Translation, path, auth)
         .header("X-Line-Translate-From", TRANSLATE_FROM)
         .body(body);
     if let Some(c) = client_channel.filter(|c| !c.is_empty()) {
@@ -107,11 +111,11 @@ impl RestClient {
         text: &TranslateText,
         client_channel: Option<&str>,
     ) -> Result<Json> {
-        self.send(request(
+        self.send_translate(
             TRANSLATE,
             translate_body(text, request_id()),
             client_channel,
-        ))
+        )
         .await
     }
 
@@ -121,12 +125,42 @@ impl RestClient {
         items: &[TranslateText],
         client_channel: Option<&str>,
     ) -> Result<Json> {
-        self.send(request(
+        self.send_translate(
             TRANSLATE_LIST,
             translate_list_body(items, request_id()),
             client_channel,
-        ))
+        )
         .await
+    }
+
+    /// Sends with the translate channel's token; if that fails (no token,
+    /// or the server turns it down), once more with the timeline token. A
+    /// failure is remembered for this client, so later calls go straight
+    /// to the timeline token.
+    async fn send_translate(
+        &self,
+        path: &str,
+        body: Json,
+        client_channel: Option<&str>,
+    ) -> Result<Json> {
+        use std::sync::atomic::Ordering;
+        if !self.translate_fallback.load(Ordering::Relaxed) {
+            match self
+                .send(request(path, body.clone(), client_channel, AUTH))
+                .await
+            {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    self.client().log(
+                        "translate-channel-fallback",
+                        serde_json::json!({ "error": e.to_string() }),
+                    );
+                    self.translate_fallback.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+        self.send(request(path, body, client_channel, FALLBACK_AUTH))
+            .await
     }
 }
 

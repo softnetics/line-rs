@@ -25,6 +25,9 @@ pub const MOA_CHANNEL_ID: &str = "1375220249";
 /// Storage key of the memoised channel token.
 pub const CHANNEL_TOKEN_KEY: &str = "moaChannelToken";
 
+/// Most pages [`MoaService::get_all_albums`] reads.
+pub const MAX_ALBUM_PAGES: usize = 50;
+
 const LEGY_MOA_PREFIX: &str = "/ext/album";
 const ERROR_KIND: &str = "MoaError";
 
@@ -403,9 +406,50 @@ impl<'a> MoaService<'a> {
             .await
     }
 
+    /// Every album the account can see, following `nextCursor` page by
+    /// page from `options.cursor` (at most [`MAX_ALBUM_PAGES`] pages).
+    /// The list is not limited to one chat: filter by
+    /// [`MoaAlbum::chat_id`].
+    pub async fn get_all_albums(&self, options: GetAlbumsOptions) -> Result<Vec<MoaAlbum>> {
+        let mut albums = Vec::new();
+        let mut cursor = options.cursor.clone();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..MAX_ALBUM_PAGES {
+            let reply = self
+                .get_albums(GetAlbumsOptions {
+                    cursor: cursor.take(),
+                    ..options.clone()
+                })
+                .await?;
+            let Some(page) = reply.result else { break };
+            cursor = next_album_cursor(&page, &mut seen);
+            albums.extend(page.albums);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        Ok(albums)
+    }
+
     /// Download the original bytes of an album photo (or video with
-    /// `prefix = "album/v"`).
+    /// `prefix = "album/v"`) into memory. See
+    /// [`download_photo_to`](Self::download_photo_to).
     pub async fn download_photo(&self, options: DownloadPhotoOptions) -> Result<Vec<u8>> {
+        let mut data = Vec::new();
+        self.download_photo_to(options, &mut data).await?;
+        Ok(data)
+    }
+
+    /// Stream an album photo (or video with `prefix = "album/v"`) into
+    /// `out`, waiting at most `download_idle_timeout` for each part, with
+    /// no total limit. One more try after HTTP 401, with a new channel
+    /// token, or after HTTP 503. A failed status is an `ObsError` with the status (see
+    /// [`Error::is_media_expired`]). Returns the bytes written.
+    pub async fn download_photo_to(
+        &self,
+        options: DownloadPhotoOptions,
+        out: crate::obs::DownloadSink<'_>,
+    ) -> Result<u64> {
         let prefix = options.prefix.as_deref().unwrap_or("album/a");
         if prefix != "album/a" && prefix != "album/v" {
             return Err(Error::internal(
@@ -414,29 +458,31 @@ impl<'a> MoaService<'a> {
             ));
         }
         let oid = encode_path_id(&options.oid)?;
-        let token = self.get_album_channel_token().await?;
-        let mut headers = self.client.line_headers("GET");
-        header_set(&mut headers, "X-Line-ChannelToken", token);
-        header_set(&mut headers, "X-Line-Album", options.album_id.as_str());
-        header_set(&mut headers, "X-Line-Mid", options.chat_id.as_str());
         let url = format!("https://{}/oa/r/{prefix}/{oid}", self.client.endpoint);
-        let mut req = self
-            .client
-            .http
-            .post(url)
-            .timeout(self.client.config.timeout)
-            .body(Vec::new());
-        for (k, v) in headers {
-            req = req.header(k, v);
-        }
-        let res = req.send().await?;
-        if !res.status().is_success() {
-            return Err(Error::internal(
-                ERROR_KIND,
-                format!("OBS {} HTTP {}", options.oid, res.status().as_u16()),
-            ));
-        }
-        Ok(res.bytes().await?.to_vec())
+        let idle = self.client.config.download_idle_timeout;
+        let mut retried = false;
+        let res = loop {
+            let token = self.get_album_channel_token().await?;
+            let mut headers = self.client.line_headers("GET");
+            header_set(&mut headers, "X-Line-ChannelToken", token);
+            header_set(&mut headers, "X-Line-Album", options.album_id.as_str());
+            header_set(&mut headers, "X-Line-Mid", options.chat_id.as_str());
+            let mut req = self.client.http.post(&url).body(Vec::new());
+            for (k, v) in headers {
+                req = req.header(k, v);
+            }
+            let res = crate::obs::send_idle(req, idle).await?;
+            let status = res.status();
+            if retried || !matches!(status.as_u16(), 401 | 503) {
+                crate::obs::ensure_ok(status, "Album photo download failed")?;
+                break res;
+            }
+            retried = true;
+            if status == reqwest::StatusCode::UNAUTHORIZED {
+                self.clear_album_channel_token().await?;
+            }
+        };
+        crate::obs::stream_body(res, idle, |c| Ok(out.write_all(c)?)).await
     }
 
     // --- group album writes ------------------------------------------------
@@ -601,6 +647,20 @@ impl<'a> MoaService<'a> {
     }
 }
 
+/// The cursor of the page after `page`: its `nextCursor` unless it is
+/// empty, `hasMore` is false, or the cursor came back before.
+fn next_album_cursor(
+    page: &MoaAlbumsResult,
+    seen: &mut std::collections::HashSet<String>,
+) -> Option<String> {
+    if page.has_more == Some(false) {
+        return None;
+    }
+    page.next_cursor
+        .clone()
+        .filter(|c| !c.is_empty() && seen.insert(c.clone()))
+}
+
 /// Reject non-object bodies and non-zero `code`s.
 fn check_moa_response(path_suffix: &str, json: &serde_json::Value) -> Result<()> {
     let Some(obj) = json.as_object() else {
@@ -676,6 +736,32 @@ mod tests {
         assert_eq!(
             build_moa_url("legy-proxy.example.com", "/moa/v2/albums", &[]),
             "https://legy-proxy.example.com/ext/album/moa/v2/albums"
+        );
+    }
+
+    #[test]
+    fn album_pages_end() {
+        let mut seen = std::collections::HashSet::new();
+        let page = |next: Option<&str>, more: Option<bool>| MoaAlbumsResult {
+            next_cursor: next.map(str::to_string),
+            has_more: more,
+            ..Default::default()
+        };
+        assert_eq!(
+            next_album_cursor(&page(Some("a"), None), &mut seen),
+            some("a")
+        );
+        assert_eq!(
+            next_album_cursor(&page(Some("b"), Some(true)), &mut seen),
+            some("b")
+        );
+        // A cursor seen before would loop.
+        assert_eq!(next_album_cursor(&page(Some("a"), None), &mut seen), None);
+        assert_eq!(next_album_cursor(&page(Some(""), None), &mut seen), None);
+        assert_eq!(next_album_cursor(&page(None, None), &mut seen), None);
+        assert_eq!(
+            next_album_cursor(&page(Some("c"), Some(false)), &mut seen),
+            None
         );
     }
 

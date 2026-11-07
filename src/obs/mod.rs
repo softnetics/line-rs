@@ -12,11 +12,25 @@
 //! # let _ = (up, file); Ok(()) }
 //! ```
 
+mod copy;
 pub mod crypto;
 mod e2ee;
+mod flow;
+mod group;
+mod meta;
 pub mod mime;
+mod token;
 
-pub use e2ee::{E2eeMediaUpload, e2ee_content_metadata, e2ee_duration};
+pub use copy::ForwardMedia;
+pub use e2ee::{
+    E2eeMediaUpload, MAX_FILE_SIZE, MAX_MEDIA_SEND_ATTEMPTS, MAX_VIDEO_SIZE, MediaOptions,
+    SentMedia, check_media_size, e2ee_content_metadata, e2ee_duration,
+};
+pub use flow::{MediaFlow, MediaFlows};
+pub use meta::MediaGroup;
+pub use token::{OBS_TOKEN_ATTEMPTS, parse_obs_token};
+
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -110,6 +124,19 @@ pub struct ObsUpload {
     pub obj_hash: String,
     pub headers: HeaderMap,
 }
+
+/// What a streamed download (`*_to`) wrote.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ObsDownload {
+    /// Bytes written to the sink.
+    pub len: u64,
+    /// The response's `content-type`, if any.
+    pub mime: Option<String>,
+}
+
+/// Where a streamed download writes. A failed download may have written
+/// part of the file: write to a temporary file and keep it only on `Ok`.
+pub type DownloadSink<'w> = &'w mut (dyn std::io::Write + Send);
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -224,11 +251,39 @@ pub struct ObjectUpload {
     pub add_headers: Vec<(String, String)>,
 }
 
+/// Per-client OBS state: the OBS access token and the media flow of each
+/// chat.
+#[derive(Debug, Default)]
+pub(crate) struct ObsState {
+    pub(crate) token: token::ObsTokenCache,
+    pub(crate) flows: flow::MediaFlowCache,
+}
+
 /// OBS operations bound to a client.
 #[derive(Clone)]
 pub struct Obs<'a> {
     pub client: &'a BaseClient,
     prefix: String,
+    /// Where a new OBS access token comes from: the client's talk service,
+    /// a fake in tests.
+    tokens: &'a dyn token::ObsTokenSource,
+}
+
+/// Which token a download sends in `x-line-access`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObjectAuth {
+    /// The session token.
+    Session,
+    /// The OBS access token, the session token while there is none.
+    Obs,
+}
+
+impl ObjectAuth {
+    /// A chat's media: the OBS token for talk, the session token for
+    /// Square, which keeps what it always used.
+    fn chat(square: bool) -> Self {
+        if square { Self::Session } else { Self::Obs }
+    }
 }
 
 impl BaseClient {
@@ -237,12 +292,25 @@ impl BaseClient {
         Obs {
             client: self,
             prefix: OBS_PREFIX.to_string(),
+            tokens: self,
         }
+    }
+
+    /// Forget the cached media flow of `chat_mid` (every chat with `None`),
+    /// so the next media send asks `determineMediaMessageFlow` again. Call
+    /// it when LINE says `REFRESH_MEDIA_FLOW`.
+    pub fn drop_media_flow(&self, chat_mid: Option<&str>) {
+        self.obs_state.flows.remove(chat_mid);
+    }
+
+    /// Forget the OBS access token so the next upload acquires a new one.
+    pub async fn clear_obs_token(&self) {
+        self.obs_state.token.clear().await;
     }
 }
 
 /// A failed download carries only the status: obs error pages embed signed urls.
-fn ensure_ok(status: reqwest::StatusCode, what: &str) -> Result<()> {
+pub(crate) fn ensure_ok(status: reqwest::StatusCode, what: &str) -> Result<()> {
     if status.is_success() {
         Ok(())
     } else {
@@ -250,6 +318,54 @@ fn ensure_ok(status: reqwest::StatusCode, what: &str) -> Result<()> {
             "ObsError",
             format!("{what}: HTTP {}", status.as_u16()),
         ))
+    }
+}
+
+fn content_type(res: &reqwest::Response) -> Option<String> {
+    res.headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+}
+
+fn stalled(idle: Duration) -> Error {
+    Error::internal(
+        "TimeoutError",
+        format!("download stalled for {}s", idle.as_secs()),
+    )
+}
+
+/// Send `req`, waiting at most `idle` for the response head.
+pub(crate) async fn send_idle(
+    req: reqwest::RequestBuilder,
+    idle: Duration,
+) -> Result<reqwest::Response> {
+    tokio::time::timeout(idle, req.send())
+        .await
+        .map_err(|_| stalled(idle))?
+        .map_err(Error::from)
+}
+
+/// Hand the body of `res` to `write` part by part as it arrives, so a big
+/// file never sits in memory whole. Fails when nothing arrives for `idle`;
+/// there is no limit on the total time. Returns the bytes read.
+pub(crate) async fn stream_body(
+    mut res: reqwest::Response,
+    idle: Duration,
+    mut write: impl FnMut(&[u8]) -> Result<()>,
+) -> Result<u64> {
+    let mut len = 0u64;
+    loop {
+        let chunk = tokio::time::timeout(idle, res.chunk())
+            .await
+            .map_err(|_| stalled(idle))??;
+        match chunk {
+            Some(c) => {
+                len += c.len() as u64;
+                write(&c)?;
+            }
+            None => return Ok(len),
+        }
     }
 }
 
@@ -314,6 +430,13 @@ impl<'a> Obs<'a> {
         &self.prefix
     }
 
+    /// Take new OBS tokens from `tokens` instead of the talk service.
+    #[cfg(test)]
+    pub(crate) fn with_tokens(mut self, tokens: &'a dyn token::ObsTokenSource) -> Self {
+        self.tokens = tokens;
+        self
+    }
+
     /// URL of a message's media (`/preview` for the thumbnail).
     pub fn message_data_url(&self, message_id: &str, preview: bool, square: bool) -> String {
         format!(
@@ -351,35 +474,157 @@ impl<'a> Obs<'a> {
         ])
     }
 
-    /// Download a (non-E2EE) message's media; the name comes from its metadata.
+    /// GET `url`: one more try after HTTP 401, with the token renewed first, or after
+    /// HTTP 503. Any other failed status is an `ObsError` that keeps the
+    /// status ([`Error::http_status`], [`Error::is_media_expired`]).
+    /// `headers` is called for each try, so the second one carries the new
+    /// token. Without `timeout` (a download) only the wait for the response
+    /// head is limited, by `download_idle_timeout`.
+    ///
+    /// With [`ObjectAuth::Obs`] the request carries the OBS access token in
+    /// `x-line-access`, and a 401 drops that token; while there is none, the
+    /// session token goes and a 401 refreshes it.
+    async fn get_object(
+        &self,
+        url: &str,
+        headers: impl Fn() -> Result<HeaderMap>,
+        timeout: Option<Duration>,
+        what: &str,
+        auth: ObjectAuth,
+    ) -> Result<reqwest::Response> {
+        let mut retried = false;
+        loop {
+            let mut headers = headers()?;
+            let obs_token = match auth {
+                ObjectAuth::Obs => self.client.obs_state.token.get(self.tokens).await,
+                ObjectAuth::Session => None,
+            };
+            if let Some(token) = &obs_token {
+                headers.insert(
+                    "x-line-access",
+                    HeaderValue::from_str(token)
+                        .map_err(|e| Error::internal("ObsError", format!("invalid token: {e}")))?,
+                );
+            }
+            let sent = headers
+                .get("x-line-access")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            let req = self.client.http.get(url).headers(headers);
+            let res = match timeout {
+                Some(t) => req.timeout(t).send().await?,
+                None => send_idle(req, self.client.config.download_idle_timeout).await?,
+            };
+            let status = res.status();
+            if retried || !matches!(status.as_u16(), 401 | 503) {
+                ensure_ok(status, what)?;
+                return Ok(res);
+            }
+            retried = true;
+            if status != reqwest::StatusCode::UNAUTHORIZED {
+                continue;
+            }
+            if obs_token.is_some() {
+                self.client.obs_state.token.clear().await;
+            } else if let Err(e) = self.client.refresh_token_after(sent.as_deref()).await {
+                tracing::debug!("OBS 401: token refresh failed: {e}");
+            }
+        }
+    }
+
+    /// Download a (non-E2EE) message's media into memory. The name comes
+    /// from its `object_info.obs`, asked for after the download and only for
+    /// the full file; when that request fails the file comes back without
+    /// a name. Use [`download_message_data_to`](Self::download_message_data_to)
+    /// for big files.
     pub async fn download_message_data(
         &self,
         message_id: &str,
         preview: bool,
         square: bool,
     ) -> Result<ObsFile> {
-        let headers = self.read_headers()?;
-        let res = self
-            .client
-            .http
-            .get(self.message_data_url(message_id, preview, square))
-            .headers(headers)
-            .timeout(self.client.config.long_timeout)
-            .send()
+        let mut data = Vec::new();
+        let dl = self
+            .download_message_data_to(message_id, preview, square, &mut data)
             .await?;
-        ensure_ok(res.status(), "Message data download failed")?;
-        let mime = res
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_string);
-        let data = res.bytes().await?;
-        let info = self.message_obs_metadata(message_id, square).await?;
+        let name = if preview {
+            None
+        } else {
+            match self.message_obs_metadata(message_id, square).await {
+                Ok(info) => Some(info.name).filter(|n| !n.is_empty()),
+                Err(e) => {
+                    tracing::debug!("object_info.obs: {e}");
+                    None
+                }
+            }
+        };
         Ok(ObsFile {
-            data,
-            name: Some(info.name),
-            mime,
+            data: data.into(),
+            name,
+            mime: dl.mime,
         })
+    }
+
+    /// Stream a (non-E2EE) message's media (`preview`: its thumbnail) into
+    /// `out`, part by part, waiting at most `download_idle_timeout` for each.
+    pub async fn download_message_data_to(
+        &self,
+        message_id: &str,
+        preview: bool,
+        square: bool,
+        out: DownloadSink<'_>,
+    ) -> Result<ObsDownload> {
+        self.stream_message_data_to(message_id, preview, square, out, &mut |_| {})
+            .await
+    }
+
+    /// [`download_message_data_to`](Self::download_message_data_to);
+    /// `on_len` hears the length before the first byte, when the server
+    /// says it.
+    pub async fn stream_message_data_to(
+        &self,
+        message_id: &str,
+        preview: bool,
+        square: bool,
+        out: DownloadSink<'_>,
+        on_len: &mut (dyn FnMut(u64) + Send),
+    ) -> Result<ObsDownload> {
+        let res = self
+            .get_object(
+                &self.message_data_url(message_id, preview, square),
+                || self.read_headers(),
+                None,
+                "Message data download failed",
+                ObjectAuth::chat(square),
+            )
+            .await?;
+        if let Some(len) = res.content_length() {
+            on_len(len);
+        }
+        self.write_body(res, out).await
+    }
+
+    /// Stream `url` (a message's `DOWNLOAD_URL` / `PREVIEW_URL`) into `out`
+    /// with a plain GET: no LINE headers go to another host.
+    pub async fn download_url_to(&self, url: &str, out: DownloadSink<'_>) -> Result<ObsDownload> {
+        let req = self.client.http.get(url);
+        let res = send_idle(req, self.client.config.download_idle_timeout).await?;
+        ensure_ok(res.status(), "Media URL download failed")?;
+        self.write_body(res, out).await
+    }
+
+    async fn write_body(
+        &self,
+        res: reqwest::Response,
+        out: DownloadSink<'_>,
+    ) -> Result<ObsDownload> {
+        let mime = content_type(&res);
+        let len = stream_body(res, self.client.config.download_idle_timeout, |c| {
+            Ok(out.write_all(c)?)
+        })
+        .await?;
+        out.flush()?;
+        Ok(ObsDownload { len, mime })
     }
 
     /// `object_info.obs` of a message's media.
@@ -388,23 +633,23 @@ impl<'a> Obs<'a> {
         message_id: &str,
         square: bool,
     ) -> Result<ObsMetadata> {
-        let headers = self.read_headers()?;
         let res = self
-            .client
-            .http
-            .get(self.message_metadata_url(message_id, square))
-            .headers(headers)
-            .timeout(self.client.config.timeout)
-            .send()
+            .get_object(
+                &self.message_metadata_url(message_id, square),
+                || self.read_headers(),
+                Some(self.client.config.timeout),
+                "Message metadata request failed",
+                ObjectAuth::chat(square),
+            )
             .await?;
-        ensure_ok(res.status(), "Message metadata request failed")?;
         Ok(res.json().await?)
     }
 
     /// Upload media for a talk (or square, for `m`/`t` mids) message. With
     /// `oid` the object is attached to an existing message id; otherwise LINE
     /// sends it to `to` itself. `duration_ms` (audio/video) is shown verbatim
-    /// as the clip length (default 1919).
+    /// as the clip length (default 1919). Talk uploads authenticate with the
+    /// OBS access token (see [`parse_obs_token`]).
     pub async fn upload_obj_talk(
         &self,
         to: &str,
@@ -414,12 +659,40 @@ impl<'a> Obs<'a> {
         duration_ms: Option<u64>,
     ) -> Result<ObsUpload> {
         self.client.require_token()?;
+        let reqseq = self.client.get_reqseq("talk").await?;
+        self.upload_obj_talk_with_seq(
+            to,
+            o_type,
+            file,
+            oid,
+            duration_ms,
+            reqseq,
+            Vec::new(),
+            self.client,
+        )
+        .await
+    }
+
+    /// [`upload_obj_talk`](Self::upload_obj_talk) with a given `reqseq`, so
+    /// a media send keeps one request number across its retries, and extra
+    /// headers such as `X-Talk-Meta`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn upload_obj_talk_with_seq(
+        &self,
+        to: &str,
+        o_type: ObjType,
+        file: ObsFile,
+        oid: Option<&str>,
+        duration_ms: Option<u64>,
+        reqseq: i64,
+        add_headers: Vec<(String, String)>,
+        tokens: &dyn token::ObsTokenSource,
+    ) -> Result<ObsUpload> {
         let ext = file
             .mime
             .as_deref()
             .and_then(mime::extension)
             .unwrap_or("undefined");
-        let reqseq = self.client.get_reqseq("talk").await?;
         let name = file.name.clone().unwrap_or_else(|| format!("linejs.{ext}"));
         let mut params: Vec<(String, String)> = vec![
             ("ver".into(), "2.0".into()),
@@ -445,24 +718,81 @@ impl<'a> Obs<'a> {
             }
             ObjType::File => {}
         }
-        let to_type = if to.starts_with('m') || to.starts_with('t') {
-            "g2"
-        } else {
-            "talk"
-        };
-        self.upload_object_for_service(ObjectUpload {
+        let square = to.starts_with('m') || to.starts_with('t');
+        let opts = ObjectUpload {
             data: file.data,
             o_type,
-            obs_path: Some(format!("{to_type}/m/{}", oid.unwrap_or("reqseq"))),
+            obs_path: Some(format!(
+                "{}/m/{}",
+                if square { "g2" } else { "talk" },
+                oid.unwrap_or("reqseq")
+            )),
             params,
             filename: Some(name),
-            add_headers: Vec::new(),
-        })
-        .await
+            add_headers,
+        };
+        if square {
+            // Square uploads keep the session token they have always used.
+            self.upload_object_for_service(opts).await
+        } else {
+            self.upload_with_obs_token(opts, tokens).await
+        }
     }
 
-    /// Raw upload to `/r/{obs_path}`.
+    /// Upload with the OBS access token; on HTTP 401 drop it, get a new
+    /// one and upload once more. Without any OBS
+    /// token the session token is sent.
+    pub(crate) async fn upload_with_obs_token(
+        &self,
+        opts: ObjectUpload,
+        tokens: &dyn token::ObsTokenSource,
+    ) -> Result<ObsUpload> {
+        let cache = &self.client.obs_state.token;
+        let token = cache.get(tokens).await;
+        let (status, up) = self.post_object(opts.clone(), token.as_deref()).await?;
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            cache.clear().await;
+            let token = cache.get(tokens).await;
+            let (status, up) = self.post_object(opts, token.as_deref()).await?;
+            ensure_ok(status, "Object upload failed")?;
+            return Ok(up);
+        }
+        ensure_ok(status, "Object upload failed")?;
+        Ok(up)
+    }
+
+    /// Cached flows of `chat_mid`, or ask `determineMediaMessageFlow`.
+    pub async fn media_flows(&self, chat_mid: &str) -> Result<MediaFlows> {
+        let cache = &self.client.obs_state.flows;
+        if let Some(flows) = cache.get(chat_mid, Instant::now()) {
+            return Ok(flows);
+        }
+        let res = self
+            .client
+            .talk()
+            .determine_media_message_flow(crate::tv!({"request": {"chatMid": chat_mid}}))
+            .await?;
+        let (flows, ttl) = MediaFlows::from_response(&res);
+        cache.insert(chat_mid, flows, ttl, Instant::now());
+        Ok(flows)
+    }
+
+    /// Raw upload to `/r/{obs_path}` with the session token.
     pub async fn upload_object_for_service(&self, opts: ObjectUpload) -> Result<ObsUpload> {
+        let (status, up) = self.post_object(opts, None).await?;
+        // Without this a rejected upload came back with an empty object id,
+        // and the message sent with it failed with an unrelated error.
+        ensure_ok(status, "Object upload failed")?;
+        Ok(up)
+    }
+
+    /// POST an object; `token` replaces the session token in
+    /// `x-line-access`. The status is left to the caller.
+    async fn post_object(
+        &self,
+        opts: ObjectUpload,
+        token: Option<&str>,
+    ) -> Result<(reqwest::StatusCode, ObsUpload)> {
         let obs_path = opts.obs_path.as_deref().unwrap_or("myhome/h");
         self.client.log(
             "Obs.uploadObjectForService",
@@ -490,6 +820,12 @@ impl<'a> Obs<'a> {
                 ("x-obs-params".to_string(), obs_params_header(&params)),
             ],
         );
+        if let Some(token) = token {
+            merge_params(
+                &mut headers,
+                [("x-line-access".to_string(), token.to_string())],
+            );
+        }
         let headers = to_header_map(headers.into_iter().chain(opts.add_headers))?;
 
         let res = self
@@ -501,49 +837,114 @@ impl<'a> Obs<'a> {
             .body(opts.data)
             .send()
             .await?;
+        let status = res.status();
         let headers = res.headers().clone();
         let obj_id = header_str(&headers, "x-obs-oid");
         let obj_hash = header_str(&headers, "x-obs-hash");
         self.client.log(
             "Obs.uploadObjectForServiceResponse",
-            serde_json::json!({"objId": obj_id, "objHash": obj_hash, "status": res.status().as_u16()}),
+            serde_json::json!({"objId": obj_id, "objHash": obj_hash, "status": status.as_u16()}),
         );
-        Ok(ObsUpload {
-            obj_id,
-            obj_hash,
-            headers,
-        })
+        Ok((
+            status,
+            ObsUpload {
+                obj_id,
+                obj_hash,
+                headers,
+            },
+        ))
     }
 
     /// Raw download from `/r/{obs_path}/{oid}` (or `{oid}` substituted in
-    /// `obs_path`).
+    /// `obs_path`) into memory. See [`download_object_to`](Self::download_object_to).
     pub async fn download_object_for_service(
         &self,
         obs_path: &str,
         oid: &str,
         add_headers: Vec<(String, String)>,
     ) -> Result<Bytes> {
+        let mut data = Vec::new();
+        self.download_object_to(obs_path, oid, add_headers, &mut data)
+            .await?;
+        Ok(data.into())
+    }
+
+    /// Stream `/r/{obs_path}/{oid}` into `out`, part by part, waiting at
+    /// most `download_idle_timeout` for each.
+    pub async fn download_object_to(
+        &self,
+        obs_path: &str,
+        oid: &str,
+        add_headers: Vec<(String, String)>,
+        out: DownloadSink<'_>,
+    ) -> Result<ObsDownload> {
+        let res = self.get_raw_object(obs_path, oid, &add_headers).await?;
+        self.write_body(res, out).await
+    }
+
+    /// GET `/r/{obs_path}/{oid}` with the session headers and `add_headers`.
+    pub(crate) async fn get_raw_object(
+        &self,
+        obs_path: &str,
+        oid: &str,
+        add_headers: &[(String, String)],
+    ) -> Result<reqwest::Response> {
+        self.get_object_as(obs_path, oid, add_headers, ObjectAuth::Session)
+            .await
+    }
+
+    /// [`get_raw_object`](Self::get_raw_object) for a chat's media, with the
+    /// OBS access token.
+    pub(crate) async fn get_chat_object(
+        &self,
+        obs_path: &str,
+        oid: &str,
+        add_headers: &[(String, String)],
+    ) -> Result<reqwest::Response> {
+        self.get_object_as(obs_path, oid, add_headers, ObjectAuth::Obs)
+            .await
+    }
+
+    /// A chat object into memory; see [`get_chat_object`](Self::get_chat_object).
+    pub(crate) async fn download_chat_object(
+        &self,
+        obs_path: &str,
+        oid: &str,
+        add_headers: &[(String, String)],
+    ) -> Result<Bytes> {
+        let res = self.get_chat_object(obs_path, oid, add_headers).await?;
+        let mut data = Vec::new();
+        self.write_body(res, &mut data).await?;
+        Ok(data.into())
+    }
+
+    async fn get_object_as(
+        &self,
+        obs_path: &str,
+        oid: &str,
+        add_headers: &[(String, String)],
+        auth: ObjectAuth,
+    ) -> Result<reqwest::Response> {
         let path = if obs_path.contains("{oid}") {
             obs_path.replacen("{oid}", oid, 1)
         } else {
             format!("{obs_path}/{oid}")
         };
-        let headers = to_header_map(
-            self.client
-                .line_headers("GET")
-                .into_iter()
-                .chain(add_headers),
-        )?;
-        let res = self
-            .client
-            .http
-            .get(format!("{}r/{path}", self.prefix))
-            .headers(headers)
-            .timeout(self.client.config.long_timeout)
-            .send()
-            .await?;
-        ensure_ok(res.status(), "Object download failed")?;
-        Ok(res.bytes().await?)
+        self.get_object(
+            &format!("{}r/{path}", self.prefix),
+            || {
+                to_header_map(
+                    self.client
+                        .line_headers("GET")
+                        .into_iter()
+                        .chain(add_headers.iter().cloned()),
+                )
+            },
+            None,
+            "Object download failed",
+            auth,
+        )
+        .await
     }
 }
 

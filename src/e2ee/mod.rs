@@ -10,6 +10,8 @@
 //! * [`media`] — media integrity: v1 whole-file HMAC and v2 chunked HMAC
 //!   with `__ud-hash` chunk digests.
 //! * `recovery` — what to do when `sendMessage` fails with an `E2EE_*` code.
+//! * `send` — the per-chat [`E2eeChatState`] and the encrypt-first send
+//!   loop ([`BaseClient::send_with_e2ee_recovery`]).
 //! * `exchange` — `requestE2EEKeyExchange` / `respondE2EEKeyExchange` /
 //!   `removeE2EEPublicKey` and E2EE operation classification.
 //!
@@ -21,6 +23,7 @@ mod keys;
 pub mod media;
 mod message;
 mod recovery;
+mod send;
 
 use std::sync::Mutex;
 
@@ -40,8 +43,12 @@ pub use media::{
     ChunkHashes, ChunkedHmacValidator, EncryptedMedia, MediaHmacVersion, decrypt_media,
     encrypt_media,
 };
-pub use message::{content_type_number, decrypt_message_v1, decrypt_message_v2, encrypt_payload};
+pub use message::{
+    content_type_number, decrypt_message_v1, decrypt_message_v2, describe_e2ee_message,
+    encrypt_payload, is_undecrypted, spec_version_of,
+};
 pub use recovery::{E2eeSendRecovery, MAX_E2EE_SEND_ATTEMPTS, send_recovery};
+pub use send::{E2eeChatState, E2eeSendAttempt, E2eeSendOptions};
 
 use crate::base::BaseClient;
 use crate::error::Result;
@@ -68,6 +75,8 @@ pub struct E2eeState {
     /// Own key ids whose stored private key matched the public key LINE
     /// has registered, so [`E2ee::check_sealed`] asks the server once per id.
     pub(crate) confirmed_keys: Mutex<std::collections::HashSet<i64>>,
+    /// Key ids LINE could not resolve; see [`keys::Unresolvable`].
+    pub(crate) unresolvable: keys::Unresolvable,
 }
 
 impl BaseClient {
@@ -124,6 +133,14 @@ impl BaseClient {
     /// Generate and register a key pair, storing it as the current key.
     pub async fn try_register_e2ee_key_pair(&self) -> Result<E2eeKey> {
         self.e2ee().register_key_pair().await
+    }
+
+    /// Forget the peer and group key ids remembered as unresolvable, so the
+    /// next message that names one asks LINE again. line-rs does this on a
+    /// login and when it registers a key; call it when keys may have changed
+    /// otherwise (the client does on E2EE key operations).
+    pub fn forget_unresolvable_e2ee_keys(&self) {
+        self.e2ee.unresolvable.clear();
     }
 
     /// Verify the key selected at login against the server-registered public
@@ -201,9 +218,10 @@ impl BaseClient {
         self.e2ee().try_register_group_key(chat_mid).await
     }
 
-    /// Encrypt a message for `to` (user, group or room). Returns the
-    /// `chunks` to put in the `Message`. For users the negotiated spec
-    /// version overrides `spec_version`.
+    /// Encrypt a message for `to` (user, group or room) after looking its
+    /// key up again (stored as the chat's [`E2eeChatState`]). Returns the
+    /// `chunks` to put in the `Message`. The server's spec version
+    /// overrides `spec_version`.
     pub async fn encrypt_e2ee_message(
         &self,
         to: &str,

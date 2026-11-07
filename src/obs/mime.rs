@@ -157,9 +157,82 @@ pub fn extension(mime: &str) -> Option<&'static str> {
         .map(|(_, e)| *e)
 }
 
+/// Extensions whose common MIME type [`MIME_TYPES`] spells differently or
+/// lacks.
+const EXTRA_TYPES: &[(&str, &str)] = &[
+    ("jpg", "image/jpeg"),
+    ("jpeg", "image/jpeg"),
+    ("png", "image/png"),
+    ("gif", "image/gif"),
+    ("webp", "image/webp"),
+    ("heic", "image/heic"),
+    ("heif", "image/heif"),
+    ("bmp", "image/bmp"),
+    ("mp4", "video/mp4"),
+    ("m4v", "video/mp4"),
+    ("mov", "video/quicktime"),
+    ("3gp", "video/3gpp"),
+    ("webm", "video/webm"),
+    ("m4a", "audio/mp4"),
+    ("aac", "audio/aac"),
+    ("mp3", "audio/mpeg"),
+    ("amr", "audio/amr"),
+    ("ogg", "audio/ogg"),
+    ("wav", "audio/x-wav"),
+    ("pdf", "application/pdf"),
+    ("txt", "text/plain"),
+    ("csv", "text/comma-separated-values"),
+    ("zip", "application/zip"),
+    (
+        "docx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ),
+    (
+        "xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ),
+    (
+        "pptx",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ),
+];
+
+/// MIME type for a file extension, for an OBS upload's `content-type`.
+pub fn from_extension(ext: &str) -> Option<&'static str> {
+    EXTRA_TYPES
+        .iter()
+        .find(|(e, _)| e.eq_ignore_ascii_case(ext))
+        .map(|(_, m)| *m)
+        .or_else(|| {
+            MIME_TYPES
+                .iter()
+                .find(|(_, e)| e.eq_ignore_ascii_case(ext))
+                .map(|(m, _)| *m)
+        })
+}
+
+/// `content-type` of an OBS upload named `name`: the MIME type of its
+/// extension, or `""` when there is none or it is unknown.
+pub fn content_type_for_name(name: &str) -> &'static str {
+    name.rsplit_once('.')
+        .and_then(|(_, ext)| from_extension(ext))
+        .unwrap_or("")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_type_from_name() {
+        assert_eq!(content_type_for_name("a.JPG"), "image/jpeg");
+        assert_eq!(content_type_for_name("clip.mp4"), "video/mp4");
+        assert_eq!(content_type_for_name("voice.m4a"), "audio/mp4");
+        assert_eq!(content_type_for_name("report.pdf"), "application/pdf");
+        assert_eq!(content_type_for_name("tarball.tar"), "application/x-tar");
+        assert_eq!(content_type_for_name("hash"), "");
+        assert_eq!(content_type_for_name("x.unknownext"), "");
+    }
 
     #[test]
     fn lookup() {

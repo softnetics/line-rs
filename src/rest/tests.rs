@@ -102,7 +102,12 @@ fn rest(base: &str) -> RestClient {
     c.set_auth_token(Some("ACCESS".into()));
     c.set_profile(Some(crate::tv!({"mid": "u-self", "regionCode": "TH"})));
     let r = c.rest().with_base_url(base);
-    for ch in [channels::KEEP, channels::MYHOME, channels::TIMELINE] {
+    for ch in [
+        channels::KEEP,
+        channels::MYHOME,
+        channels::TIMELINE,
+        channels::TRANSLATE,
+    ] {
         r.set_channel_token(ch, format!("TOKEN-{ch}"));
     }
     r
@@ -286,6 +291,12 @@ async fn home_requests() {
 
     let s = seen.lock().unwrap();
     assert_eq!(s[0].target, "/hm/api/v1/home/profile?homeId=u1");
+    // /hm takes the Timeline channel.
+    assert_eq!(s[0].header("x-line-channeltoken"), Some("TOKEN-1341209950"));
+    assert_eq!(s[3].header("x-line-channeltoken"), Some("TOKEN-1341209950"));
+    // /PAGEPOKER: the session token only.
+    assert_eq!(s[4].header("x-line-channeltoken"), None);
+    assert_eq!(s[4].header("x-line-access"), Some("ACCESS"));
     assert_eq!(s[1].target, "/hm/api/v1/home/groupprofile?homeId=c1");
     assert_eq!(s[2].json(), json!({"homeId": "u1", "coverObjectId": "O"}));
     assert_eq!(
@@ -293,9 +304,68 @@ async fn home_requests() {
         ("DELETE", "/hm/api/v1/home/cover")
     );
     assert_eq!(s[3].header("x-lhm"), Some("DELETE"));
+    assert_eq!(s[4].target, "/PAGEPOKER/api/v2/pageinfo/get.json");
+    assert_eq!(s[4].method, "POST");
     assert_eq!(
-        s[4].target,
-        "/PAGEPOKER/api/v2/pageinfo/get.json?url=https%3A%2F%2Fexample.com%2F%3Fa%3D1&phishingCheck=true"
+        s[4].json(),
+        json!({"url": "https://example.com/?a=1", "caller": "TALK_ANDROID", "unescape": "true", "phishingCheck": true})
+    );
+}
+
+#[tokio::test]
+async fn page_preview_reads_the_result_and_refusals() {
+    let (base, seen) = serve(vec![
+        (
+            200,
+            r#"{"result":{"title":"T","summary":"S","domain":"example.com","url":"","ogUrl":"https://example.com/a","image":"/0hIMG","image_width":640,"image_height":320,"isvideo":true}}"#,
+        ),
+        (
+            200,
+            r#"{"result":{"title":"T","obs":{"cdn":"https://cdn.example/","hash":"H"},"image":"/x"}}"#,
+        ),
+        (451, r#"{"code":451}"#),
+        (500, ""),
+    ])
+    .await;
+    let r = rest(&base);
+    let q = |url: &str| PageInfoQuery {
+        url: url.into(),
+        lang: Some("th_TH".into()),
+        ..Default::default()
+    };
+    let p = r
+        .home()
+        .page_preview(q("https://example.com/a"))
+        .await
+        .unwrap();
+    assert_eq!(p.title, "T");
+    assert_eq!(p.url, "https://example.com/a");
+    assert_eq!(p.image.as_deref(), Some("https://obs.line-scdn.net/0hIMG"));
+    assert_eq!(
+        (p.image_width, p.image_height, p.is_video),
+        (640, 320, true)
+    );
+    let p = r
+        .home()
+        .page_preview(q("https://example.com/b"))
+        .await
+        .unwrap();
+    assert_eq!(p.image.as_deref(), Some("https://cdn.example/H"));
+    let e = r
+        .home()
+        .page_preview(q("https://bad.example"))
+        .await
+        .unwrap_err();
+    assert_eq!(e.http_status(), Some(451));
+    let e = r
+        .home()
+        .page_preview(q("https://down.example"))
+        .await
+        .unwrap_err();
+    assert_eq!(e.http_status(), Some(500));
+    assert_eq!(
+        seen.lock().unwrap()[0].header("accept-language"),
+        Some("th-TH")
     );
 }
 
@@ -314,7 +384,31 @@ async fn translate_request() {
         ("POST", "/ds/translate/legyTransAPI.nhn")
     );
     assert_eq!(s[0].header("x-line-translate-from"), Some("line_desktop"));
-    assert_eq!(s[0].header("x-line-channeltoken"), Some("TOKEN-1341209950"));
+    assert_eq!(s[0].header("x-line-channeltoken"), Some("TOKEN-1627632136"));
     assert_eq!(s[0].header("x-line-access"), Some("ACCESS"));
     assert_eq!(s[0].json()["originalText"], "hello");
+}
+
+#[tokio::test]
+async fn translate_falls_back_to_the_timeline_token() {
+    let (base, seen) = serve(vec![
+        (401, r#"{"code":401,"message":"UNAUTHORIZED"}"#),
+        (200, r#"{"translatedText":"a"}"#),
+        (200, r#"{"translatedText":"b"}"#),
+    ])
+    .await;
+    let r = rest(&base);
+    let t = TranslateText::new("x", "th");
+    assert_eq!(r.translate(&t, None).await.unwrap()["translatedText"], "a");
+    assert_eq!(r.translate(&t, None).await.unwrap()["translatedText"], "b");
+    let s = seen.lock().unwrap();
+    let tokens: Vec<_> = s.iter().map(|x| x.header("x-line-channeltoken")).collect();
+    assert_eq!(
+        tokens,
+        [
+            Some("TOKEN-1627632136"),
+            Some("TOKEN-1341209950"),
+            Some("TOKEN-1341209950")
+        ]
+    );
 }

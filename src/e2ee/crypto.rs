@@ -19,7 +19,7 @@ use crate::thrift::{Protocol, TValue, read_struct};
 type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
 type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 /// WebCrypto `AES-CTR` with `length: 32` increments only the low 32 bits.
-type Aes256Ctr32 = ctr::Ctr32BE<aes::Aes256>;
+pub(crate) type Aes256Ctr32 = ctr::Ctr32BE<aes::Aes256>;
 
 fn no_e2ee_key(message: &str) -> Error {
     Error::internal("NoE2EEKey", message)
@@ -152,20 +152,44 @@ pub fn encrypt_aes_gcm(key: &[u8], nonce: &[u8], data: &[u8], aad: &[u8]) -> Res
         .map_err(|_| Error::Crypto("aes-256-gcm: encryption failed".into()))
 }
 
-/// AES-256-GCM over `ciphertext ‖ tag`.
+/// AES-256-GCM over `ciphertext ‖ tag` (128-bit tag).
+///
+/// A nonce of any length up to 32 bytes is accepted:
+/// GCM derives the counter block from a nonce that is not 12 bytes with
+/// GHASH. LINE's apps send 12.
 pub fn decrypt_aes_gcm(key: &[u8], nonce: &[u8], data: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
-    let cipher = aes_gcm::Aes256Gcm::new_from_slice(key)
-        .map_err(|e| Error::Crypto(format!("aes-256-gcm: {e}")))?;
-    if nonce.len() != 12 || data.len() < 16 {
-        return Err(Error::Crypto(
-            "aes-256-gcm: malformed nonce or ciphertext".into(),
-        ));
+    use aes_gcm::aead::consts::{
+        U1, U2, U3, U4, U5, U6, U7, U8, U9, U10, U11, U12, U13, U14, U15, U16, U17, U18, U19, U20,
+        U21, U22, U23, U24, U25, U26, U27, U28, U29, U30, U31, U32,
+    };
+    if data.len() < 16 {
+        return Err(Error::Crypto(format!(
+            "aes-256-gcm: ciphertext is {} bytes, shorter than the 16-byte tag",
+            data.len()
+        )));
     }
-    cipher
-        .decrypt(
-            aes_gcm::Nonce::from_slice(nonce),
-            Payload { msg: data, aad },
-        )
+    let payload = Payload { msg: data, aad };
+    macro_rules! open {
+        ($($n:literal => $size:ty),*) => {
+            match nonce.len() {
+                $($n => aes_gcm::AesGcm::<aes::Aes256, $size>::new_from_slice(key)
+                    .map(|c| c.decrypt(aes_gcm::Nonce::<$size>::from_slice(nonce), payload)),)*
+                n => {
+                    return Err(Error::Crypto(format!(
+                        "aes-256-gcm: nonce is {n} bytes, expected 1 to 32"
+                    )));
+                }
+            }
+        };
+    }
+    let res = open!(
+        1 => U1, 2 => U2, 3 => U3, 4 => U4, 5 => U5, 6 => U6, 7 => U7, 8 => U8, 9 => U9,
+        10 => U10, 11 => U11, 12 => U12, 13 => U13, 14 => U14, 15 => U15, 16 => U16,
+        17 => U17, 18 => U18, 19 => U19, 20 => U20, 21 => U21, 22 => U22, 23 => U23,
+        24 => U24, 25 => U25, 26 => U26, 27 => U27, 28 => U28, 29 => U29, 30 => U30,
+        31 => U31, 32 => U32
+    );
+    res.map_err(|e| Error::Crypto(format!("aes-256-gcm: {e}")))?
         .map_err(|_| Error::Crypto("aes-256-gcm: unable to authenticate data".into()))
 }
 

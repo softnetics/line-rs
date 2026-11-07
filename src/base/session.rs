@@ -35,6 +35,12 @@ pub enum LogoutReason {
     IdentifyModified,
     V3TokenClientLoggedOut,
     DeletedAccount,
+    /// `TalkException.code = AUTHENTICATION_FAILED` on a secondary-device
+    /// session: a forced logout.
+    AuthenticationFailed,
+    /// `TalkException.code = NOT_AVAILABLE_USER` on a secondary-device
+    /// session.
+    NotAvailableUser,
     /// Ended locally by [`BaseClient::kick_out`](super::BaseClient::kick_out)
     /// with a custom reason.
     Other(String),
@@ -55,6 +61,8 @@ impl LogoutReason {
             LogoutReason::IdentifyModified => "IDENTIFY_MODIFIED",
             LogoutReason::V3TokenClientLoggedOut => "V3_TOKEN_CLIENT_LOGGED_OUT",
             LogoutReason::DeletedAccount => "DELETED_ACCOUNT",
+            LogoutReason::AuthenticationFailed => "AUTHENTICATION_FAILED",
+            LogoutReason::NotAvailableUser => "NOT_AVAILABLE_USER",
             LogoutReason::Other(s) => s,
         }
     }
@@ -73,6 +81,8 @@ impl LogoutReason {
             "IDENTIFY_MODIFIED" => LogoutReason::IdentifyModified,
             "V3_TOKEN_CLIENT_LOGGED_OUT" => LogoutReason::V3TokenClientLoggedOut,
             "DELETED_ACCOUNT" => LogoutReason::DeletedAccount,
+            "AUTHENTICATION_FAILED" => LogoutReason::AuthenticationFailed,
+            "NOT_AVAILABLE_USER" => LogoutReason::NotAvailableUser,
             _ => return None,
         })
     }
@@ -81,12 +91,21 @@ impl LogoutReason {
     ///
     /// Only names that cannot be confused with unrelated failures are
     /// matched (`EXPIRED`, `LOG_OUT` and `REVOKE` are too generic: an
-    /// expired invitation ticket must not end the session).
+    /// expired invitation ticket must not end the session). See
+    /// [`from_error_for`](Self::from_error_for) for secondary devices.
     pub fn from_error(e: &Error) -> Option<Self> {
-        let Error::Request { data, .. } = e else {
+        Self::from_error_for(e, false)
+    }
+
+    /// [`from_error`](Self::from_error), plus, when `secondary` (the session
+    /// is a secondary device: desktop, iPad, `ANDROIDSECONDARY`, ...), a
+    /// `TalkException` with code `AUTHENTICATION_FAILED` (any reason) or
+    /// `NOT_AVAILABLE_USER`, both forced logouts. A more specific name in `reason` wins.
+    pub fn from_error_for(e: &Error, secondary: bool) -> Option<Self> {
+        let Error::Request { data, path, .. } = e else {
             return None;
         };
-        [data["code"].as_str(), data["reason"].as_str()]
+        let specific = [data["code"].as_str(), data["reason"].as_str()]
             .into_iter()
             .flatten()
             .find_map(|name| {
@@ -101,7 +120,19 @@ impl LogoutReason {
                             | LogoutReason::DeletedAccount
                     )
                 })
-            })
+            });
+        if specific.is_some() || !secondary {
+            return specific;
+        }
+        // Other services reuse these names with other meanings.
+        if crate::request::exception_type(path) != "TalkException" {
+            return None;
+        }
+        match data["code"].as_str()? {
+            "AUTHENTICATION_FAILED" => Some(LogoutReason::AuthenticationFailed),
+            "NOT_AVAILABLE_USER" => Some(LogoutReason::NotAvailableUser),
+            _ => None,
+        }
     }
 }
 
@@ -109,6 +140,13 @@ impl fmt::Display for LogoutReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
+}
+
+/// Whether `device` logs in as a secondary device (everything but a
+/// primary phone).
+pub(crate) fn is_secondary_device(device: crate::device::Device) -> bool {
+    use crate::device::Device;
+    !matches!(device, Device::Android | Device::Ios)
 }
 
 /// HTTP or SOCKS proxy for every request of a client (API, LEGY gateway,
@@ -238,6 +276,62 @@ mod tests {
             LogoutReason::from_name("DEVICE_LOSE").unwrap().to_string(),
             "DEVICE_LOSE"
         );
+    }
+
+    #[test]
+    fn secondary_devices_also_end_on_authentication_failed() {
+        let failed = talk_err("AUTHENTICATION_FAILED", "");
+        let unavailable = talk_err("NOT_AVAILABLE_USER", "whatever");
+        // Primary sessions keep the narrow set.
+        assert_eq!(LogoutReason::from_error(&failed), None);
+        assert_eq!(LogoutReason::from_error_for(&unavailable, false), None);
+        assert_eq!(
+            LogoutReason::from_error_for(&failed, true),
+            Some(LogoutReason::AuthenticationFailed)
+        );
+        assert_eq!(
+            LogoutReason::from_error_for(&talk_err("AUTHENTICATION_FAILED", "SOMETHING"), true),
+            Some(LogoutReason::AuthenticationFailed)
+        );
+        assert_eq!(
+            LogoutReason::from_error_for(&unavailable, true),
+            Some(LogoutReason::NotAvailableUser)
+        );
+        // A specific reason still wins.
+        assert_eq!(
+            LogoutReason::from_error_for(
+                &talk_err("AUTHENTICATION_FAILED", "V3_TOKEN_CLIENT_LOGGED_OUT"),
+                true
+            ),
+            Some(LogoutReason::V3TokenClientLoggedOut)
+        );
+        // Not from other services' exceptions.
+        let square = Error::Request {
+            method: "getSquare".into(),
+            path: "/SQ1".into(),
+            data: crate::tv!({"code": "AUTHENTICATION_FAILED"}),
+        };
+        assert_eq!(LogoutReason::from_error_for(&square, true), None);
+        assert_eq!(
+            LogoutReason::from_error_for(&talk_err("NOT_FOUND", ""), true),
+            None
+        );
+        assert_eq!(
+            LogoutReason::from_name("NOT_AVAILABLE_USER")
+                .unwrap()
+                .to_string(),
+            "NOT_AVAILABLE_USER"
+        );
+    }
+
+    #[test]
+    fn which_devices_are_secondary() {
+        use crate::device::Device;
+        assert!(is_secondary_device(Device::DesktopWin));
+        assert!(is_secondary_device(Device::IosIpad));
+        assert!(is_secondary_device(Device::AndroidSecondary));
+        assert!(!is_secondary_device(Device::Android));
+        assert!(!is_secondary_device(Device::Ios));
     }
 
     #[test]

@@ -10,6 +10,7 @@
 //! * [`conn`] — packet reassembly and the full-duplex transport (`conn.ts`).
 //! * [`tmc`] — the TMoreCompact reader used by talk sign-on responses.
 
+pub(crate) mod backoff;
 pub mod conn;
 pub mod frame;
 pub(crate) mod manager;
@@ -219,12 +220,51 @@ impl PushHost for BaseClient {
         &self.sync
     }
 
-    fn emit_sync(&self, data: SyncData) {
-        self.emit(ClientEvent::UpdateSyncData(data));
+    fn save_sync(&self, data: SyncData) -> BoxFuture<'static, ()> {
+        let c = self.clone();
+        async move { c.store_sync_data(data).await }.boxed()
+    }
+
+    fn restore_sync(&self) -> BoxFuture<'static, ()> {
+        let c = self.clone();
+        async move { c.load_sync_data().await }.boxed()
     }
 
     fn log(&self, kind: &str, data: serde_json::Value) {
         BaseClient::log(self, kind, data);
+    }
+
+    fn emit(&self, event: ClientEvent) {
+        BaseClient::emit(self, event);
+    }
+
+    fn fail_over(&self) {
+        if self.endpoint_count() > 1 {
+            self.fail_over_from(self.active_endpoint_index());
+        }
+    }
+
+    fn recover_sync_error(&self, e: &Error, token: Option<String>) -> BoxFuture<'static, bool> {
+        let must_refresh = e.code() == Some("MUST_REFRESH_V3_TOKEN");
+        let logout = self.logout_reason(e);
+        let c = self.clone();
+        async move {
+            if let Some(reason) = logout {
+                c.kick_out(reason);
+                return false;
+            }
+            if !must_refresh {
+                return false;
+            }
+            match c.refresh_token_after(token.as_deref()).await {
+                Ok(()) => true,
+                Err(e) => {
+                    c.log("RefreshError", serde_json::json!({"error": e.to_string()}));
+                    false
+                }
+            }
+        }
+        .boxed()
     }
 
     fn open_conn(&self, path: &str) -> Result<Conn> {
@@ -234,7 +274,7 @@ impl PushHost for BaseClient {
         headers.push(("accept".into(), "application/octet-stream".into()));
         Ok(Conn::open(
             &self.push_http,
-            &format!("https://{}{}", self.endpoint, path),
+            &crate::request::endpoint_url(self.current_endpoint(), path),
             headers,
         ))
     }
