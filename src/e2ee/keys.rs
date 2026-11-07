@@ -584,9 +584,9 @@ impl<'a> E2ee<'a> {
         }
         self.open_group_shared_key(chat_mid, &shared)
             .await
-            .map_err(|(why, e)| match why {
-                Some(why) => fail(why, e),
-                None => e,
+            .map_err(|failed| match *failed {
+                (Some(why), e) => fail(why, e),
+                (None, e) => e,
             })
     }
 
@@ -629,7 +629,7 @@ impl<'a> E2ee<'a> {
     ) -> Result<GroupKey> {
         self.open_group_shared_key(chat_mid, shared)
             .await
-            .map_err(|(_, e)| e)
+            .map_err(|failed| failed.1)
     }
 
     /// [`Self::unwrap_group_shared_key`], with why it failed when the
@@ -638,9 +638,9 @@ impl<'a> E2ee<'a> {
         &self,
         chat_mid: &str,
         shared: &Value,
-    ) -> std::result::Result<GroupKey, (Option<GroupKeyFailure>, Error)> {
+    ) -> std::result::Result<GroupKey, Box<(Option<GroupKeyFailure>, Error)>> {
         use GroupKeyFailure::*;
-        let plain = |e: Error| (None, e);
+        let plain = |e: Error| Box::new((None, e));
         let group_key_id = key_id_of(&shared["groupKeyId"]).ok_or_else(|| {
             plain(Error::internal(
                 "NoE2EEKey",
@@ -655,13 +655,13 @@ impl<'a> E2ee<'a> {
             ))
         };
         let receiver_key_id = key_id_of(&shared["receiverKeyId"])
-            .ok_or_else(|| (Some(MyKeyMissing), missing_own()))?;
+            .ok_or_else(|| Box::new((Some(MyKeyMissing), missing_own())))?;
         let encrypted = shared["encryptedSharedKey"].as_bytes().unwrap_or_default();
 
         let self_key = self
             .own_key(receiver_key_id)
             .await
-            .map_err(|e| (Some(MyKeyMissing), e))?;
+            .map_err(|e| Box::new((Some(MyKeyMissing), e)))?;
         // A key we created ourselves was wrapped with one of our own keys.
         let own_creator_key = match creator_key_id {
             Some(id) if self.host.self_mid().as_deref() == Some(creator) => {
@@ -677,13 +677,13 @@ impl<'a> E2ee<'a> {
                 .map_err(|e| {
                     let gone = matches!(&e, Error::Internal { kind, .. } if kind == "E2EEKeyMissing")
                         || is_unresolvable_code(&e);
-                    (gone.then_some(CreatorKeyUnavailable), e)
+                    Box::new((gone.then_some(CreatorKeyUnavailable), e))
                 })?,
         };
         let secret = crypto::generate_shared_secret(&self_key.private_key(), &creator_key);
         let (key, iv) = crypto::derive_key_iv(&secret, &[]);
         let plain_key = crypto::decrypt_aes_cbc(&key, &iv, encrypted, true)
-            .map_err(|e| (Some(SharedKeyUndecryptable), e))?;
+            .map_err(|e| Box::new((Some(SharedKeyUndecryptable), e)))?;
 
         let group_key = GroupKey {
             priv_key: B64.encode(plain_key),
