@@ -133,7 +133,7 @@ pub struct E2eeSendAttempt {
 /// Errors from our own key material (no key, a key LINE does not have, a
 /// peer without Letter Sealing): the message cannot be encrypted here, but
 /// may still go plain when E2EE was not required.
-fn is_local_key_error(e: &Error) -> bool {
+pub(crate) fn is_local_key_error(e: &Error) -> bool {
     match e {
         Error::Internal { kind, .. } => matches!(
             kind.as_str(),

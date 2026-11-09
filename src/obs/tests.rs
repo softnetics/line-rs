@@ -48,6 +48,10 @@ struct Fake {
     /// `(o_type, src_oid, src_message_id)` per copy.
     copies: Mutex<Vec<(ObjType, String, String)>>,
     copy_fails: bool,
+    /// What `sealable` answers (default true).
+    sealable: bool,
+    /// `encrypt_message` fails: the recipient has no Letter Sealing key.
+    unsealable: bool,
 }
 
 impl Default for Fake {
@@ -72,6 +76,8 @@ impl Fake {
             plain_answers: Mutex::default(),
             copies: Mutex::default(),
             copy_fails: false,
+            sealable: true,
+            unsealable: false,
         }
     }
     fn failing_sends(codes: &[&'static str]) -> Self {
@@ -134,6 +140,9 @@ impl MediaBackend for Fake {
     fn drop_media_flow(&self, chat: &str) {
         self.dropped.lock().unwrap().push(chat.to_string());
     }
+    async fn sealable(&self, _chat: &str) -> bool {
+        self.sealable
+    }
     async fn upload(
         &self,
         data: Bytes,
@@ -195,6 +204,9 @@ impl MediaBackend for Fake {
         file_name: Option<&str>,
         _ct: i32,
     ) -> Result<Vec<Vec<u8>>> {
+        if self.unsealable {
+            return Err(Error::internal("Not support E2EE", "u-recipient"));
+        }
         self.encrypted
             .lock()
             .unwrap()
@@ -749,6 +761,54 @@ async fn plain_codes_drop_the_flow_and_upload_v1() {
         );
         assert_eq!(fake.sent.lock().unwrap().len(), 1);
     }
+}
+
+#[tokio::test]
+async fn unsealable_chat_uploads_plain_before_anything_else() {
+    // An official account: LINE says V2 (or can't say), but the chat has
+    // no Letter Sealing.
+    for flows in [
+        Ok(MediaFlows::all(MediaFlow::V2)),
+        Err(Error::internal("x", "y")),
+    ] {
+        let fake = Fake {
+            flows,
+            sealable: false,
+            ..Fake::default()
+        };
+        let (fake, res) = run_with(fake, media(&[0; 10], ObjType::File)).await;
+        assert!(matches!(res.unwrap(), SentMedia::Plain { .. }));
+        assert!(fake.uploads.lock().unwrap().is_empty());
+        assert!(fake.encrypted.lock().unwrap().is_empty());
+        assert_eq!(fake.plain.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn missing_key_at_encryption_falls_back_to_plain() {
+    // The stored state still said sealable.
+    let fake = Fake {
+        unsealable: true,
+        ..Fake::default()
+    };
+    let (fake, res) = run_with(fake, media(&[0; 10], ObjType::Image)).await;
+    assert!(matches!(res.unwrap(), SentMedia::Plain { .. }));
+    assert!(fake.sent.lock().unwrap().is_empty());
+    assert_eq!(fake.plain.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn forced_e2ee_to_an_unsealable_chat_fails() {
+    let mut m = media(&[0; 10], ObjType::File);
+    m.opts = MediaOptions::new().e2ee(true);
+    let fake = Fake {
+        sealable: false,
+        unsealable: true,
+        ..Fake::default()
+    };
+    let (fake, res) = run_with(fake, m).await;
+    assert!(res.is_err());
+    assert!(fake.plain.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
