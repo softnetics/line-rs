@@ -292,9 +292,10 @@ pub(crate) trait MediaBackend: Sync {
     /// The chat's flows (cached until their TTL).
     async fn media_flows(&self, chat: &str) -> Result<MediaFlows>;
     fn drop_media_flow(&self, chat: &str);
-    /// Whether messages to `chat` can be sealed (Letter Sealing), from its
-    /// stored state, looked up first when unknown. True when the lookup
-    /// fails, so the send goes on as before.
+    /// Whether messages to `chat` can be sealed (Letter Sealing). A stored
+    /// sealable state is trusted; an unknown or plain one is looked up
+    /// again, since the peer may have turned Letter Sealing on since. True
+    /// when the lookup fails, so the send goes on as before.
     async fn sealable(&self, chat: &str) -> bool;
     /// V2 upload with extra `headers`; returns the object id.
     async fn upload(
@@ -415,17 +416,17 @@ impl MediaBackend for Obs<'_> {
     }
 
     async fn sealable(&self, chat: &str) -> bool {
-        let mut state = self.client.e2ee_chat_state(chat).await;
-        if !state.known {
-            match self.client.refresh_e2ee_chat_state(chat).await {
-                Ok(s) => state = s,
-                Err(e) => {
-                    tracing::debug!(error = %e, "E2EE state lookup failed");
-                    return true;
-                }
+        let stored = self.client.e2ee_chat_state(chat).await;
+        if stored.known && stored.usable && stored.key_id.is_some() {
+            return true;
+        }
+        match self.client.refresh_e2ee_chat_state(chat).await {
+            Ok(state) => state.usable && state.key_id.is_some(),
+            Err(e) => {
+                tracing::debug!(error = %e, "E2EE state lookup failed");
+                true
             }
         }
-        state.usable && state.key_id.is_some()
     }
 
     async fn encrypt_message(
@@ -604,9 +605,10 @@ pub(super) async fn send_object(
             .await
         {
             Ok(chunks) => chunks,
-            // No key to seal it with after all: it goes plain unless E2EE
-            // was required, as a text message does.
-            Err(e) if crate::e2ee::is_local_key_error(&e) => return Ok(Sent::WantsPlain(e)),
+            // The peer has no key to seal it with after all: it goes plain
+            // unless E2EE was required. Our own key or profile failing is
+            // an error, not a reason to send plain.
+            Err(e) if peer_has_no_key(&e) => return Ok(Sent::WantsPlain(e)),
             Err(e) => return Err(e),
         };
         let err = match backend
@@ -635,6 +637,11 @@ pub(super) async fn send_object(
             _ => return Err(err),
         }
     }
+}
+
+/// Encryption failed because the recipient has no Letter Sealing key.
+fn peer_has_no_key(e: &Error) -> bool {
+    matches!(e, Error::Internal { kind, .. } if kind == "Not support E2EE" || kind == "NoE2EEKey" || kind == "No E2EEKey")
 }
 
 /// `X-Talk-Meta` (or `X-Square-Meta`) for an upload of `m`, if any.

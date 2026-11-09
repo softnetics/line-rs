@@ -48,7 +48,6 @@ pub use message::{
     encrypt_payload, is_undecrypted, spec_version_of,
 };
 pub use recovery::{E2eeSendRecovery, MAX_E2EE_SEND_ATTEMPTS, send_recovery};
-pub(crate) use send::is_local_key_error;
 pub use send::{E2eeChatState, E2eeSendAttempt, E2eeSendOptions};
 
 use crate::base::BaseClient;

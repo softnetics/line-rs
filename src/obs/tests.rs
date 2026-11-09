@@ -52,6 +52,8 @@ struct Fake {
     sealable: bool,
     /// `encrypt_message` fails: the recipient has no Letter Sealing key.
     unsealable: bool,
+    /// `encrypt_message` fails with this error instead.
+    encrypt_error: Option<&'static str>,
 }
 
 impl Default for Fake {
@@ -78,6 +80,7 @@ impl Fake {
             copy_fails: false,
             sealable: true,
             unsealable: false,
+            encrypt_error: None,
         }
     }
     fn failing_sends(codes: &[&'static str]) -> Self {
@@ -206,6 +209,9 @@ impl MediaBackend for Fake {
     ) -> Result<Vec<Vec<u8>>> {
         if self.unsealable {
             return Err(Error::internal("Not support E2EE", "u-recipient"));
+        }
+        if let Some(kind) = self.encrypt_error {
+            return Err(Error::internal(kind, "x"));
         }
         self.encrypted
             .lock()
@@ -794,7 +800,24 @@ async fn missing_key_at_encryption_falls_back_to_plain() {
     let (fake, res) = run_with(fake, media(&[0; 10], ObjType::Image)).await;
     assert!(matches!(res.unwrap(), SentMedia::Plain { .. }));
     assert!(fake.sent.lock().unwrap().is_empty());
+    assert!(
+        !fake.uploads.lock().unwrap().is_empty(),
+        "uploaded for V2 first"
+    );
     assert_eq!(fake.plain.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn own_key_or_profile_errors_stay_errors() {
+    for kind in ["NotAuthorized", "E2EEError"] {
+        let fake = Fake {
+            encrypt_error: Some(kind),
+            ..Fake::default()
+        };
+        let (fake, res) = run_with(fake, media(&[0; 10], ObjType::File)).await;
+        assert!(res.is_err(), "{kind}");
+        assert!(fake.plain.lock().unwrap().is_empty(), "{kind} went plain");
+    }
 }
 
 #[tokio::test]
