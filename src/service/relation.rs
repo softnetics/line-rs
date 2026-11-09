@@ -5,44 +5,108 @@ use crate::error::Result;
 use crate::request::Parse;
 use crate::thrift::{Schema, TType, TValue, Value, encode_struct};
 
+/// Where the user found the person they add: the `trackingMeta` union of
+/// `addFriendByMid`. LINE refuses an add whose meta leaves out the data
+/// its kind names (`MALFORMED_REQUEST`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AddFriendVia {
+    /// Found by phone number.
+    Phone(String),
+    /// Found by LINE ID.
+    SearchId(String),
+    /// Found through a profile link or QR code (`line.me/ti/p/{ticket}`).
+    UserTicket(String),
+    /// From a group's member list.
+    GroupMemberList { chat_mid: String },
+    /// From a contact shared in a chat.
+    ShareContact {
+        message_id: String,
+        chat_mid: String,
+        sender_mid: String,
+    },
+    /// From a message sent by someone who is not a friend.
+    StrangerMessage {
+        message_id: String,
+        chat_mid: String,
+    },
+    /// From a mention in a chat.
+    MentionInChat {
+        chat_mid: String,
+        message_id: String,
+    },
+}
+
+impl AddFriendVia {
+    /// The union field id and the fields of its struct.
+    fn meta(&self) -> (i16, Vec<(i16, &str)>) {
+        match self {
+            Self::Phone(phone) => (2, vec![(1, phone)]),
+            Self::SearchId(id) => (3, vec![(1, id)]),
+            Self::UserTicket(ticket) => (4, vec![(1, ticket)]),
+            Self::GroupMemberList { chat_mid } => (5, vec![(1, chat_mid)]),
+            Self::ShareContact {
+                message_id,
+                chat_mid,
+                sender_mid,
+            } => (12, vec![(1, message_id), (2, chat_mid), (3, sender_mid)]),
+            Self::StrangerMessage {
+                message_id,
+                chat_mid,
+            } => (13, vec![(1, message_id), (2, chat_mid)]),
+            Self::MentionInChat {
+                chat_mid,
+                message_id,
+            } => (15, vec![(1, chat_mid), (2, message_id)]),
+        }
+    }
+
+    /// The `reference` LINE sends for this kind, where it is known.
+    fn reference(&self) -> Option<&'static str> {
+        match self {
+            Self::Phone(_) => Some(r#"{"screen":"friendAdd:phoneSearch","spec":"native"}"#),
+            Self::SearchId(_) => Some(r#"{"screen":"friendAdd:idSearch","spec":"native"}"#),
+            Self::GroupMemberList { .. } => Some(r#"{"screen":"groupMemberList","spec":"native"}"#),
+            _ => None,
+        }
+    }
+}
+
 /// Options for [`RelationService::add_friend_by_mid`].
 #[derive(Debug, Clone)]
 pub struct AddFriendByMidOptions {
     pub mid: String,
     /// JSON provenance, e.g. `{"screen":"groupMemberList","spec":"native"}`.
+    /// [`new`](Self::new) fills it in for the kinds whose value is known.
     pub reference: Option<String>,
-    /// Field id of the tracking meta union (2 by phone, 3 by search id,
-    /// 5 group member list; default 5).
-    pub tracking_meta_type: i16,
-    pub tracking_meta_hint: Option<String>,
+    pub via: AddFriendVia,
 }
 
 impl AddFriendByMidOptions {
-    pub fn new(mid: impl Into<String>) -> Self {
+    pub fn new(mid: impl Into<String>, via: AddFriendVia) -> Self {
         Self {
             mid: mid.into(),
-            reference: None,
-            tracking_meta_type: 5,
-            tracking_meta_hint: None,
+            reference: via.reference().map(str::to_string),
+            via,
         }
     }
 }
 
-fn opt_str(id: i16, v: Option<&str>) -> Option<(i16, TValue)> {
-    v.map(|s| (id, TValue::string(s)))
-}
-
 /// Raw `addFriendByMid` args (linejs sends a hand-built `NestedArray`).
 pub(crate) fn add_friend_by_mid_args(seq: i64, o: &AddFriendByMidOptions) -> Vec<(i16, TValue)> {
+    let (kind, fields) = o.via.meta();
     let meta = TValue::Struct(
-        opt_str(1, o.tracking_meta_hint.as_deref())
+        fields
             .into_iter()
+            .map(|(id, v)| (id, TValue::string(v)))
             .collect(),
     );
     let tracking = TValue::Struct(
-        opt_str(1, o.reference.as_deref())
+        o.reference
+            .as_deref()
+            .map(|r| (1, TValue::string(r)))
             .into_iter()
-            .chain([(2, TValue::Struct(vec![(o.tracking_meta_type, meta)]))])
+            .chain([(2, TValue::Struct(vec![(kind, meta)]))])
             .collect(),
     );
     vec![(
@@ -119,12 +183,10 @@ impl RelationService<'_> {
     /// Add a friend by LINE ID.
     pub async fn add_friend_by_user_id(&self, user_id: &str) -> Result<Value> {
         let contact = self.find_contact_by_search_id_or_ticket_v3(user_id).await?;
-        self.add_friend_by_mid(AddFriendByMidOptions {
-            mid: found_mid(&contact)?,
-            reference: Some(r#"{"screen":"friendAdd:idSearch","spec":"native"}"#.into()),
-            tracking_meta_type: 3,
-            tracking_meta_hint: Some(user_id.into()),
-        })
+        self.add_friend_by_mid(AddFriendByMidOptions::new(
+            found_mid(&contact)?,
+            AddFriendVia::SearchId(user_id.into()),
+        ))
         .await
     }
 
@@ -142,12 +204,10 @@ impl RelationService<'_> {
     /// Add a friend by phone number.
     pub async fn add_friend_by_phone(&self, phone: &str) -> Result<Value> {
         let contact = self.find_contact_by_phone_v3(phone).await?;
-        self.add_friend_by_mid(AddFriendByMidOptions {
-            mid: found_mid(&contact)?,
-            reference: Some(r#"{"screen":"friendAdd:phoneSearch","spec":"native"}"#.into()),
-            tracking_meta_type: 2,
-            tracking_meta_hint: Some(phone.into()),
-        })
+        self.add_friend_by_mid(AddFriendByMidOptions::new(
+            found_mid(&contact)?,
+            AddFriendVia::Phone(phone.into()),
+        ))
         .await
     }
 
@@ -559,12 +619,12 @@ mod tests {
 
     #[test]
     fn add_friend_by_mid_envelope() {
-        let o = AddFriendByMidOptions {
-            mid: "u-target".into(),
-            reference: Some(r#"{"screen":"groupMemberList","spec":"native"}"#.into()),
-            tracking_meta_type: 5,
-            tracking_meta_hint: Some("c-group".into()),
-        };
+        let o = AddFriendByMidOptions::new(
+            "u-target",
+            AddFriendVia::GroupMemberList {
+                chat_mid: "c-group".into(),
+            },
+        );
         let f = add_friend_by_mid_args(42, &o);
         assert_eq!(path(&f, &[1, 1]), Some(&TValue::I32(42)));
         assert_eq!(path(&f, &[1, 2]), Some(&s("u-target")));
@@ -588,15 +648,51 @@ mod tests {
 
     #[test]
     fn add_friend_by_search_id_provenance() {
-        let o = AddFriendByMidOptions {
-            mid: "u-resolved".into(),
-            reference: Some(r#"{"screen":"friendAdd:idSearch","spec":"native"}"#.into()),
-            tracking_meta_type: 3,
-            tracking_meta_hint: Some("alice".into()),
-        };
+        let o = AddFriendByMidOptions::new("u-resolved", AddFriendVia::SearchId("alice".into()));
         let f = add_friend_by_mid_args(42, &o);
+        assert_eq!(
+            path(&f, &[1, 3, 1]),
+            Some(&s(r#"{"screen":"friendAdd:idSearch","spec":"native"}"#))
+        );
         assert_eq!(path(&f, &[1, 3, 2, 3, 1]), Some(&s("alice")));
         assert_eq!(path(&f, &[1, 3, 2, 5]), None);
+    }
+
+    #[test]
+    fn add_friend_meta_reads_back_as_the_idl_union() {
+        let read = |via: AddFriendVia| {
+            let f = add_friend_by_mid_args(1, &AddFriendByMidOptions::new("u-target", via));
+            decode_struct(
+                Schema::line(),
+                Some("addFriendByMid_args"),
+                &TValue::Struct(f),
+            )["request"]["tracking"]["trackingMeta"]
+                .clone()
+        };
+        let m = read(AddFriendVia::UserTicket("t1".into()));
+        assert_eq!(m["byUserTicket"]["ticket"].as_str(), Some("t1"));
+        let m = read(AddFriendVia::ShareContact {
+            message_id: "m1".into(),
+            chat_mid: "c1".into(),
+            sender_mid: "u1".into(),
+        });
+        assert_eq!(m["shareContact"]["messageId"].as_str(), Some("m1"));
+        assert_eq!(m["shareContact"]["chatMid"].as_str(), Some("c1"));
+        assert_eq!(m["shareContact"]["senderMid"].as_str(), Some("u1"));
+        let m = read(AddFriendVia::StrangerMessage {
+            message_id: "m1".into(),
+            chat_mid: "u1".into(),
+        });
+        assert_eq!(m["strangerMessage"]["messageId"].as_str(), Some("m1"));
+        assert_eq!(m["strangerMessage"]["chatMid"].as_str(), Some("u1"));
+        let m = read(AddFriendVia::MentionInChat {
+            chat_mid: "c1".into(),
+            message_id: "m1".into(),
+        });
+        assert_eq!(m["mentionInChat"]["chatMid"].as_str(), Some("c1"));
+        assert_eq!(m["mentionInChat"]["messageId"].as_str(), Some("m1"));
+        let m = read(AddFriendVia::Phone("+66".into()));
+        assert_eq!(m["byPhone"]["phone"].as_str(), Some("+66"));
     }
 
     #[test]
