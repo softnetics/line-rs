@@ -292,6 +292,11 @@ pub(crate) trait MediaBackend: Sync {
     /// The chat's flows (cached until their TTL).
     async fn media_flows(&self, chat: &str) -> Result<MediaFlows>;
     fn drop_media_flow(&self, chat: &str);
+    /// Whether messages to `chat` can be sealed (Letter Sealing). A stored
+    /// sealable state is trusted; an unknown or plain one is looked up
+    /// again, since the peer may have turned Letter Sealing on since. True
+    /// when the lookup fails, so the send goes on as before.
+    async fn sealable(&self, chat: &str) -> bool;
     /// V2 upload with extra `headers`; returns the object id.
     async fn upload(
         &self,
@@ -408,6 +413,20 @@ impl MediaBackend for Obs<'_> {
 
     async fn copy(&self, o_type: ObjType, src_oid: &str, src_message_id: &str) -> Result<String> {
         self.copy_e2ee_object(o_type, src_oid, src_message_id).await
+    }
+
+    async fn sealable(&self, chat: &str) -> bool {
+        let stored = self.client.e2ee_chat_state(chat).await;
+        if stored.known && stored.usable && stored.key_id.is_some() {
+            return true;
+        }
+        match self.client.refresh_e2ee_chat_state(chat).await {
+            Ok(state) => state.usable && state.key_id.is_some(),
+            Err(e) => {
+                tracing::debug!(error = %e, "E2EE state lookup failed");
+                true
+            }
+        }
     }
 
     async fn encrypt_message(
@@ -528,11 +547,16 @@ pub(crate) async fn send_media(backend: &dyn MediaBackend, m: MediaSend) -> Resu
     }
     check_media_size(m.o_type, m.file.len())?;
     // Images of a photo group always go plain (V1).
-    let flow = if m.opts.group.is_some() {
+    let mut flow = if m.opts.group.is_some() {
         MediaFlow::V1
     } else {
         choose_flow(backend, &m.to, m.o_type, m.opts.e2ee).await?
     };
+    // A chat that cannot be sealed (an official account, a peer without
+    // Letter Sealing) takes its media plain, before anything is uploaded.
+    if flow == MediaFlow::V2 && m.opts.e2ee != Some(true) && !backend.sealable(&m.to).await {
+        flow = MediaFlow::V1;
+    }
     // One request number for the upload and every resend.
     let seq = backend.reqseq().await?;
     if flow == MediaFlow::V1 {
@@ -576,9 +600,17 @@ pub(super) async fn send_object(
     let mut attempts = 0;
     loop {
         attempts += 1;
-        let chunks = backend
+        let chunks = match backend
             .encrypt_message(to, &object.key_material, file_name.as_deref(), content_type)
-            .await?;
+            .await
+        {
+            Ok(chunks) => chunks,
+            // The peer has no key to seal it with after all: it goes plain
+            // unless E2EE was required. Our own key or profile failing is
+            // an error, not a reason to send plain.
+            Err(e) if peer_has_no_key(&e) => return Ok(Sent::WantsPlain(e)),
+            Err(e) => return Err(e),
+        };
         let err = match backend
             .send(to, chunks, content_type, metadata.clone(), seq)
             .await
@@ -605,6 +637,11 @@ pub(super) async fn send_object(
             _ => return Err(err),
         }
     }
+}
+
+/// Encryption failed because the recipient has no Letter Sealing key.
+fn peer_has_no_key(e: &Error) -> bool {
+    matches!(e, Error::Internal { kind, .. } if kind == "Not support E2EE" || kind == "NoE2EEKey" || kind == "No E2EEKey")
 }
 
 /// `X-Talk-Meta` (or `X-Square-Meta`) for an upload of `m`, if any.
