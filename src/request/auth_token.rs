@@ -189,10 +189,10 @@ pub(crate) fn now_ms() -> i64 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn jwt() -> String {
+    pub(crate) fn jwt() -> String {
         let h = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256"}"#);
         let p = URL_SAFE_NO_PAD.encode(br#"{"exp":1}"#);
         format!("{h}.{p}.sig")

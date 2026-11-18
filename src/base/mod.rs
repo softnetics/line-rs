@@ -24,14 +24,22 @@ use crate::request::legy::LegyEncryptedTransport;
 use crate::storage::{MemoryStorage, Storage};
 use crate::thrift::Value;
 
-/// Whether requests go through the LEGY encrypted gateway.
+/// Whether requests go through the LEGY encrypted gateway
+/// (`gf.line.naver.jp/enc`).
+///
+/// The gateway came from the old LINE Chrome extension. LINE stopped serving
+/// it in November 2026: every request answers 404. The Android app sends
+/// Thrift straight to the LEGY host over TLS, and so does `Auto`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LegyMode {
-    /// Encrypt talk-path requests when the token is a modern JWT/primary/auth
-    /// key token; keep legacy opaque tokens on the plain endpoint.
+    /// Send every request straight to the LEGY host over TLS, like the
+    /// Android app.
     #[default]
     Auto,
+    /// Send requests that carry an access token through the encrypted
+    /// gateway, which LINE no longer serves.
     Always,
+    /// Never use the gateway. Same as `Auto` now.
     Never,
 }
 

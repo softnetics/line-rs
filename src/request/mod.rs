@@ -76,24 +76,6 @@ pub fn exception_type(path: &str) -> &'static str {
     }
 }
 
-fn is_legy_talk_path(path: &str) -> bool {
-    matches!(
-        path,
-        "/S3"
-            | "/S4"
-            | "/V4"
-            | "/SYNC3"
-            | "/SYNC4"
-            | "/P4"
-            | "/P5"
-            | "/NP4"
-            | "/NP5"
-            | "/C5"
-            | "/CA5"
-            | "/ECA5"
-    )
-}
-
 /// Raw HTTP response (after LEGY decryption when used).
 #[derive(Debug)]
 pub struct RawResponse {
@@ -435,13 +417,8 @@ impl BaseClient {
             .map(|(_, v)| v.clone());
         let use_legy = match self.legy_mode {
             _ if !allow_legy => false,
-            LegyMode::Never => false,
-            _ if access.is_none() => false,
-            LegyMode::Always => true,
-            LegyMode::Auto => {
-                is_legy_talk_path(path)
-                    && auth_token::should_use_legy_encrypted_access(access.as_deref())
-            }
+            LegyMode::Auto | LegyMode::Never => false,
+            LegyMode::Always => access.is_some(),
         };
         if use_legy {
             let transport = self.legy_transport();
