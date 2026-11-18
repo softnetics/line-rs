@@ -71,7 +71,7 @@ a local dashboard for the live tests (see
 | `obs` | `base/obs` | media upload and download, plain and E2EE |
 | `timeline` | `base/timeline` | posts, likes, comments |
 | `rest` | none | Note extras, home profile and cover, URL preview, translation, Keep (404s now). Album writes are in `service::moa`. Reverse engineered from LINE for macOS and not verified |
-| `request` | `base/request` | Thrift over HTTP, LEGY encrypted gateway (`gf.line.naver.jp/enc`) |
+| `request` | `base/request` | Thrift over HTTPS straight to the LEGY host, like the Android app. The old encrypted gateway (`gf.line.naver.jp/enc`) stays behind `LegyMode::Always`, but LINE no longer serves it |
 | `grpc`, `protobuf` | none | unary and server-streaming gRPC over HTTP/2 to LEGY, and a hand-written protobuf codec |
 | `thrift` | `base/thrift`, `@evex/linejs-types` | binary and compact protocols, IDL schema, dynamic `Value` |
 | `storage` | `@evex/linejs/storage` | `MemoryStorage`, `FileStorage` (JSON, same format as LINEJS) |

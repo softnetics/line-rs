@@ -484,6 +484,22 @@ async fn authentication_failed_ends_a_secondary_session() {
 }
 
 #[tokio::test]
+async fn jwt_token_goes_straight_to_the_legy_host_by_default() {
+    let (url, seen) = serve(vec![profile_reply()]).await;
+    let c = BaseClient::builder(Device::AndroidSecondary)
+        .endpoint(url)
+        .build()
+        .unwrap();
+    let jwt = auth_token::tests::jwt();
+    assert!(auth_token::should_use_legy_encrypted_access(Some(&jwt)));
+    c.set_auth_token(Some(jwt.clone()));
+    get_profile(&c).await.unwrap();
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen[0].path, "/S4");
+    assert_eq!(seen[0].access.as_deref(), Some(jwt.as_str()));
+}
+
+#[tokio::test]
 async fn fails_over_to_backup_host_on_connect_error() {
     // A port nothing listens on.
     let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
