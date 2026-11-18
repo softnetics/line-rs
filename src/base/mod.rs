@@ -39,6 +39,7 @@ pub enum LegyMode {
     /// Send requests that carry an access token through the encrypted
     /// gateway, which LINE no longer serves.
     Always,
+    /// Never use the gateway. Same as `Auto` now.
     Never,
 }
 
