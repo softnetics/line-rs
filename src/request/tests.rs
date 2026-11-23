@@ -696,8 +696,9 @@ fn qr_login_errors_decode_with_their_own_codes() {
         data,
     };
     assert_eq!(err.code(), Some("INVALID_CONTEXT"));
-    assert_ne!(
+    assert_eq!(
         err.error_code(),
-        Some(crate::ErrorCode::E2eeGroupTooManyMembers)
+        Some(crate::ErrorCode::Unknown("INVALID_CONTEXT".into()))
     );
+    assert!(!err.is_e2ee());
 }
