@@ -72,6 +72,11 @@ pub fn exception_type(path: &str) -> &'static str {
         "/CH3" | "/CH4" => "ChannelException",
         "/SQ1" => "SquareException",
         "/LIFF1" => "LiffException",
+        // Secondary QR login (`/acct/lgn/sq/v1`, its long poll
+        // `/acct/lp/lgn/sq/v1`, and the upper-case `/ACCT/…` form) has its
+        // own code enum (`y45/m` in the APK): 100 is INVALID_CONTEXT there,
+        // not a TalkException code.
+        p if p.to_ascii_lowercase().ends_with("/lgn/sq/v1") => "SecondaryQrCodeException",
         _ => "TalkException",
     }
 }
