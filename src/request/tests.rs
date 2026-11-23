@@ -670,3 +670,34 @@ async fn logout_of_an_ended_session_counts_as_done() {
     assert!(c.is_disabled());
     assert_eq!(seen.lock().unwrap().len(), 1);
 }
+
+#[test]
+fn qr_login_errors_decode_with_their_own_codes() {
+    use crate::thrift::{Schema, TValue, decode_struct};
+    for path in ["/acct/lgn/sq/v1", "/ACCT/lgn/sq/v1", "/acct/lp/lgn/sq/v1"] {
+        assert_eq!(exception_type(path), "SecondaryQrCodeException");
+    }
+    assert_eq!(exception_type("/S4"), "TalkException");
+    // What LINE sent in softnetics/line-rs#11: code 100 and a message.
+    let exc = TValue::Struct(vec![
+        (1, TValue::I32(100)),
+        (2, TValue::Binary(b"try again later".to_vec())),
+    ]);
+    let data = decode_struct(
+        Schema::line(),
+        Some(exception_type("/acct/lgn/sq/v1")),
+        &exc,
+    );
+    assert_eq!(data["code"].as_str(), Some("INVALID_CONTEXT"));
+    assert_eq!(data["alertMessage"].as_str(), Some("try again later"));
+    let err = Error::Request {
+        method: "qrCodeLoginV2ForSecure".into(),
+        path: "/acct/lgn/sq/v1".into(),
+        data,
+    };
+    assert_eq!(err.code(), Some("INVALID_CONTEXT"));
+    assert_ne!(
+        err.error_code(),
+        Some(crate::ErrorCode::E2eeGroupTooManyMembers)
+    );
+}
