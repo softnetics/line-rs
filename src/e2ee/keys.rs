@@ -712,6 +712,24 @@ impl<'a> E2ee<'a> {
             .await
             .ok_or_else(no_e2ee_key)?;
         let self_private = self_key.private_key();
+        // Members unwrap the group key with the public key LINE lists for
+        // our key id. If the private key stored under that id is another
+        // pair (a slot left over from an older login), every member would
+        // get a key they can't unwrap and the whole group would stop
+        // opening, on every device. Don't create one.
+        let listed = key_data_of(&public_keys[mid.as_str()], &mid)?;
+        if !crypto::verify_key_pair(&self_private, listed) {
+            self.log(
+                "registerE2EEGroupKeySkipped",
+                serde_json::json!({"reason": "ownKeyMismatch", "keyId": self_key_id}),
+            );
+            return Err(Error::internal(
+                "E2EEKeyMismatch",
+                format!(
+                    "our stored key {self_key_id} does not match the public key LINE lists for it; no group key was created"
+                ),
+            ));
+        }
         let group_private = crypto::random_bytes(32);
 
         let (mut members, mut key_ids, mut wrapped) = (Vec::new(), Vec::new(), Vec::new());
@@ -726,11 +744,21 @@ impl<'a> E2ee<'a> {
             key_ids.push(Value::Int(key_id_of(&key["keyId"]).unwrap_or_default()));
             members.push(Value::String(member));
         }
+        let count = members.len();
         let mut args = crate::tv!({"keyVersion": 1, "chatMid": chat_mid});
         args.insert("members", Value::List(members));
         args.insert("keyIds", Value::List(key_ids));
         args.insert("encryptedSharedKeys", Value::List(wrapped));
-        self.host.register_e2ee_group_key(args).await
+        let registered = self.host.register_e2ee_group_key(args).await?;
+        self.log(
+            "registerE2EEGroupKeySuccess",
+            serde_json::json!({
+                "groupKeyId": key_id_of(&registered["groupKeyId"]),
+                "creatorKeyId": self_key_id,
+                "members": count,
+            }),
+        );
+        Ok(registered)
     }
 
     /// Generate a key pair and register its public key; the new generation is
@@ -1502,6 +1530,27 @@ pub(crate) mod tests {
                 "getLastE2EEPublicKeys",
                 "registerE2EEGroupKey"
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn no_group_key_is_created_with_a_mismatched_own_key() {
+        let (mut host, _) = recreate_fixture().await;
+        // LINE lists another public key for our key 5.
+        let mut own = tv!({"keyId": 5});
+        own.insert("keyData", Value::Binary(crypto::generate_key_pair().1));
+        host.last_public_keys = Some(Value::Map(vec![("u-self".into(), own)]));
+        let state = E2eeState::default();
+        let err = E2ee::new(&host, &state)
+            .try_register_group_key(GROUP)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("E2EEKeyMismatch"), "{err}");
+        assert!(
+            !host
+                .calls()
+                .iter()
+                .any(|(n, _)| n == "registerE2EEGroupKey")
         );
     }
 
