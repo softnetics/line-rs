@@ -54,6 +54,21 @@ impl E2eeKey {
     }
 }
 
+/// Whether this device holds the account's newest Letter Sealing key
+/// ([`BaseClient::e2ee_key_status`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum E2eeKeyStatus {
+    /// This device holds the newest key LINE lists for the account.
+    Current { key_id: i64 },
+    /// LINE lists a newer key than any held here (`held`, if any). Messages
+    /// sealed to `newest` don't open on this device; a secondary device
+    /// gets the key only from a new QR login, which carries the phone's
+    /// key chain.
+    Stale { held: Option<i64>, newest: i64 },
+    /// LINE lists no key for the account: Letter Sealing is off for it.
+    NoAccountKey,
+}
+
 /// A group's shared key for one generation (`e2eeGroupKeys:*`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -843,6 +858,35 @@ impl<'a> E2ee<'a> {
         self.state.confirmed_keys.lock().unwrap().clear();
         self.state.unresolvable.clear();
         Ok(Some((key, selected.private_key, selected.public_key)))
+    }
+
+    /// Whether this device can open messages sealed to the account's newest
+    /// key: compares the keys LINE lists for the account
+    /// (`getE2EEPublicKeys`) with the generations stored here. A stored key
+    /// counts only when its private key matches the listed public key.
+    /// Fails only when LINE can't be asked.
+    pub async fn key_status(&self) -> Result<E2eeKeyStatus> {
+        let keys = self.host.get_e2ee_public_keys().await?;
+        let mut newest: Option<i64> = None;
+        let mut held: Option<i64> = None;
+        for k in keys.as_list().unwrap_or_default() {
+            let Some(id) = key_id_of(field(k, "keyId", 2)) else {
+                continue;
+            };
+            newest = newest.max(Some(id));
+            let Some(data) = field(k, "keyData", 4).as_bytes() else {
+                continue;
+            };
+            let ours = self.get_self_key_by_key_id(id).await;
+            if ours.is_some_and(|key| crypto::verify_key_pair(&key.private_key(), data)) {
+                held = held.max(Some(id));
+            }
+        }
+        Ok(match (newest, held) {
+            (None, _) => E2eeKeyStatus::NoAccountKey,
+            (Some(n), Some(h)) if h == n => E2eeKeyStatus::Current { key_id: n },
+            (Some(n), held) => E2eeKeyStatus::Stale { held, newest: n },
+        })
     }
 
     /// Check the key chosen at login against the server. Fails only on a
@@ -1637,6 +1681,90 @@ pub(crate) mod tests {
         e2ee.decode_key_v1(&data, &secret).await.unwrap();
         e2ee.verify_login_key().await.unwrap();
         assert!(state.login_key.lock().unwrap().is_none());
+    }
+
+    async fn key_status_with(held: &[i64], listed: &[i64]) -> Result<E2eeKeyStatus> {
+        let mut host = FakeHost::new();
+        let mut listed_keys = Vec::new();
+        for &id in listed {
+            let (private, public) = crypto::generate_key_pair();
+            if held.contains(&id) {
+                let key = serde_json::json!({"keyId": id, "privKey": b64(&private), "pubKey": b64(&public)});
+                host.set(&format!("e2eeKeys:{id}"), key.to_string()).await;
+            }
+            let mut pk = tv!({"keyId": id});
+            pk.insert("keyData", Value::Binary(public));
+            listed_keys.push(pk);
+        }
+        // A key held under an id LINE lists, but not the one it lists.
+        for &id in held.iter().filter(|id| !listed.contains(id)) {
+            let (private, public) = crypto::generate_key_pair();
+            let key =
+                serde_json::json!({"keyId": id, "privKey": b64(&private), "pubKey": b64(&public)});
+            host.set(&format!("e2eeKeys:{id}"), key.to_string()).await;
+        }
+        host.public_keys = Some(listed_keys);
+        let state = E2eeState::default();
+        E2ee::new(&host, &state).key_status().await
+    }
+
+    #[tokio::test]
+    async fn key_status_compares_held_keys_with_the_server() {
+        use E2eeKeyStatus::*;
+        assert_eq!(
+            key_status_with(&[10], &[10]).await.unwrap(),
+            Current { key_id: 10 }
+        );
+        assert_eq!(
+            key_status_with(&[10, 20], &[10, 20]).await.unwrap(),
+            Current { key_id: 20 }
+        );
+        assert_eq!(
+            key_status_with(&[10], &[10, 20]).await.unwrap(),
+            Stale {
+                held: Some(10),
+                newest: 20
+            }
+        );
+        assert_eq!(
+            key_status_with(&[], &[20]).await.unwrap(),
+            Stale {
+                held: None,
+                newest: 20
+            }
+        );
+        assert_eq!(key_status_with(&[], &[]).await.unwrap(), NoAccountKey);
+    }
+
+    #[tokio::test]
+    async fn key_status_ignores_a_held_key_that_does_not_match() {
+        // Key 10 is stored, but LINE's key 10 is a different pair.
+        let mut host = FakeHost::new();
+        let (private, public) = crypto::generate_key_pair();
+        let key =
+            serde_json::json!({"keyId": 10, "privKey": b64(&private), "pubKey": b64(&public)});
+        host.set("e2eeKeys:10", key.to_string()).await;
+        let mut pk = tv!({"keyId": 10});
+        pk.insert("keyData", Value::Binary(crypto::generate_key_pair().1));
+        host.public_keys = Some(vec![pk]);
+        let state = E2eeState::default();
+        assert_eq!(
+            E2ee::new(&host, &state).key_status().await.unwrap(),
+            E2eeKeyStatus::Stale {
+                held: None,
+                newest: 10
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn key_status_fails_when_line_cannot_be_asked() {
+        let host = FakeHost {
+            public_keys: None,
+            ..FakeHost::new()
+        };
+        let state = E2eeState::default();
+        assert!(E2ee::new(&host, &state).key_status().await.is_err());
     }
 
     #[tokio::test]

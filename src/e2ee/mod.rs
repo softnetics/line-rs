@@ -38,7 +38,7 @@ pub use crypto::{
     sha256_sum, verify_key_pair, xor,
 };
 pub use exchange::{E2eeOpKind, E2eeOperation};
-pub use keys::{E2eeKey, GroupKey};
+pub use keys::{E2eeKey, E2eeKeyStatus, GroupKey};
 pub use media::{
     ChunkHashes, ChunkedHmacValidator, EncryptedMedia, MediaHmacVersion, decrypt_media,
     encrypt_media,
@@ -141,6 +141,14 @@ impl BaseClient {
     /// otherwise (the client does on E2EE key operations).
     pub fn forget_unresolvable_e2ee_keys(&self) {
         self.e2ee.unresolvable.clear();
+    }
+
+    /// Whether this device holds the account's newest Letter Sealing key.
+    /// Asks LINE for the account's keys (`getE2EEPublicKeys`) and fails
+    /// only when it can't. Use it after a login, and again when keys change
+    /// ([`TalkEvent::E2eeKeysChanged`](crate::client::TalkEvent)).
+    pub async fn e2ee_key_status(&self) -> Result<E2eeKeyStatus> {
+        self.e2ee().key_status().await
     }
 
     /// Verify the key selected at login against the server-registered public
