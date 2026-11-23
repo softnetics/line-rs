@@ -497,8 +497,16 @@ impl BaseClient {
             check_login_key_chain(e2ee_info, secret, method, SQR_PATH)?;
             decoded = self.decode_e2ee_key_v1(e2ee_info, secret).await?;
         }
+        // No key chain: the phone shared no Letter Sealing key. The Android
+        // app never registers a key on a secondary device, and registering
+        // one here would make it the account's newest key, which the phone
+        // and other devices don't hold: messages sealed to it would open
+        // nowhere else. Log in without a key; `e2ee_key_status` reports it.
         if decoded.is_none() {
-            self.register_e2ee_key_pair().await?;
+            self.log(
+                "e2ee",
+                serde_json::json!({"type": "loginWithoutKeyChain", "method": method}),
+            );
         }
         Ok(())
     }
@@ -1121,6 +1129,23 @@ mod tests {
         assert_eq!(field(req, 3), Some(&s("Test Mac")));
         assert_eq!(field(req, 4), Some(&TValue::Bool(true)));
         assert_eq!(field(req, 5), Some(&s("nonce")));
+    }
+
+    #[tokio::test]
+    async fn login_without_key_chain_registers_no_key() {
+        let base = BaseClient::builder(Device::DesktopMac).build().unwrap();
+        let mut events = base.subscribe();
+        base.finish_e2ee_login(&Value::Null, &[0; 32], "qrCodeLoginV2ForSecure")
+            .await
+            .unwrap();
+        let mut kinds = Vec::new();
+        while let Ok(ev) = events.try_recv() {
+            if let ClientEvent::Log { kind, data } = ev {
+                kinds.push(format!("{kind}:{}", data["type"]));
+            }
+        }
+        assert_eq!(kinds, ["e2ee:\"loginWithoutKeyChain\""]);
+        assert!(base.storage.get_all().await.unwrap().is_empty());
     }
 
     #[test]
