@@ -1696,7 +1696,7 @@ pub(crate) mod tests {
             pk.insert("keyData", Value::Binary(public));
             listed_keys.push(pk);
         }
-        // A key held under an id LINE lists, but not the one it lists.
+        // Keys held under ids LINE doesn't list (an older generation).
         for &id in held.iter().filter(|id| !listed.contains(id)) {
             let (private, public) = crypto::generate_key_pair();
             let key =
@@ -1734,6 +1734,13 @@ pub(crate) mod tests {
             }
         );
         assert_eq!(key_status_with(&[], &[]).await.unwrap(), NoAccountKey);
+        assert_eq!(
+            key_status_with(&[30], &[20]).await.unwrap(),
+            Stale {
+                held: None,
+                newest: 20
+            }
+        );
     }
 
     #[tokio::test]
